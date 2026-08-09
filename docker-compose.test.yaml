@@ -1,0 +1,81 @@
+# Immich v3.1.0 test instance for developing/verifying immich-compressor.
+# Derived from the official docker-compose.yml of the v3.1.0 release.
+#
+# Host ports are bound to the container's routable address (see COMPOSE_BIND_IP,
+# default 172.25.0.2) instead of 0.0.0.0, as required by the environment rules.
+#
+#   docker compose --env-file testinstance/.env -f docker-compose.test.yaml up -d
+#
+name: immich-test
+
+services:
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-v3.1.0}
+    volumes:
+      - ./testinstance/library:/data
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - testinstance/.env
+    ports:
+      - '${COMPOSE_BIND_IP:-172.25.0.2}:2283:2283'
+    depends_on:
+      - redis
+      - database
+    restart: unless-stopped
+    healthcheck:
+      disable: false
+
+  # Machine learning is intentionally disabled by default: it costs ~2 GB RAM and
+  # significant CPU, and this container only has 2 vCPU / 8 GiB. Enable with
+  # `--profile ml` if you want to test the `skip_if_named_people` guard end to end.
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-v3.1.0}
+    profiles: ['ml']
+    volumes:
+      - model-cache:/cache
+    env_file:
+      - testinstance/.env
+    restart: unless-stopped
+    healthcheck:
+      disable: false
+
+  redis:
+    container_name: immich_redis
+    image: docker.io/valkey/valkey:9@sha256:8e8d64b405ce18f41b8e5ee20aa4687a8ed0022d1298f2ce31cdcf3a76e09411
+    healthcheck:
+      test: redis-cli ping || exit 1
+    restart: unless-stopped
+
+  database:
+    container_name: immich_postgres
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-immichtestpw}
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_DB: ${DB_DATABASE_NAME:-immich}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    volumes:
+      - ./testinstance/postgres:/var/lib/postgresql/data
+    shm_size: 128mb
+    restart: unless-stopped
+    healthcheck:
+      disable: false
+
+  # Records every webhook request verbatim to /out/webhook-capture.jsonl.
+  # Only used while verifying the workflow payload shape.
+  webhook-echo:
+    container_name: immich_webhook_echo
+    image: python:3.12-alpine
+    profiles: ['echo']
+    volumes:
+      - ./testinstance/echo:/app
+    working_dir: /app
+    command: ['python', '/app/echo_server.py']
+    ports:
+      - '${COMPOSE_BIND_IP:-172.25.0.2}:8099:8099'
+    restart: unless-stopped
+
+volumes:
+  model-cache:

@@ -1,0 +1,85 @@
+# immich-compressor configuration.
+#
+# Secrets are NOT read from this file — they come from the environment only:
+#   IMMICH__API_KEY   the Immich API key (x-api-key)
+#   WEBHOOK__TOKEN    the shared secret; must equal `headerValue` in the workflow step
+# Setting either of them here makes the service refuse to start.
+#
+# Any value below can also be overridden by an env var using `__` as the nesting
+# separator, e.g. BEHAVIOR__DRY_RUN=false, IMMICH__BASE_URL=http://host:2283/api.
+
+immich:
+  base_url: http://immich-server:2283/api
+  timeout_s: 120
+  connect_timeout_s: 10
+
+webhook:
+  # Must match `headerName` in the workflow's webhook step.
+  header_name: X-Compressor-Token
+
+behavior:
+  # ---- Shipping defaults: the service observes and reports, it changes nothing. ----
+  dry_run: true            # true = download/encode nothing, upload nothing, delete nothing
+  trash_original: false    # false = originals are never trashed, only reported
+  # ---------------------------------------------------------------------------------
+
+  retention_days: 7          # how long an original survives after being replaced
+  initial_delay_seconds: 300 # let Immich finish thumbnails/ML/OCR before we touch the asset
+  concurrency: 1             # 2 vCPU box: one ffmpeg at a time
+  max_attempts: 3
+  poll_interval_seconds: 5
+
+  min_size_bytes: 20971520   # 20 MiB — below this the effort is not worth it
+  max_ratio: 0.6             # reject the result unless it is <= 60 % of the original
+  enabled_types: [VIDEO]
+  skip_if_named_people: true # never risk losing manually named faces
+
+  duration_tolerance_s: 0.5
+  require_same_resolution: true
+  require_date_time_original: true
+
+  work_dir: /var/tmp/immich-compressor
+  free_space_factor: 3.0     # need 3x the source size free before starting
+
+  compressed_marker: .cmp    # ends up in the filename AND in the workflow regex filter
+  metadata_key: compressor   # asset-metadata KV key used as the idempotency marker
+
+database_path: /var/lib/immich-compressor/state.db
+listen_host: 0.0.0.0
+listen_port: 8080
+log_level: INFO
+
+presets:
+  # `-threads 2` / `pools=2` matter: x265 sizes its thread pool from the host core
+  # count and happily ignores a cgroup CPU limit, which starves everything else.
+  video-h265:
+    match: { type: VIDEO }
+    cmd: >
+      ffmpeg -y -loglevel error -i {input}
+      -map_metadata 0 -map 0 -movflags use_metadata_tags+faststart
+      -c:v libx265 -preset medium -crf 26 -tag:v hvc1
+      -x265-params pools=2 -threads 2
+      -c:a aac -b:a 128k
+      {output}
+    suffix: .mp4
+    timeout_s: 7200
+
+  # ImageMagick, not cjpegli: Debian/Ubuntu package libjxl-tools WITHOUT the cjpegli
+  # binary (0.11.2 in trixie ships only cjxl/djxl/jxlinfo), so the plan's `cjpegli`
+  # preset cannot run on the stock image. See the README if you want to build libjxl
+  # from source; then swap in the commented preset below.
+  # `-strip` is deliberately absent — exiftool_copy restores metadata afterwards, but
+  # keeping the ICC profile through the encode gives better colour.
+  image-magick:
+    match: { type: IMAGE }
+    cmd: convert {input} -quality 82 -sampling-factor 4:2:0 {output}
+    suffix: .jpg
+    exiftool_copy: true   # a still loses ALL metadata on re-encode without this
+    timeout_s: 900
+
+  # Requires a self-built libjxl >= 0.9. Keep only one IMAGE preset active.
+  # image-jpegli:
+  #   match: { type: IMAGE }
+  #   cmd: cjpegli {input} {output} -q 88
+  #   suffix: .jpg
+  #   exiftool_copy: true

@@ -1,0 +1,17 @@
+# Local runtime config — holds no secrets by design, but is deployment-specific.
+config.yaml
+
+# Test instance: Immich's own data, media, captured credentials and scratch state.
+# Everything in here is local-only; the sample env file is the single exception.
+testinstance/*
+!testinstance/example.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/

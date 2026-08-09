@@ -1,0 +1,49 @@
+# immich-compressor service.
+#
+# Attach it to the network your Immich stack already uses so the workflow webhook can
+# reach it by service name and it can reach immich-server the same way. Adjust
+# `networks.immich.name` to your Immich compose project's network.
+#
+#   cp config.example.yaml config.yaml
+#   export IMMICH_API_KEY=...  COMPRESSOR_TOKEN=...
+#   docker compose up -d
+#
+name: immich-compressor
+
+services:
+  immich-compressor:
+    build: .
+    image: immich-compressor:1.0.0
+    container_name: immich-compressor
+    restart: unless-stopped
+    environment:
+      # Secrets come from the environment only; never from config.yaml.
+      IMMICH__API_KEY: ${IMMICH_API_KEY:?IMMICH_API_KEY is required}
+      WEBHOOK__TOKEN: ${COMPRESSOR_TOKEN:?COMPRESSOR_TOKEN is required}
+      IMMICH__BASE_URL: ${IMMICH_BASE_URL:-http://immich-server:2283/api}
+      # Uncomment only after a dry run has been reviewed.
+      # BEHAVIOR__DRY_RUN: "false"
+      # BEHAVIOR__TRASH_ORIGINAL: "false"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - compressor-state:/var/lib/immich-compressor
+      - compressor-work:/var/tmp/immich-compressor
+    # 2 vCPU box: one ffmpeg run must not be able to starve Immich itself.
+    cpus: 1.5
+    mem_limit: 2g
+    pids_limit: 512
+    # No host port by default — Immich reaches the service over the shared network.
+    # Publish deliberately (and never on 0.0.0.0) if you want /stats from outside:
+    # ports:
+    #   - '127.0.0.1:8080:8080'
+    networks:
+      - immich
+
+networks:
+  immich:
+    external: true
+    name: ${IMMICH_NETWORK:-immich_default}
+
+volumes:
+  compressor-state:
+  compressor-work:
