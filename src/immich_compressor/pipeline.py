@@ -321,10 +321,12 @@ class Pipeline:
             )
 
         # --- Step 8: make the carry-over deterministic ---------------------------
-        # `PUT /assets/copy` already transfers tags, description, rating and GPS in
-        # v3.1.0 (contrary to the plan), but it is order-sensitive against the metadata
-        # extraction job. Writing them explicitly is idempotent and makes the outcome
-        # independent of that race.
+        # `PUT /assets/copy` usually gets tags, description, rating and GPS across in
+        # v3.1.0, but only as a side effect of the copied XMP sidecar being re-extracted —
+        # it does not copy those fields directly. That path is silent when the source has
+        # no sidecar yet or `sidecar` is false, and it is order-sensitive against the
+        # metadata extraction job. Writing them explicitly is idempotent and makes the
+        # outcome independent of both.
         await self._apply_fields(asset, source_detail, new_asset_id)
         await self._apply_tags(asset, source_detail, new_asset_id)
         await self._store.update(asset_id, state=JobState.LINKED)

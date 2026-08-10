@@ -63,7 +63,7 @@ or time out the server.
 | 4 | Encode | preset command, no shell; `exiftool -TagsFromFile` for stills |
 | 5 | Sanity gate | size ratio, decodable, same resolution, duration ±0.5 s, same audio stream count, capture date present |
 | 6 | Upload | `POST /assets`, filename gets the `.cmp` marker |
-| 7 | Copy | `PUT /assets/copy` — albums, favourite, shared links, stack, sidecar (and, as it turns out, tags/description/rating/GPS) |
+| 7 | Copy | `PUT /assets/copy` — albums, favourite, shared links, stack, sidecar (the sidecar indirectly carries tags/description/rating/GPS, see below) |
 | 8 | Nudge | Re-reads the source, then `PUT /assets/{new}` for description/rating/GPS/date and `PUT /tags/assets` for tags — idempotent, and independent of the extraction race |
 | 9 | Markers | `compressor` metadata key on both assets — the hard loop guard |
 | 10 | Deferred trash | `delete_after = now + retention_days`, swept by a background task |
@@ -347,7 +347,7 @@ captured webhook payloads are committed as test fixtures in `tests/fixtures/`.
 | `exifInfo.tags` are names, not IDs | ✅ |
 | Upload fields: `assetData`, `fileCreatedAt`, `fileModifiedAt`, `filename`, `isFavorite`, `visibility`, `duration` | ✅; `deviceAssetId`/`deviceId` no longer exist in v3 |
 | `PUT /assets/copy` copies albums, favourite, shared links, stack, sidecar | ✅ |
-| `PUT /assets/copy` does **not** copy tags, description, rating, GPS | ❌ **wrong** — it does copy them (see below) |
+| `PUT /assets/copy` does **not** copy tags, description, rating, GPS | ⚠️ half right — no direct copy, but the copied XMP sidecar carries them (see below) |
 | `PUT /assets/copy` does not copy people/faces or the metadata KV | ✅ |
 | Asset metadata KV accepts free string keys and nested object values | ✅ |
 | Duplicate upload returns `{"status":"duplicate","id":<existing>}` | ✅ |
@@ -365,12 +365,29 @@ captured webhook payloads are committed as test fixtures in `tests/fixtures/`.
    null-tolerant, and the service logs its own 422s at ERROR level. If you write another
    webhook consumer for Immich, do the same: a silent 422 is indistinguishable from
    success.
-2. **`PUT /assets/copy` copies more than the plan assumed.** It carries tags, description,
-   rating **and** GPS across, not just albums/favourite/shared links/stack/sidecar. In one
-   ordering we still observed the values not sticking (the metadata-extraction race
-   below), so the pipeline writes them explicitly anyway — `PUT /tags/assets` and
-   `PUT /assets/{id}` are both idempotent, so the extra calls are free insurance rather
-   than duplication.
+2. **`PUT /assets/copy` moves tags, description, rating and GPS across — but through the
+   sidecar, not through a field copy.** `copy()` in `asset.service.ts` only calls
+   `copyAlbums`, `copySharedLinks`, `copyStack`, the `isFavorite` update and
+   `copySidecar`; there is no `copyTags` anywhere in the Immich source. What actually
+   happens is that `copySidecar` writes the source's XMP next to the new original,
+   registers it as a sidecar file and queues `AssetExtractMetadata` for the target — and
+   metadata extraction then reads those fields back out of the XMP. The XMP itself is
+   produced by the `SidecarWrite` job, which Immich queues on every tag/untag and every
+   metadata update, and which writes exactly `Description`, `ImageDescription`,
+   `DateTimeOriginal`, `GPSLatitude`, `GPSLongitude`, `Rating`, `TagsList` — precisely the
+   set we observed surviving.
+
+   The distinction matters, because the transfer silently does not happen when:
+   - `sidecar: false` is passed to the copy call;
+   - the source has no XMP yet — `copySidecar` returns early on a missing sidecar path,
+     which is the case if `SidecarWrite` has not run yet (e.g. copying immediately after
+     tagging);
+   - the field is not in that XMP list (people/faces, the metadata KV and album/stack
+     membership are handled elsewhere or not at all).
+
+   That is why step 8 exists. The explicit `PUT /assets/{id}` and `PUT /tags/assets` are
+   not redundant insurance — they are what makes the outcome deterministic instead of
+   dependent on sidecar state and job ordering.
 3. **The webhook payload is a snapshot, not current state.** It is produced when metadata
    extraction finishes, but the job runs `initial_delay_seconds` later (default 5 min) —
    long enough for the user to have added tags, a description or a rating in the UI.

@@ -273,8 +273,12 @@ class ImmichClient:
         """``PUT /assets/copy``.
 
         Verified against v3.1.0: copies album membership, favourite flag, shared links,
-        stack and sidecar. It does **not** copy tags, description, rating, GPS, people or
-        the metadata KV — those are handled separately by the pipeline.
+        stack and sidecar. Tags, description, rating and GPS are not copied as fields, but
+        ``copySidecar`` puts the source's XMP next to the new original and queues metadata
+        extraction for it, so in practice they usually come across as well. That path stays
+        silent when ``sidecar`` is false or the source has no XMP yet, which is why the
+        pipeline writes those fields explicitly afterwards. People/faces and the metadata
+        KV never transfer.
         """
         await self._request(
             "PUT",
