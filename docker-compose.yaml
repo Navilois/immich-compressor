@@ -15,7 +15,7 @@ services:
     build: .
     image: immich-compressor:1.0.0
     container_name: immich-compressor
-    restart: unless-stopped
+    #restart: unless-stopped
     environment:
       # Secrets come from the environment only; never from config.yaml.
       IMMICH__API_KEY: ${IMMICH_API_KEY:?IMMICH_API_KEY is required}
