@@ -50,12 +50,83 @@ listen_port: 8080
 log_level: INFO
 
 presets:
+  # ---------------------------------------------------------------------------------
+  # GPU encoding (Intel Quick Sync). Keep exactly ONE preset per type active — the first
+  # match wins. Before switching, prove the hardware is actually usable:
+  #
+  #   docker compose exec immich-compressor vainfo --display drm --device /dev/dri/renderD128
+  #     -> needs `VAProfileHEVCMain : VAEntrypointEncSlice` ("--display drm" is required
+  #        on a headless host; plain vainfo tries X11 and fails for unrelated reasons)
+  #   docker compose exec immich-compressor immich-compressor check
+  #     -> encodes one frame through the preset's encoder and exits non-zero if it fails
+  #
+  # Chip generation decides the encoder. Debian trixie dropped libmfx1, so the legacy
+  # MSDK path is gone: Gen12+ (Tiger Lake, Alder/Raptor Lake, N100, Arc) uses hevc_qsv,
+  # Gen9-11 (<= 10th gen Core) has to use hevc_vaapi.
+  #
+  # video-h265-qsv:
+  #   match: { type: VIDEO }
+  #   cmd: >
+  #     ffmpeg -y -loglevel error -noautorotate
+  #     -hwaccel qsv -qsv_device /dev/dri/renderD128 -i {input}
+  #     -map 0 -map_metadata 0 -movflags use_metadata_tags+faststart
+  #     -c:v hevc_qsv -preset slower -global_quality 26
+  #     -extbrc 1 -look_ahead_depth 40 -adaptive_i 1 -adaptive_b 1 -b_strategy 1
+  #     -bf 3 -g 250 -tag:v hvc1
+  #     -c:a copy
+  #     {output}
+  #   suffix: .mp4
+  #   timeout_s: 3600
+  #
+  # Why these flags:
+  #   -global_quality 26   ICQ, the QSV equivalent of CRF. Sweet spot for HEVC is 22-28.
+  #                        Verify with scripts/calibrate.sh that the size actually reacts
+  #                        to this number — in low-power (VDENC) mode some chips ignore
+  #                        ICQ silently, and then you are calibrating against a constant.
+  #   -extbrc 1            lookahead only takes effect with extended bitrate control;
+  #                        -look_ahead_depth alone is a no-op.
+  #   -preset slower       target usage 2. Nearly free on an iGPU: the fixed-function
+  #                        block is the limit, not compute time.
+  #   -c:a copy            re-encoding AAC to AAC is pure loss for no gain. Use
+  #                        `-c:a aac -b:a 128k` only if your sources carry PCM audio.
+  #   no -pix_fmt          8-bit sources produce Main, 10-bit/HDR sources produce Main10
+  #                        automatically. Forcing 8 bit would flatten HDR without tone
+  #                        mapping — washed out, and irreversible once the original is
+  #                        gone. The sanity gate rejects that, but better not to ask.
+  #   no -hwaccel_output_format qsv
+  #                        frames go through system memory. Costs a few percent on an
+  #                        iGPU and buys a software-decode fallback for sources the chip
+  #                        cannot decode (MJPEG-AVI, old DivX, 10-bit VP9), which would
+  #                        otherwise fail the job outright.
+  #
+  # Gen9-11 fallback. Note the missing `-map 0`: the filter chain does not survive extra
+  # streams, so subtitle/data tracks are dropped here.
+  # video-h265-vaapi:
+  #   match: { type: VIDEO }
+  #   cmd: >
+  #     ffmpeg -y -loglevel error -noautorotate
+  #     -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -i {input}
+  #     -vf format=nv12|vaapi,hwupload
+  #     -map_metadata 0 -movflags use_metadata_tags+faststart
+  #     -c:v hevc_vaapi -rc_mode ICQ -global_quality 26 -bf 3 -g 250 -tag:v hvc1
+  #     -c:a copy
+  #     {output}
+  #   suffix: .mp4
+  #   timeout_s: 3600
+  # ---------------------------------------------------------------------------------
+
   # `-threads 2` / `pools=2` matter: x265 sizes its thread pool from the host core
   # count and happily ignores a cgroup CPU limit, which starves everything else.
+  #
+  # `-noautorotate` is not cosmetic. Without it ffmpeg bakes the display matrix of a
+  # portrait clip into the pixels and drops the matrix, so a 1920x1080+rot90 source comes
+  # out as 1080x1920+rot0. The picture is fine, but the stored size changed — and with a
+  # full-GPU pipeline (-hwaccel_output_format) the rotate filter cannot run at all,
+  # because it does not accept hardware frames. Keeping the matrix avoids both.
   video-h265:
     match: { type: VIDEO }
     cmd: >
-      ffmpeg -y -loglevel error -i {input}
+      ffmpeg -y -loglevel error -noautorotate -i {input}
       -map_metadata 0 -map 0 -movflags use_metadata_tags+faststart
       -c:v libx265 -preset medium -crf 26 -tag:v hvc1
       -x265-params pools=2 -threads 2
@@ -70,11 +141,18 @@ presets:
   # from source; then swap in the commented preset below.
   # `-strip` is deliberately absent — exiftool_copy restores metadata afterwards, but
   # keeping the ICC profile through the encode gives better colour.
+  #
+  # `-auto-orient` + `normalize_orientation` belong together and fix a real trap: for
+  # HEIC the libheif decoder may already have applied the rotation, for JPEG it has not.
+  # `-auto-orient` is idempotent and settles that either way; pinning Orientation to 1
+  # afterwards stops exiftool from copying the source tag back onto pixels that are
+  # already upright, which would rotate the image a second time.
   image-magick:
     match: { type: IMAGE }
-    cmd: convert {input} -quality 82 -sampling-factor 4:2:0 {output}
+    cmd: convert {input} -auto-orient -quality 82 -sampling-factor 4:2:0 {output}
     suffix: .jpg
-    exiftool_copy: true   # a still loses ALL metadata on re-encode without this
+    exiftool_copy: true          # a still loses ALL metadata on re-encode without this
+    normalize_orientation: true  # requires -auto-orient above; validated at startup
     timeout_s: 900
 
   # Requires a self-built libjxl >= 0.9. Keep only one IMAGE preset active.

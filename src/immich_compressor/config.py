@@ -28,6 +28,10 @@ AssetType = Literal["IMAGE", "VIDEO", "AUDIO", "OTHER"]
 INPUT_PLACEHOLDER = "{input}"
 OUTPUT_PLACEHOLDER = "{output}"
 
+# Suffixes ffmpeg uses for encoders that need a GPU.
+HARDWARE_ENCODER_SUFFIXES = ("_qsv", "_vaapi", "_nvenc")
+DEFAULT_RENDER_NODE = "/dev/dri/renderD128"
+
 
 class ConfigError(RuntimeError):
     """Raised when the configuration is structurally invalid (fail fast at startup)."""
@@ -109,6 +113,10 @@ class Preset(BaseModel):
     # Copy EXIF/XMP from the source onto the output with exiftool after encoding.
     # Required for stills; ffmpeg's -map_metadata already handles containers.
     exiftool_copy: bool = False
+    # Keep the source's EXIF Orientation out of that copy and pin the output to 1.
+    # Only correct when the command normalises the pixels itself (`convert -auto-orient`),
+    # otherwise the image ends up rotated twice.
+    normalize_orientation: bool = False
     timeout_s: float = Field(default=3600.0, gt=0)
 
     @model_validator(mode="after")
@@ -130,7 +138,45 @@ class Preset(BaseModel):
                 )
         if not self.suffix.startswith("."):
             raise ConfigError(f"preset {self.name!r}: suffix must start with a dot")
+        if self.normalize_orientation:
+            if not self.exiftool_copy:
+                raise ConfigError(
+                    f"preset {self.name!r}: normalize_orientation needs exiftool_copy — "
+                    "without the metadata copy there is no orientation tag to correct"
+                )
+            if "-auto-orient" not in self.cmd:
+                raise ConfigError(
+                    f"preset {self.name!r}: normalize_orientation requires the command to "
+                    "normalise the pixels itself — add -auto-orient"
+                )
         return self
+
+    @property
+    def hardware_encoder(self) -> str | None:
+        """The GPU encoder this preset asks for, e.g. ``hevc_qsv`` — ``None`` for CPU.
+
+        Read from the token after ``-c:v`` rather than by scanning the whole command, so a
+        path that happens to end in ``_qsv`` cannot be mistaken for an encoder.
+        """
+        return self._value_after(("-c:v", "-codec:v", "-vcodec"), endswith=HARDWARE_ENCODER_SUFFIXES)
+
+    @property
+    def render_node(self) -> str:
+        """The DRM device the preset pins itself to, or the conventional default."""
+        return self._value_after(("-qsv_device", "-vaapi_device", "-hwaccel_device")) or (
+            DEFAULT_RENDER_NODE
+        )
+
+    def _value_after(
+        self, flags: tuple[str, ...], *, endswith: tuple[str, ...] | None = None
+    ) -> str | None:
+        tokens = shlex.split(self.cmd)
+        for index, token in enumerate(tokens[:-1]):
+            if token in flags:
+                value = tokens[index + 1]
+                if endswith is None or value.endswith(endswith):
+                    return value
+        return None
 
     def argv(self, input_path: Path, output_path: Path) -> list[str]:
         """Render the command template into an argv list. Never goes through a shell."""

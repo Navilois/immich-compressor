@@ -1,4 +1,4 @@
-"""CLI entry point: ``serve``, ``check``, ``encode``, ``report``, ``reprocess``, ``backfill``."""
+"""CLI: ``serve``, ``check``, ``encode``, ``report``, ``reprocess``, ``requeue``, ``backfill``."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 from .api import ImmichClient
 from .config import ConfigError, Settings, load_settings
-from .encoder import EncodeError, check_sanity, encode, probe
-from .models import JobState
+from .encoder import EncodeError, MediaProbe, check_sanity, encode, probe, probe_hardware_encoder
+from .models import JobState, SkipReason
 from .store import JobStore
 
 logger = logging.getLogger("immich_compressor")
@@ -66,7 +67,19 @@ async def _check(settings: Settings) -> int:
     print(f"Immich reachable, version {version}")
     print(f"presets: {', '.join(f'{p.name}({p.match_type})' for p in settings.presets) or 'none'}")
     print(f"dry_run={settings.behavior.dry_run} trash_original={settings.behavior.trash_original}")
-    return 0
+
+    unusable = 0
+    for preset in settings.presets:
+        encoder_name = preset.hardware_encoder
+        if encoder_name is None:
+            continue
+        problem = await probe_hardware_encoder(encoder_name, preset.render_node)
+        if problem is None:
+            print(f"  {preset.name}: {encoder_name} on {preset.render_node} ok")
+        else:
+            print(f"  {preset.name}: {encoder_name} on {preset.render_node} UNUSABLE — {problem}")
+            unusable += 1
+    return 1 if unusable else 0
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -82,7 +95,7 @@ async def _encode_local(settings: Settings, path: Path, asset_type: str) -> int:
         return 2
     work_dir = settings.behavior.work_dir
     work_dir.mkdir(parents=True, exist_ok=True)
-    source_probe = await probe(path)
+    source_probe = await probe(path, is_still=asset_type != "VIDEO")
     result = await encode(path, preset, work_dir)
     sanity = await check_sanity(
         source=path,
@@ -100,6 +113,8 @@ async def _encode_local(settings: Settings, path: Path, asset_type: str) -> int:
                 "orig_bytes": result.orig_bytes,
                 "new_bytes": result.new_bytes,
                 "ratio": round(result.ratio, 4),
+                "source_probe": _probe_summary(source_probe),
+                "output_probe": _probe_summary(result.probe),
                 "sanity_ok": sanity.ok,
                 "sanity_failures": sanity.failures,
             },
@@ -107,6 +122,22 @@ async def _encode_local(settings: Settings, path: Path, asset_type: str) -> int:
         )
     )
     return 0 if sanity.ok else 1
+
+
+def _probe_summary(probe_result: MediaProbe) -> dict[str, Any]:
+    """The fields you actually need when tuning a preset by hand."""
+    width, height = probe_result.display_size
+    return {
+        "display_size": f"{width}x{height}",
+        "stored_size": f"{probe_result.width}x{probe_result.height}",
+        "rotation": probe_result.rotation,
+        "pix_fmt": probe_result.pix_fmt,
+        "bit_depth": probe_result.bit_depth,
+        "color_transfer": probe_result.color_transfer,
+        "audio_streams": probe_result.audio_streams,
+        "duration_s": probe_result.duration_s,
+        "has_date_time_original": probe_result.has_date_time_original,
+    }
 
 
 def cmd_encode(args: argparse.Namespace) -> int:
@@ -170,6 +201,31 @@ def cmd_reprocess(args: argparse.Namespace) -> int:
     settings = _load(args)
     _configure_logging("WARNING")
     return asyncio.run(_reprocess(settings, args.asset_id))
+
+
+async def _requeue(settings: Settings, reason: SkipReason, apply: bool) -> int:
+    """Re-run assets that a *previous* version of a guard or the sanity gate rejected."""
+    async with JobStore(settings.database_path) as store:
+        asset_ids = await store.skipped_asset_ids(reason)
+        if not asset_ids:
+            print(f"no jobs skipped as {reason.value}")
+            return 0
+        if not apply:
+            for asset_id in asset_ids[:20]:
+                print(f"[dry] would re-queue {asset_id}")
+            if len(asset_ids) > 20:
+                print(f"[dry] ... and {len(asset_ids) - 20} more")
+            print(f"{len(asset_ids)} job(s) skipped as {reason.value} — pass --apply to re-queue")
+            return 0
+        await store.requeue_skipped(reason)
+    print(f"re-queued {len(asset_ids)} job(s) previously skipped as {reason.value}")
+    return 0
+
+
+def cmd_requeue(args: argparse.Namespace) -> int:
+    settings = _load(args)
+    _configure_logging(settings.log_level)
+    return asyncio.run(_requeue(settings, SkipReason(args.reason), args.apply))
 
 
 async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool) -> int:
@@ -270,6 +326,17 @@ def build_parser() -> argparse.ArgumentParser:
     reprocess_parser = sub.add_parser("reprocess", help="re-queue one asset")
     reprocess_parser.add_argument("asset_id")
     reprocess_parser.set_defaults(func=cmd_reprocess)
+
+    requeue_parser = sub.add_parser(
+        "requeue", help="re-queue every job that was skipped for one reason"
+    )
+    requeue_parser.add_argument(
+        "--reason",
+        default=SkipReason.NO_GAIN.value,
+        choices=[reason.value for reason in SkipReason],
+    )
+    requeue_parser.add_argument("--apply", action="store_true", help="actually re-queue (default: dry)")
+    requeue_parser.set_defaults(func=cmd_requeue)
 
     backfill_parser = sub.add_parser("backfill", help="queue existing large assets")
     backfill_parser.add_argument("--type", default="VIDEO", choices=["VIDEO", "IMAGE"])

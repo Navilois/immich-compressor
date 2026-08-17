@@ -112,3 +112,27 @@ def test_argv_does_not_interpret_filenames_as_arguments() -> None:
     argv = preset.argv(Path("/tmp/a; rm -rf ~.mov"), Path("/tmp/o.mp4"))
     assert argv[2] == "/tmp/a; rm -rf ~.mov"
     assert len(argv) == 4
+
+
+def test_hardware_encoder_and_render_node_are_read_from_the_command() -> None:
+    qsv = Preset(
+        name="qsv",
+        type="VIDEO",
+        cmd="ffmpeg -y -hwaccel qsv -qsv_device /dev/dri/renderD129 -i {input} "
+        "-c:v hevc_qsv -global_quality 26 {output}",
+        suffix=".mp4",
+    )
+    assert qsv.hardware_encoder == "hevc_qsv"
+    assert qsv.render_node == "/dev/dri/renderD129"
+
+
+def test_a_cpu_preset_reports_no_hardware_encoder() -> None:
+    """Only the token after -c:v counts — a stray mention cannot fake a GPU preset."""
+    cpu = Preset(
+        name="cpu",
+        type="VIDEO",
+        cmd="ffmpeg -y -i {input} -c:v libx265 -crf 26 -metadata comment=hevc_nvenc {output}",
+        suffix=".mp4",
+    )
+    assert cpu.hardware_encoder is None
+    assert cpu.render_node == "/dev/dri/renderD128"

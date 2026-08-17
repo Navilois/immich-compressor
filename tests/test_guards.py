@@ -8,7 +8,7 @@ import pytest
 
 from immich_compressor.config import Settings
 from immich_compressor.models import SkipReason, WebhookAsset, WebhookPayload
-from immich_compressor.pipeline import SkipJob, build_marker, check_guards
+from immich_compressor.pipeline import MARKER_VERSION, SkipJob, build_marker, check_guards
 
 
 def _asset(raw: dict[str, Any], **overrides: Any) -> WebhookAsset:
@@ -70,7 +70,7 @@ def test_marker_shape() -> None:
     assert marker.value["sourceId"] == "src"
     assert marker.value["replacedBy"] == "dst"
     assert marker.value["ratio"] == 0.4123
-    assert marker.value["v"] == 1
+    assert marker.value["v"] == MARKER_VERSION
     assert isinstance(marker.value["at"], str)
 
 

@@ -20,6 +20,7 @@ the public REST API.
 
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
+- [GPU encoding](#gpu-encoding)
 - [Setup](#setup)
   - [1. API key and permissions](#1-api-key-and-permissions)
   - [2. Configure the service](#2-configure-the-service)
@@ -60,16 +61,33 @@ or time out the server.
 | 1 | Delay | `initial_delay_seconds` (default 300) so Immich's own thumbnail/ML/OCR jobs finish first |
 | 2 | Guards | external library, edited, live photo, locked, trashed, wrong type, too small, existing marker, named people |
 | 3 | Download | `GET /assets/{id}/original`, streamed to a temp file, free space checked first |
-| 4 | Encode | preset command, no shell; `exiftool -TagsFromFile` for stills |
-| 5 | Sanity gate | size ratio, decodable, same resolution, duration ±0.5 s, same audio stream count, capture date present |
+| 4 | Encode | preset command, no shell; `exiftool -TagsFromFile` for stills, with the orientation normalised |
+| 5 | Sanity gate | size ratio, decodable, same display size (rotation-aware), no bit-depth or HDR loss, duration ±0.5 s, same audio stream count, capture date present |
 | 6 | Upload | `POST /assets`, filename gets the `.cmp` marker |
 | 7 | Copy | `PUT /assets/copy` — albums, favourite, shared links, stack, sidecar (the sidecar indirectly carries tags/description/rating/GPS, see below) |
 | 8 | Nudge | Re-reads the source, then `PUT /assets/{new}` for description/rating/GPS/date and `PUT /tags/assets` for tags — idempotent, and independent of the extraction race |
-| 9 | Markers | `compressor` metadata key on both assets — the hard loop guard |
+| 9 | Markers | `compressor` metadata key on both assets — the hard loop guard, versioned so a changed sanity gate can invalidate its own old verdicts |
 | 10 | Deferred trash | `delete_after = now + retention_days`, swept by a background task |
 
 Every step is idempotent and the state is persisted in SQLite, so a crash between upload
 and copy resumes rather than duplicating work.
+
+### Rotation and orientation
+
+A portrait phone clip is not stored as a portrait frame. It is coded 1920x1080 and carries
+a 90° display matrix that the player applies. Stills work the same way through EXIF
+`Orientation`. Two consequences, both verified against ffmpeg 7.1 and exiftool 13.25:
+
+| | Without the countermeasure | With it |
+|---|---|---|
+| **Video** | ffmpeg's default `-autorotate` bakes the rotation into the pixels and drops the matrix, so 1920x1080 comes out as 1080x1920 — and the sanity gate rejects the clip as a resolution change | `-noautorotate` keeps the matrix, the stored frame is untouched. Also required for a full-GPU pipeline, where the rotate filter cannot run on hardware frames |
+| **Still** | `convert -auto-orient` rotates the pixels, then `exiftool -all:all` copies the source `Orientation` back on top — the image ends up rotated twice | `normalize_orientation: true` keeps `Orientation` out of the copy and pins the output to 1 |
+
+The sanity gate therefore compares **display sizes**, not stored sizes: an encoder may keep
+the matrix or bake the rotation in, both are fine. What it rejects is the third case —
+pixels left unrotated *and* the matrix lost, which is the one that actually damages the
+picture. The same gate rejects a lost bit depth or a dropped HDR transfer function, so a
+10-bit HDR source can never be silently flattened to washed-out SDR.
 
 ---
 
@@ -84,6 +102,85 @@ and copy resumes rather than duplicating work.
   `config.example.yaml`.)
 - Network reachability in both directions: Immich must reach the service's `/webhook`,
   and the service must reach Immich's API.
+- **Optional: an Intel GPU** for the `*_qsv` / `*_vaapi` presets. See
+  [GPU encoding](#gpu-encoding).
+
+---
+
+## GPU encoding
+
+Optional. The CPU preset is the default because it works everywhere; the GPU presets sit
+commented out in `config.example.yaml`, ready to swap in.
+
+### Which encoder your chip needs
+
+Debian trixie dropped `libmfx1`, and the bundled ffmpeg is built `--disable-libmfx
+--enable-libvpl`. It therefore reaches the GPU through oneVPL only, which splits the field:
+
+| Generation | Examples | Preset |
+|---|---|---|
+| Gen12 and newer | Tiger Lake, Alder/Raptor Lake, N100, Arc | `video-h265-qsv` (`hevc_qsv`) |
+| Gen9–11 (≤ 10th gen Core) | i5-8500, i7-10700, UHD 630 | `video-h265-vaapi` (`hevc_vaapi`) |
+
+### Wiring
+
+The image ships the iHD driver and the oneVPL runtime. `docker-compose.yaml` passes
+`/dev/dri` through and adds the host's render group — the container runs as uid 10001 and
+cannot open `renderD128` without it:
+
+```bash
+RENDER_GID=$(getent group render | cut -d: -f3) docker compose up -d
+```
+
+A missing render group looks exactly like a broken driver in the logs. It is not.
+
+### Proving it works, in three steps
+
+```bash
+docker compose exec immich-compressor vainfo --display drm --device /dev/dri/renderD128
+```
+
+Needs `VAProfileHEVCMain : VAEntrypointEncSlice` in the output. If that line is absent,
+nothing below will help. (`--display drm` is not optional on a headless host — plain
+`vainfo` tries X11 first and fails with "can't connect to X server", which says nothing
+about the GPU.)
+
+```bash
+docker compose exec immich-compressor immich-compressor check
+```
+
+`check` encodes a single frame through each preset's encoder and exits non-zero if one is
+unusable, naming the reason. `serve` runs the same probe at startup and logs a warning
+rather than refusing to start, so a device that comes back after a host reboot recovers on
+its own.
+
+```bash
+docker compose exec immich-compressor immich-compressor encode --type VIDEO /path/clip.mp4
+```
+
+Prints ratio, sanity verdict, and the display size and rotation of input and output.
+
+### Picking the quality number
+
+`scripts/calibrate.sh` sweeps the quality knob over your own files and prints size ratio
+and SSIM per setting:
+
+```bash
+ENCODER=hevc_qsv scripts/calibrate.sh /path/clip1.mov /path/clip2.mp4
+```
+
+Take the **highest** quality number that still holds SSIM ≥ 0.98 and a ratio ≤ your
+`max_ratio`. The script also warns when the output size barely moves across the sweep —
+on some Intel chips ICQ is not implemented in low-power (VDENC) mode and `-global_quality`
+is silently ignored, which would otherwise leave you calibrating against a constant.
+
+Expect QSV HEVC on Gen12+/Arc to land between NVENC and CPU x265 in quality per byte.
+`max_ratio: 0.6` stays realistic for H.264 sources; footage that is *already* HEVC (iPhone
+11 and newer) will often fail the gate instead of shrinking. That is the gate working, not
+a defect.
+
+Keep `concurrency: 1`. An iGPU has one fixed-function encode block, and Immich's own
+transcoding competes for the same `/dev/dri`.
 
 ---
 
@@ -257,13 +354,35 @@ CLI (inside the container, or locally with `COMPRESSOR_CONFIG` set):
 immich-compressor check                    # config + connectivity
 immich-compressor encode /path/clip.mp4    # run a preset offline, print ratio + gate result
 immich-compressor report [--json]          # job statistics
-immich-compressor reprocess <assetId>      # re-queue
+immich-compressor reprocess <assetId>      # re-queue one asset
+immich-compressor requeue --reason no_gain [--apply]   # re-queue everything skipped for one reason
 immich-compressor backfill --type VIDEO --limit 50 [--apply]
 immich-compressor restore <assetId> ...    # pull originals back out of the trash
 ```
 
 `encode` is the way to tune a preset: it never talks to Immich, it just runs the command
 and the sanity gate against a local file.
+
+`requeue` exists because a changed gate leaves its old verdicts behind: those assets sit in
+`skipped` locally and no webhook will ever fire for them again. It re-queues them in bulk,
+dry by default.
+
+### Upgrading from marker v1
+
+The `compressor` metadata marker carries a version. v1 was written by a sanity gate that
+compared stored frame sizes and therefore rejected **every rotated video** as a resolution
+change — see [Rotation and orientation](#rotation-and-orientation). Those assets carry a
+marker that would normally block them forever, so v2 treats a v1 marker *without* a
+`replacedBy` field as stale and gives the asset one more attempt under the current gate. A
+marker that records a real replacement always blocks, at any version.
+
+The service heals itself for anything that gets triggered again; to sweep the existing
+backlog after upgrading:
+
+```bash
+immich-compressor requeue --reason no_gain          # look first
+immich-compressor requeue --reason no_gain --apply
+```
 
 ### Job states
 

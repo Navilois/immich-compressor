@@ -76,6 +76,41 @@ async def test_reset_requeues(tmp_path: Path) -> None:
         assert await store.reset("nope") is False
 
 
+async def test_requeue_skipped_only_touches_the_named_reason(tmp_path: Path) -> None:
+    """After a gate changes, its old verdicts have to be re-run — but nothing else."""
+    async with JobStore(tmp_path / "s.db") as store:
+        for asset_id, reason in (
+            ("no-gain-1", SkipReason.NO_GAIN),
+            ("no-gain-2", SkipReason.NO_GAIN),
+            ("too-small", SkipReason.TOO_SMALL),
+        ):
+            await store.enqueue(asset_id, PAYLOAD, delay_seconds=0)
+            await store.mark_skipped(asset_id, reason)
+        await store.enqueue("done", PAYLOAD, delay_seconds=0)
+        await store.update("done", state=JobState.DONE)
+
+        assert await store.skipped_asset_ids(SkipReason.NO_GAIN) == ["no-gain-1", "no-gain-2"]
+
+        requeued = await store.requeue_skipped(SkipReason.NO_GAIN)
+        assert sorted(requeued) == ["no-gain-1", "no-gain-2"]
+
+        for asset_id in requeued:
+            job = await store.get(asset_id)
+            assert job is not None
+            assert job.state is JobState.QUEUED
+            assert job.skip_reason is None
+            assert job.attempts == 0
+
+        untouched = await store.get("too-small")
+        assert untouched is not None
+        assert untouched.state is JobState.SKIPPED
+        assert untouched.skip_reason is SkipReason.TOO_SMALL
+        assert (await store.get("done")).state is JobState.DONE  # type: ignore[union-attr]
+
+        # Second run has nothing left to do.
+        assert await store.requeue_skipped(SkipReason.NO_GAIN) == []
+
+
 async def test_due_deletions(tmp_path: Path) -> None:
     async with JobStore(tmp_path / "s.db") as store:
         await store.enqueue("late", PAYLOAD, delay_seconds=0)

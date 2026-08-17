@@ -227,6 +227,25 @@ class JobStore:
         await self._conn.commit()
         return cursor.rowcount > 0
 
+    async def requeue_skipped(self, reason: SkipReason) -> list[str]:
+        """Put every job skipped for ``reason`` back into the queue.
+
+        Needed whenever a guard or the sanity gate itself changes: the affected assets are
+        in a terminal state locally and no webhook will fire for them a second time.
+        Returns the asset ids that were re-queued.
+        """
+        asset_ids = await self.skipped_asset_ids(reason)
+        if not asset_ids:
+            return []
+        now = _iso(_now())
+        await self._conn.execute(
+            "UPDATE jobs SET state = ?, skip_reason = NULL, attempts = 0, last_error = NULL, "
+            "run_after = ?, updated_at = ? WHERE state = ? AND skip_reason = ?",
+            (JobState.QUEUED.value, now, now, JobState.SKIPPED.value, reason.value),
+        )
+        await self._conn.commit()
+        return asset_ids
+
     async def delete(self, source_asset_id: str) -> bool:
         cursor = await self._conn.execute(
             "DELETE FROM jobs WHERE source_asset_id = ?", (source_asset_id,)
@@ -254,6 +273,15 @@ class JobStore:
         async with self._conn.execute(query, params) as cursor:
             rows = await cursor.fetchall()
         return [_row_to_job(row) for row in rows]
+
+    async def skipped_asset_ids(self, reason: SkipReason) -> list[str]:
+        """Every asset currently parked in ``skipped`` for one specific reason."""
+        async with self._conn.execute(
+            "SELECT source_asset_id FROM jobs WHERE state = ? AND skip_reason = ? "
+            "ORDER BY updated_at ASC",
+            (JobState.SKIPPED.value, reason.value),
+        ) as cursor:
+            return [row["source_asset_id"] for row in await cursor.fetchall()]
 
     async def due_deletions(self, limit: int = 50) -> list[Job]:
         async with self._conn.execute(
