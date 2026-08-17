@@ -1,0 +1,20 @@
+# Optional overlay that hands the container an Intel GPU, for the *_qsv / *_vaapi presets.
+#
+#   RENDER_GID=$(getent group render | cut -d: -f3) \
+#     docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d --build
+#
+# Deliberately not part of the base file: `devices:` pointing at a path the host does not
+# have makes the container fail to start outright ("error gathering device information
+# while adding custom device /dev/dri"). A CPU-only host could then not bring the service
+# up at all, which is a much worse failure than not having hardware encoding.
+#
+# The container runs as uid 10001, so it also needs the host's render group — without it
+# opening renderD128 fails with "Permission denied", which reads like a driver problem
+# but is not.
+
+services:
+  immich-compressor:
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:?run: RENDER_GID=$(getent group render | cut -d: -f3)}"
