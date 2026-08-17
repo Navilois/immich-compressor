@@ -15,8 +15,8 @@ from fastapi.testclient import TestClient
 from immich_compressor.api import ImmichClient
 from immich_compressor.config import Settings
 from immich_compressor.encoder import run_command
-from immich_compressor.models import Job, JobState, SkipReason
-from immich_compressor.pipeline import Pipeline
+from immich_compressor.models import Job, JobState, MetadataItem, SkipReason
+from immich_compressor.pipeline import MARKER_VERSION, Pipeline, marker_blocks_reprocessing
 from immich_compressor.server import create_app
 from immich_compressor.store import JobStore
 
@@ -119,13 +119,22 @@ async def test_dry_run_touches_nothing(
 # --------------------------------------------------------------------------- guards
 
 
+@pytest.mark.parametrize(
+    "marker_value",
+    [
+        pytest.param({"v": MARKER_VERSION}, id="current-version"),
+        pytest.param({"v": MARKER_VERSION, "replacedBy": "new-id"}, id="replacement-exists"),
+        pytest.param({"v": 1, "replacedBy": "new-id"}, id="old-but-replaced"),
+        pytest.param({}, id="unreadable"),
+    ],
+)
 @respx.mock
 async def test_existing_marker_stops_the_loop(
-    settings: Settings, video_payload_raw: dict[str, Any]
+    settings: Settings, video_payload_raw: dict[str, Any], marker_value: dict[str, Any]
 ) -> None:
     asset_id = video_payload_raw["data"]["asset"]["id"]
     respx.get(f"{BASE}/assets/{asset_id}/metadata").mock(
-        return_value=httpx.Response(200, json=[{"key": "compressor", "value": {"v": 1}}])
+        return_value=httpx.Response(200, json=[{"key": "compressor", "value": marker_value}])
     )
     download = respx.get(f"{BASE}/assets/{asset_id}/original")
 
@@ -138,6 +147,50 @@ async def test_existing_marker_stops_the_loop(
     assert job is not None
     assert job.skip_reason is SkipReason.ALREADY_COMPRESSED
     assert download.call_count == 0
+
+
+@respx.mock
+async def test_a_marker_from_the_broken_gate_is_re_tried(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    """v1 rejected every rotated video. Those markers must not block the fixed gate.
+
+    Runs with ``dry_run`` so the assertion is about the guard alone: reaching the dry-run
+    stop means the marker check let the job through.
+    """
+    settings.behavior.dry_run = True
+    asset_id = video_payload_raw["data"]["asset"]["id"]
+    respx.get(f"{BASE}/assets/{asset_id}/metadata").mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"key": "compressor", "value": {"v": 1, "skipped": "no_gain"}}],
+        )
+    )
+    _mock_asset_detail(asset_id)
+
+    async with JobStore(settings.database_path) as store:
+        client = ImmichClient(BASE, "k")
+        await Pipeline(settings, client, store).run_job(await _seed(store, video_payload_raw))
+        await client.aclose()
+        job = await store.get(asset_id)
+
+    assert job is not None
+    assert job.skip_reason is SkipReason.DRY_RUN
+
+
+@pytest.mark.parametrize(
+    ("value", "blocks"),
+    [
+        pytest.param({"v": MARKER_VERSION}, True, id="current-version-gave-up"),
+        pytest.param({"v": 1, "replacedBy": "x"}, True, id="replacement-exists"),
+        pytest.param({"v": 1}, False, id="stale-gave-up"),
+        pytest.param({"v": 1, "skipped": "no_gain"}, False, id="stale-no-gain"),
+        pytest.param({}, True, id="no-version"),
+        pytest.param({"v": "1"}, True, id="version-not-an-int"),
+    ],
+)
+def test_marker_blocks_reprocessing(value: dict[str, Any], blocks: bool) -> None:
+    assert marker_blocks_reprocessing(MetadataItem(key="compressor", value=value)) is blocks
 
 
 @respx.mock

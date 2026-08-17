@@ -35,7 +35,10 @@ from .store import JobStore
 
 logger = logging.getLogger(__name__)
 
-MARKER_VERSION = 1
+# v1 -> v2: the sanity gate compared stored frame sizes and therefore rejected every
+# rotated video as a resolution change. Markers written by v1 that record only a giving-up
+# decision are re-tried once under the current gate; see `marker_blocks_reprocessing`.
+MARKER_VERSION = 2
 
 
 class SkipJob(Exception):  # noqa: N818 - control flow, not an error condition
@@ -112,6 +115,24 @@ def build_marker(
     return MetadataItem(key="compressor", value=value)
 
 
+def marker_blocks_reprocessing(item: MetadataItem) -> bool:
+    """Whether an existing compressor marker must stop us from touching the asset again.
+
+    Two kinds of marker exist. One records that a replacement asset was created
+    (``replacedBy``) — reprocessing that would produce a duplicate, so it always blocks.
+    The other records that a run gave up, almost always at the sanity gate. Those are
+    worth a second attempt when they predate the current :data:`MARKER_VERSION`, because
+    the gate itself has changed since: v1 rejected every rotated video outright.
+
+    Anything we cannot interpret blocks: a marker without a readable version is not
+    evidence that reprocessing is safe.
+    """
+    if item.value.get("replacedBy"):
+        return True
+    version = item.value.get("v")
+    return not (isinstance(version, int) and version < MARKER_VERSION)
+
+
 class Pipeline:
     """Executes one job at a time against the Immich API."""
 
@@ -176,8 +197,18 @@ class Pipeline:
             raise SkipJob(SkipReason.NO_PRESET, f"no preset for {asset.type}")
 
         # Hard loop guard: has this asset already been through the compressor?
-        if await self._client.has_metadata_key(asset_id, behavior.metadata_key):
-            raise SkipJob(SkipReason.ALREADY_COMPRESSED, "compressor marker present on the asset")
+        marker = await self._client.has_metadata_key(asset_id, behavior.metadata_key)
+        if marker is not None:
+            if marker_blocks_reprocessing(marker):
+                raise SkipJob(
+                    SkipReason.ALREADY_COMPRESSED, "compressor marker present on the asset"
+                )
+            logger.info(
+                "%s carries a v%s marker without a replacement — re-trying under the "
+                "current sanity gate",
+                asset_id,
+                marker.value.get("v"),
+            )
 
         # Always re-read the source. The webhook payload is a snapshot from the moment
         # metadata extraction finished, but we deliberately process `initial_delay_seconds`
@@ -237,8 +268,8 @@ class Pipeline:
         await self._store.update(asset_id, orig_bytes=orig_bytes)
         logger.info("downloaded %s (%d bytes)", asset_id, orig_bytes)
 
-        source_probe = await encoder.probe(source)
         is_video = asset.type == "VIDEO"
+        source_probe = await encoder.probe(source, is_still=not is_video)
 
         # --- Step 4: encode ------------------------------------------------------
         result = await encoder.encode(source, preset, tmp)

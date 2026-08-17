@@ -13,6 +13,26 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Intel GPU encoding (QSV / VAAPI). Roughly 70 MB; drop this layer if you only ever run
+# the CPU presets.
+#   intel-media-va-driver-non-free  the iHD VA driver, lives in Debian's non-free
+#   libmfx-gen1.2                   oneVPL GPU runtime, Gen12+ (Tiger Lake and newer, Arc)
+#   vainfo                          the only way to diagnose this from inside the container
+# Debian trixie no longer ships libmfx1, so the legacy MSDK path for Gen9-11 is gone:
+# on those chips use the hevc_vaapi preset instead of hevc_qsv. ffmpeg here is built
+# --disable-libmfx --enable-libvpl, so it reaches the GPU through oneVPL only.
+RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        intel-media-va-driver-non-free \
+        libmfx-gen1.2 \
+        libigdgmm12 \
+        vainfo \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LIBVA_DRIVER_NAME=iHD
+
 # Non-root: the service never needs to write outside its own two directories.
 RUN useradd --system --create-home --uid 10001 compressor \
     && mkdir -p /var/lib/immich-compressor /var/tmp/immich-compressor \

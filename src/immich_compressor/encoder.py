@@ -17,6 +17,13 @@ from .config import BehaviorSettings, Preset
 
 logger = logging.getLogger(__name__)
 
+# EXIF Orientation -> clockwise display rotation. 5-8 swap the edge lengths, 1-4 do not.
+_EXIF_ORIENTATION_ROTATION: dict[int, int] = {1: 0, 2: 0, 3: 180, 4: 180, 5: 90, 6: 90, 7: 270, 8: 270}
+
+# Transfer functions that mean "this is HDR". Flattening one of these to SDR without
+# tone mapping washes the picture out irreversibly.
+_HDR_TRANSFERS: frozenset[str] = frozenset({"smpte2084", "arib-std-b67"})
+
 
 class EncodeError(RuntimeError):
     """The encoder command failed or produced nothing usable."""
@@ -32,10 +39,41 @@ class MediaProbe:
     video_streams: int
     audio_streams: int
     has_date_time_original: bool
+    # Clockwise display rotation in degrees: from the container's display matrix for
+    # video, from EXIF Orientation for stills. Normalised to 0/90/180/270.
+    rotation: int = 0
+    pix_fmt: str | None = None
+    bit_depth: int | None = None
+    color_transfer: str | None = None
 
     @property
     def has_visual_stream(self) -> bool:
         return self.video_streams > 0
+
+    @property
+    def display_size(self) -> tuple[int | None, int | None]:
+        """Width/height *as a viewer sees them*, with the rotation applied.
+
+        The stored frame size alone is meaningless: a portrait phone clip is coded
+        1920x1080 and carries a 90 degree display matrix. Comparing stored sizes across a
+        re-encode therefore rejects every rotated video, because ffmpeg's default
+        ``-autorotate`` bakes the rotation into the pixels and drops the matrix.
+        """
+        if self.rotation in (90, 270):
+            return (self.height, self.width)
+        return (self.width, self.height)
+
+    @property
+    def is_hdr(self) -> bool:
+        return (self.color_transfer or "") in _HDR_TRANSFERS
+
+
+@dataclass(frozen=True, slots=True)
+class ExifFacts:
+    """What exiftool knows about a still that ffprobe does not."""
+
+    has_date: bool
+    orientation: int | None
 
 
 @dataclass(slots=True)
@@ -84,8 +122,13 @@ async def run_command(argv: list[str], *, timeout_s: float) -> tuple[int, str, s
     )
 
 
-async def probe(path: Path, *, timeout_s: float = 120.0) -> MediaProbe:
-    """Inspect a media file with ``ffprobe``. Raises :class:`EncodeError` if undecodable."""
+async def probe(path: Path, *, is_still: bool = False, timeout_s: float = 120.0) -> MediaProbe:
+    """Inspect a media file with ``ffprobe``. Raises :class:`EncodeError` if undecodable.
+
+    ``is_still`` additionally consults exiftool, because ffprobe reports neither the EXIF
+    Orientation nor the capture date of a JPEG/HEIC — for stills the rotation lives only
+    in EXIF, never in a display matrix.
+    """
     code, stdout, stderr = await run_command(
         [
             "ffprobe",
@@ -119,10 +162,17 @@ async def probe(path: Path, *, timeout_s: float = 120.0) -> MediaProbe:
         except (TypeError, ValueError):
             duration = None
 
-    width = height = None
+    width = height = bit_depth = None
+    pix_fmt = color_transfer = None
+    rotation = 0
     if video:
-        width = _as_int(video[0].get("width"))
-        height = _as_int(video[0].get("height"))
+        first = video[0]
+        width = _as_int(first.get("width"))
+        height = _as_int(first.get("height"))
+        pix_fmt = first.get("pix_fmt")
+        bit_depth = _as_int(first.get("bits_per_raw_sample")) or _bit_depth_from_pix_fmt(pix_fmt)
+        color_transfer = first.get("color_transfer")
+        rotation = _display_rotation(first)
 
     tags = {k.lower(): v for k, v in (fmt.get("tags") or {}).items()}
     for stream in streams:
@@ -132,6 +182,12 @@ async def probe(path: Path, *, timeout_s: float = 120.0) -> MediaProbe:
         for key in ("creation_time", "date", "datetimeoriginal", "com.apple.quicktime.creationdate")
     )
 
+    if is_still:
+        facts = await probe_exif(path)
+        has_date = has_date or facts.has_date
+        if facts.orientation is not None:
+            rotation = _EXIF_ORIENTATION_ROTATION.get(facts.orientation, 0)
+
     return MediaProbe(
         width=width,
         height=height,
@@ -139,54 +195,103 @@ async def probe(path: Path, *, timeout_s: float = 120.0) -> MediaProbe:
         video_streams=len(video),
         audio_streams=len(audio),
         has_date_time_original=has_date,
+        rotation=rotation,
+        pix_fmt=pix_fmt,
+        bit_depth=bit_depth,
+        color_transfer=color_transfer,
     )
 
 
-async def probe_still(path: Path, *, timeout_s: float = 60.0) -> bool:
-    """Return whether a still image carries a usable capture date, via exiftool."""
+async def probe_exif(path: Path, *, timeout_s: float = 60.0) -> ExifFacts:
+    """Read capture date and EXIF Orientation of a still via exiftool.
+
+    Missing exiftool is not fatal here — the caller degrades to "unknown", and the sanity
+    gate rejects the result if it needed the capture date.
+    """
     if shutil.which("exiftool") is None:
-        return False
+        return ExifFacts(has_date=False, orientation=None)
     code, stdout, _ = await run_command(
-        ["exiftool", "-json", "-DateTimeOriginal", "-CreateDate", str(path)],
+        ["exiftool", "-json", "-n", "-DateTimeOriginal", "-CreateDate", "-Orientation", str(path)],
         timeout_s=timeout_s,
     )
     if code != 0:
-        return False
+        return ExifFacts(has_date=False, orientation=None)
     try:
         entries = json.loads(stdout)
     except json.JSONDecodeError:
-        return False
+        return ExifFacts(has_date=False, orientation=None)
     if not entries:
-        return False
+        return ExifFacts(has_date=False, orientation=None)
     entry = entries[0]
-    return bool(entry.get("DateTimeOriginal") or entry.get("CreateDate"))
+    return ExifFacts(
+        has_date=bool(entry.get("DateTimeOriginal") or entry.get("CreateDate")),
+        # `-n` forces the numeric form; without it exiftool answers "Rotate 90 CW".
+        orientation=_as_int(entry.get("Orientation")),
+    )
 
 
-async def copy_metadata(source: Path, target: Path, *, timeout_s: float = 300.0) -> None:
+async def copy_metadata(
+    source: Path,
+    target: Path,
+    *,
+    normalize_orientation: bool = False,
+    timeout_s: float = 300.0,
+) -> None:
     """Carry EXIF/XMP/IPTC from ``source`` onto ``target`` with exiftool.
 
     Verified necessity: ``ffmpeg -map_metadata 0 -movflags use_metadata_tags`` preserves
     QuickTime CreateDate, GPS, Make and Model, but drops XMP Description, Rating and
     Subject. For stills, nothing survives a re-encode at all without this step.
+
+    ``normalize_orientation`` excludes Orientation from the copy and pins it to 1. Presets
+    that run ``convert -auto-orient`` have already baked the rotation into the pixels;
+    copying the source Orientation back on top would rotate the image a second time.
     """
     if shutil.which("exiftool") is None:
         raise EncodeError("exiftool is not installed but a preset requires exiftool_copy")
-    code, _, stderr = await run_command(
-        [
-            "exiftool",
-            "-quiet",
-            "-TagsFromFile",
-            str(source),
-            "-all:all",
-            "-unsafe",
-            "-icc_profile",
-            "-overwrite_original",
-            str(target),
-        ],
-        timeout_s=timeout_s,
-    )
+    argv = ["exiftool", "-quiet", "-TagsFromFile", str(source), "-all:all"]
+    if normalize_orientation:
+        argv.append("--Orientation")
+    argv += ["-unsafe", "-icc_profile"]
+    if normalize_orientation:
+        argv.append("-Orientation#=1")
+    argv += ["-overwrite_original", str(target)]
+
+    code, _, stderr = await run_command(argv, timeout_s=timeout_s)
     if code != 0:
         raise EncodeError(f"exiftool metadata copy failed: {stderr.strip()[:400]}")
+
+
+async def probe_hardware_encoder(
+    encoder_name: str, device: str, *, timeout_s: float = 60.0
+) -> str | None:
+    """Encode a single black frame to prove the GPU path actually works.
+
+    Returns ``None`` on success, otherwise the reason — a missing driver, a render node
+    the process may not open, or a codec the chip does not implement. Worth doing at
+    startup: without it the first real job is the one that discovers the problem, an hour
+    after the container came up.
+    """
+    argv = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if encoder_name.endswith("_qsv"):
+        argv += ["-qsv_device", device]
+    elif encoder_name.endswith("_vaapi"):
+        argv += ["-vaapi_device", device]
+    argv += ["-f", "lavfi", "-i", "color=black:size=320x240:rate=1:duration=0.1"]
+    if encoder_name.endswith("_vaapi"):
+        argv += ["-vf", "format=nv12,hwupload"]
+    argv += ["-c:v", encoder_name, "-f", "null", "-"]
+
+    try:
+        code, _, stderr = await run_command(argv, timeout_s=timeout_s)
+    except EncodeError as exc:
+        return str(exc)
+    if code == 0:
+        return None
+    # The *first* line carries the diagnosis ("No VA display found for device ..."); the
+    # last one is only ffmpeg giving up ("Error parsing global options").
+    lines = [line for line in stderr.strip().splitlines() if line.strip()]
+    return lines[0][:200] if lines else f"ffmpeg exited {code}"
 
 
 async def encode(source: Path, preset: Preset, work_dir: Path) -> EncodeResult:
@@ -208,13 +313,14 @@ async def encode(source: Path, preset: Preset, work_dir: Path) -> EncodeResult:
         raise EncodeError(f"preset {preset.name!r} produced no output")
 
     if preset.exiftool_copy:
-        await copy_metadata(source, output)
+        await copy_metadata(source, output, normalize_orientation=preset.normalize_orientation)
 
+    # Probe *after* the metadata copy — it can change the effective orientation.
     return EncodeResult(
         output_path=output,
         orig_bytes=orig_bytes,
         new_bytes=output.stat().st_size,
-        probe=await probe(output),
+        probe=await probe(output, is_still=preset.match_type != "VIDEO"),
     )
 
 
@@ -244,15 +350,26 @@ async def check_sanity(
     if not out.has_visual_stream:
         failures.append("output has no video/image stream")
 
-    if (
-        behavior.require_same_resolution
-        and source_probe.width
-        and source_probe.height
-        and (out.width, out.height) != (source_probe.width, source_probe.height)
-    ):
+    # Compared as *displayed*, not as stored: an encoder may legitimately either keep the
+    # rotation metadata or bake it into the pixels. What must never happen is that the
+    # rotation is lost — that shows up here as a swapped display size.
+    source_display = source_probe.display_size
+    if behavior.require_same_resolution and all(source_display):
+        out_display = out.display_size
+        if out_display != source_display:
+            failures.append(
+                f"display size changed: {source_display[0]}x{source_display[1]} "
+                f"-> {out_display[0]}x{out_display[1]} "
+                f"(rotation {source_probe.rotation} -> {out.rotation})"
+            )
+
+    if source_probe.bit_depth and out.bit_depth and out.bit_depth < source_probe.bit_depth:
+        failures.append(f"bit depth dropped: {source_probe.bit_depth} -> {out.bit_depth}")
+
+    if source_probe.is_hdr and not out.is_hdr:
         failures.append(
-            f"resolution changed: {source_probe.width}x{source_probe.height} "
-            f"-> {out.width}x{out.height}"
+            f"HDR transfer lost: {source_probe.color_transfer} -> {out.color_transfer or 'none'} "
+            "— the output would be washed out"
         )
 
     if is_video:
@@ -270,12 +387,9 @@ async def check_sanity(
                 f"audio stream count changed: {source_probe.audio_streams} -> {out.audio_streams}"
             )
 
-    if behavior.require_date_time_original:
-        has_date = out.has_date_time_original or (
-            not is_video and await probe_still(result.output_path)
-        )
-        if not has_date:
-            failures.append("output has no capture date — would land wrong in the timeline")
+    # `probe()` already folded exiftool's answer in for stills, so this holds for both.
+    if behavior.require_date_time_original and not out.has_date_time_original:
+        failures.append("output has no capture date — would land wrong in the timeline")
 
     if failures:
         logger.info("sanity gate rejected %s: %s", source.name, "; ".join(failures))
@@ -303,3 +417,36 @@ def _as_int(value: object) -> int | None:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _display_rotation(stream: dict[str, object]) -> int:
+    """Clockwise rotation from a stream's display matrix, normalised to 0/90/180/270.
+
+    ffmpeg reports the angle counter-clockwise and signed (``-90`` and ``270`` mean the
+    same thing). ``% 360`` folds both conventions onto the same value, and the only thing
+    the caller asks of it — "do width and height swap?" — is unaffected by the direction.
+    """
+    side_data = stream.get("side_data_list")
+    if not isinstance(side_data, list):
+        return 0
+    for entry in side_data:
+        if isinstance(entry, dict) and "rotation" in entry:
+            degrees = _as_int(entry["rotation"])
+            if degrees is not None:
+                return degrees % 360
+    return 0
+
+
+def _bit_depth_from_pix_fmt(pix_fmt: str | None) -> int | None:
+    """Fallback for streams without ``bits_per_raw_sample`` (``yuv420p10le`` -> 10)."""
+    if not pix_fmt:
+        return None
+    name = pix_fmt.removesuffix("le").removesuffix("be")
+    digits = ""
+    while name and name[-1].isdigit():
+        digits = name[-1] + digits
+        name = name[:-1]
+    # Only a `p` right before the digits marks a depth suffix; `nv12` is 8-bit, not 12.
+    if not digits or not name.endswith("p"):
+        return 8
+    return int(digits)

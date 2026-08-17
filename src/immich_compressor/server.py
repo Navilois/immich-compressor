@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from .api import ImmichClient
 from .config import Settings, load_settings
+from .encoder import probe_hardware_encoder
 from .models import JobState, WebhookPayload
 from .pipeline import Worker
 from .store import JobStore
@@ -42,6 +43,29 @@ class HealthResponse(BaseModel):
     immich_version: str | None = None
 
 
+async def _warn_about_unusable_hardware(settings: Settings) -> None:
+    """Say so at startup when a preset wants a GPU that is not reachable.
+
+    Deliberately a warning, not a hard exit: a device that reappears after a host reboot
+    should not keep the service down, and the job simply fails loudly in the meantime.
+    """
+    for preset in settings.presets:
+        encoder_name = preset.hardware_encoder
+        if encoder_name is None:
+            continue
+        problem = await probe_hardware_encoder(encoder_name, preset.render_node)
+        if problem:
+            logger.warning(
+                "preset %r wants %s on %s, but it is not usable here: %s",
+                preset.name,
+                encoder_name,
+                preset.render_node,
+                problem,
+            )
+        else:
+            logger.info("preset %r: %s on %s ready", preset.name, encoder_name, preset.render_node)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the ASGI app. Accepts injected settings so tests can skip the YAML/env layer."""
     resolved = settings or load_settings()
@@ -56,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             timeout_s=resolved.immich.timeout_s,
             connect_timeout_s=resolved.immich.connect_timeout_s,
         )
+        await _warn_about_unusable_hardware(resolved)
         worker = Worker(resolved, client, store)
         app.state.settings = resolved
         app.state.store = store
