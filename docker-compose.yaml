@@ -28,15 +28,7 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - compressor-state:/var/lib/immich-compressor
       - compressor-work:/var/tmp/immich-compressor
-    # Intel GPU encoding. Only needed for the *_qsv / *_vaapi presets; harmless otherwise.
-    # The container runs as uid 10001, so it needs the host's render group to be allowed
-    # to open renderD128 — without it you get "Permission denied", which looks exactly
-    # like a driver problem but is not:
-    #   RENDER_GID=$(getent group render | cut -d: -f3)
-    devices:
-      - /dev/dri:/dev/dri
-    group_add:
-      - "${RENDER_GID:-104}"
+    # GPU encoding is opt-in through docker-compose.gpu.yaml — see the header there.
     # 2 vCPU box: one ffmpeg run must not be able to starve Immich itself.
     cpus: 1.5
     mem_limit: 2g

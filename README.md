@@ -124,15 +124,18 @@ Debian trixie dropped `libmfx1`, and the bundled ffmpeg is built `--disable-libm
 
 ### Wiring
 
-The image ships the iHD driver and the oneVPL runtime. `docker-compose.yaml` passes
-`/dev/dri` through and adds the host's render group — the container runs as uid 10001 and
-cannot open `renderD128` without it:
+The image ships the iHD driver and the oneVPL runtime. The device passthrough lives in a
+separate overlay file, because `devices:` pointing at a `/dev/dri` the host does not have
+makes the container fail to start — a CPU-only host must not lose the service over an
+optional feature:
 
 ```bash
-RENDER_GID=$(getent group render | cut -d: -f3) docker compose up -d
+RENDER_GID=$(getent group render | cut -d: -f3) docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d --build
 ```
 
-A missing render group looks exactly like a broken driver in the logs. It is not.
+The render group is not optional either: the container runs as uid 10001 and cannot open
+`renderD128` without it. A missing render group looks exactly like a broken driver in the
+logs. It is not.
 
 ### Proving it works, in three steps
 
