@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     state           TEXT NOT NULL,
     skip_reason     TEXT,
     new_asset_id    TEXT,
+    new_checksum    TEXT,
     orig_bytes      INTEGER,
     new_bytes       INTEGER,
     ratio           REAL,
@@ -43,9 +44,13 @@ CREATE INDEX IF NOT EXISTS idx_jobs_delete_after   ON jobs (delete_after);
 """
 
 _COLUMNS = (
-    "source_asset_id, state, skip_reason, new_asset_id, orig_bytes, new_bytes, ratio, "
-    "attempts, last_error, payload, created_at, updated_at, run_after, delete_after"
+    "source_asset_id, state, skip_reason, new_asset_id, new_checksum, orig_bytes, new_bytes, "
+    "ratio, attempts, last_error, payload, created_at, updated_at, run_after, delete_after"
 )
+
+# Columns added after the first release. `CREATE TABLE IF NOT EXISTS` cannot add them to a
+# database that already exists, so they are applied by hand on open.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (("new_checksum", "TEXT"),)
 
 # States a worker is allowed to pick up and (re)drive.
 _RESUMABLE: tuple[str, ...] = (
@@ -95,7 +100,18 @@ class JobStore:
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA busy_timeout=5000")
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        """Add columns introduced after a database was first created."""
+        async with self._conn.execute("PRAGMA table_info(jobs)") as cursor:
+            existing = {row["name"] for row in await cursor.fetchall()}
+        for name, sql_type in _ADDED_COLUMNS:
+            if name not in existing:
+                # Both interpolated names come from `_ADDED_COLUMNS`, never from input.
+                await self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {sql_type}")
+                logger.info("migrated job store: added column %s", name)
 
     async def close(self) -> None:
         if self._db is not None:
@@ -126,7 +142,7 @@ class JobStore:
         run_after = now + timedelta(seconds=delay_seconds)
         cursor = await self._conn.execute(
             f"INSERT INTO jobs ({_COLUMNS}) VALUES "  # noqa: S608 - _COLUMNS is a module constant
-            "(?, ?, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, NULL) "
+            "(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, NULL) "
             "ON CONFLICT(source_asset_id) DO NOTHING",
             (
                 source_asset_id,
@@ -173,6 +189,7 @@ class JobStore:
             "state",
             "skip_reason",
             "new_asset_id",
+            "new_checksum",
             "orig_bytes",
             "new_bytes",
             "ratio",
@@ -335,6 +352,7 @@ def _row_to_job(row: aiosqlite.Row) -> Job:
         state=JobState(row["state"]),
         skip_reason=SkipReason(row["skip_reason"]) if row["skip_reason"] else None,
         new_asset_id=row["new_asset_id"],
+        new_checksum=row["new_checksum"],
         orig_bytes=row["orig_bytes"],
         new_bytes=row["new_bytes"],
         ratio=row["ratio"],

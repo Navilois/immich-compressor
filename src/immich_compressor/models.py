@@ -115,8 +115,10 @@ class WebhookAsset(BaseModel):
     # `exifInfo` is null until metadata extraction has run.
     exif_info: NullableModel[ExifInfo] = Field(default_factory=ExifInfo, alias="exifInfo")
 
-    # `checksum` arrives as {"type":"Buffer","data":[...]} — we never need it, so it is
-    # deliberately not modelled (extra="ignore" drops it).
+    # The *webhook* serialises `checksum` as the raw Postgres bytea,
+    # {"type":"Buffer","data":[...]}, which is useless to us — `extra="ignore"` drops it.
+    # `GET /assets/{id}` is different: there it is a base64 SHA-1 string, and
+    # `AssetDetail.checksum` models it because the delete gate compares against it.
 
 
 class WebhookData(BaseModel):
@@ -187,6 +189,10 @@ class AssetDetail(BaseModel):
     visibility: str | None = None
     duration: int | None = None
     original_file_name: NullableStr = Field(default="", alias="originalFileName")
+    # Base64-encoded SHA-1 of the stored file, e.g. "02MpaJkpzGHNbGwxWtencVNK7uY=".
+    # Verified against a live v3.1.0 instance; the delete gate compares it with the
+    # checksum the encoder computed for the file it uploaded.
+    checksum: str | None = None
     people: NullableList[PersonRef] = Field(default_factory=list)
     tags: NullableList[TagRef] = Field(default_factory=list)
     # `exifInfo` is null until metadata extraction has run.
@@ -242,6 +248,9 @@ class Job(BaseModel):
     state: JobState = JobState.QUEUED
     skip_reason: SkipReason | None = None
     new_asset_id: str | None = None
+    # Base64 SHA-1 of the file we uploaded, kept so the sweeper can still verify the
+    # replacement hours later, long after the local output file is gone.
+    new_checksum: str | None = None
     orig_bytes: int | None = None
     new_bytes: int | None = None
     ratio: float | None = None

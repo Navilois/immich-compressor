@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .api import ImmichClient
+from .api import ImmichClient, ImmichError
 from .config import ConfigError, Settings, load_settings
 from .encoder import EncodeError, MediaProbe, check_sanity, encode, probe, probe_hardware_encoder
 from .models import JobState, SkipReason
@@ -41,11 +41,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     settings = _load(args)
     _configure_logging(settings.log_level)
     logger.info(
-        "starting immich-compressor on %s:%d (dry_run=%s, trash_original=%s)",
+        "starting immich-compressor on %s:%d (dry_run=%s, trash_original=%s, delete_mode=%s)",
         settings.listen_host,
         settings.listen_port,
         settings.behavior.dry_run,
         settings.behavior.trash_original,
+        settings.behavior.delete_mode,
     )
     uvicorn.run(
         create_app(settings),
@@ -277,7 +278,21 @@ async def _restore(settings: Settings, asset_ids: list[str]) -> int:
         settings.immich.api_key.get_secret_value(),
         timeout_s=settings.immich.timeout_s,
     ) as client:
-        await client.restore_assets(asset_ids)
+        try:
+            await client.restore_assets(asset_ids)
+        except ImmichError as exc:
+            # Verified on a live v3.1.0: restoring an asset that was force-deleted answers
+            # HTTP 400 "Not found", and the whole batch fails with it. Say why instead of
+            # letting the traceback out.
+            print(f"restore failed: {exc}", file=sys.stderr)
+            if settings.behavior.delete_mode == "permanent":
+                print(
+                    "delete_mode is 'permanent' — these originals were deleted with "
+                    "force=true and never entered the trash. Nothing can restore them; "
+                    "the only rollback is a backup of Postgres and the upload directory.",
+                    file=sys.stderr,
+                )
+            return 1
     print(f"restored {len(asset_ids)} asset(s) from the trash")
     return 0
 
@@ -286,6 +301,12 @@ def cmd_restore(args: argparse.Namespace) -> int:
     """Rollback helper: pull originals back out of the trash."""
     settings = _load(args)
     _configure_logging("WARNING")
+    if settings.behavior.delete_mode == "permanent":
+        print(
+            "warning: delete_mode is 'permanent' — originals removed by this service were "
+            "not trashed and cannot be restored.",
+            file=sys.stderr,
+        )
     ids: list[str] = list(args.asset_id)
     if args.all_pending:
 

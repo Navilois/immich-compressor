@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -488,6 +491,230 @@ async def test_trash_is_deferred_not_immediate(
         assert await store.due_deletions() == []
 
     assert delete.call_count == 0
+
+
+# --------------------------------------------------------------- immediate deletion
+
+
+def _posted_checksum(upload: respx.Route) -> str:
+    """Base64 SHA-1 of the file body the pipeline actually posted.
+
+    Read out of the recorded multipart request rather than recomputed from the source, so
+    the test asserts against the exact bytes that reached the server — the same thing
+    Immich hashes into `AssetResponseDto.checksum`.
+    """
+    body: bytes = upload.calls.last.request.content
+    start = body.index(b"\r\n\r\n", body.index(b'name="assetData"')) + 4
+    end = body.index(b"\r\n--", start)
+    return base64.b64encode(hashlib.sha1(body[start:end]).digest()).decode("ascii")  # noqa: S324
+
+
+def _mock_replacement(
+    new_id: str,
+    *,
+    checksum: str | Callable[[], str] | None = None,
+    date_time_original: str | None = "2024-06-15T12:30:00+00:00",
+    is_trashed: bool = False,
+    marker: bool = True,
+) -> None:
+    """A replacement asset as the delete gate expects to find it.
+
+    `checksum` may be a callable so a test can defer it until the upload has happened.
+    """
+
+    def _detail(_request: httpx.Request) -> httpx.Response:
+        body: dict[str, Any] = {
+            "id": new_id,
+            "type": "VIDEO",
+            "isTrashed": is_trashed,
+            "people": [],
+            "exifInfo": {"dateTimeOriginal": date_time_original} if date_time_original else {},
+        }
+        if checksum is not None:
+            body["checksum"] = checksum() if callable(checksum) else checksum
+        return httpx.Response(200, json=body)
+
+    respx.get(f"{BASE}/assets/{new_id}").mock(side_effect=_detail)
+    respx.get(f"{BASE}/assets/{new_id}/metadata").mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"key": "compressor", "value": {"v": MARKER_VERSION}}] if marker else [],
+        )
+    )
+
+
+async def _run_until_deletion(
+    settings: Settings,
+    payload: dict[str, Any],
+    tmp_path: Path,
+    *,
+    new_id: str,
+    replacement: Callable[[respx.Route], None],
+) -> tuple[Job | None, respx.Route]:
+    """Drive the whole pipeline with `retention_days: 0` and hand back job + delete route."""
+    asset_id = payload["data"]["asset"]["id"]
+    clip = await _make_clip(tmp_path / "src.mp4")
+    payload["data"]["asset"]["exifInfo"]["fileSizeInByte"] = clip.stat().st_size
+
+    _mock_no_marker(asset_id)
+    _mock_asset_detail(asset_id)
+    respx.get(f"{BASE}/assets/{asset_id}/original").mock(
+        return_value=httpx.Response(200, content=clip.read_bytes())
+    )
+    upload = respx.post(f"{BASE}/assets").mock(
+        return_value=httpx.Response(201, json={"id": new_id, "status": "created"})
+    )
+    replacement(upload)
+    respx.put(f"{BASE}/assets/copy").mock(return_value=httpx.Response(204))
+    respx.put(f"{BASE}/assets/{new_id}").mock(return_value=httpx.Response(200, json={}))
+    respx.put(f"{BASE}/tags").mock(return_value=httpx.Response(200, json=[]))
+    respx.put(f"{BASE}/tags/assets").mock(return_value=httpx.Response(200, json={"count": 0}))
+    respx.put(f"{BASE}/assets/{new_id}/metadata").mock(return_value=httpx.Response(200, json=[]))
+    respx.put(f"{BASE}/assets/{asset_id}/metadata").mock(return_value=httpx.Response(200, json=[]))
+    delete = respx.delete(f"{BASE}/assets").mock(return_value=httpx.Response(204))
+
+    async with JobStore(settings.database_path) as store:
+        client = ImmichClient(BASE, "k")
+        await Pipeline(settings, client, store).run_job(await _seed(store, payload))
+        await client.aclose()
+        return await store.get(asset_id), delete
+
+
+@needs_ffmpeg
+@respx.mock
+async def test_retention_zero_deletes_inline_without_the_sweeper(
+    settings: Settings, video_payload_raw: dict[str, Any], tmp_path: Path
+) -> None:
+    """`retention_days: 0` must not leave the job sitting for the 60 s sweeper interval."""
+    settings.behavior.trash_original = True
+    settings.behavior.retention_days = 0
+    new_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+    job, delete = await _run_until_deletion(
+        settings,
+        video_payload_raw,
+        tmp_path,
+        new_id=new_id,
+        replacement=lambda upload: _mock_replacement(
+            new_id, checksum=lambda: _posted_checksum(upload)
+        ),
+    )
+
+    assert job is not None
+    assert job.state is JobState.DONE, job.last_error
+    # Nothing left for the sweeper to pick up.
+    assert job.delete_after is None
+    assert delete.call_count == 1
+    assert json.loads(delete.calls.last.request.content)["ids"] == [
+        video_payload_raw["data"]["asset"]["id"]
+    ]
+
+
+@needs_ffmpeg
+@respx.mock
+@pytest.mark.parametrize(
+    ("broken", "settle_s"),
+    [
+        pytest.param({"is_trashed": True}, 30.0, id="replacement-is-trashed"),
+        pytest.param({"checksum": "Zm9vYmFyYmF6cXV1eDEyMzQ1Njc="}, 30.0, id="checksum-mismatch"),
+        pytest.param({"date_time_original": None}, 0.0, id="no-dateTimeOriginal"),
+        pytest.param({"marker": False}, 30.0, id="no-compressor-marker"),
+    ],
+)
+async def test_a_failed_verification_never_deletes_the_original(
+    settings: Settings,
+    video_payload_raw: dict[str, Any],
+    tmp_path: Path,
+    broken: dict[str, Any],
+    settle_s: float,
+) -> None:
+    """Each of the four gate conditions on its own is enough to keep the original."""
+    settings.behavior.trash_original = True
+    settings.behavior.retention_days = 0
+    settings.behavior.delete_mode = "permanent"
+    # The no-dateTimeOriginal case would otherwise sit out the extraction wait.
+    settings.behavior.post_upload_settle_s = settle_s
+    new_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+    def _replacement(upload: respx.Route) -> None:
+        _mock_replacement(
+            new_id, **{"checksum": lambda: _posted_checksum(upload), **broken}
+        )
+
+    job, delete = await _run_until_deletion(
+        settings, video_payload_raw, tmp_path, new_id=new_id, replacement=_replacement
+    )
+
+    assert delete.call_count == 0
+    assert job is not None
+    assert job.state is JobState.PENDING_DELETE
+    assert job.last_error
+    # Left for the sweeper to retry rather than abandoned.
+    assert job.delete_after is not None
+
+
+@needs_ffmpeg
+@respx.mock
+@pytest.mark.parametrize(
+    ("delete_mode", "expected_force"),
+    [
+        pytest.param("trash", False, id="trash-is-recoverable"),
+        pytest.param("permanent", True, id="permanent-bypasses-the-trash"),
+    ],
+)
+async def test_delete_mode_decides_the_force_flag(
+    settings: Settings,
+    video_payload_raw: dict[str, Any],
+    tmp_path: Path,
+    delete_mode: str,
+    expected_force: bool,
+) -> None:
+    """`force: true` is what makes the delete permanent — verified on a live v3.1.0."""
+    settings.behavior.trash_original = True
+    settings.behavior.retention_days = 0
+    settings.behavior.delete_mode = delete_mode  # type: ignore[assignment]
+    new_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+    job, delete = await _run_until_deletion(
+        settings,
+        video_payload_raw,
+        tmp_path,
+        new_id=new_id,
+        replacement=lambda upload: _mock_replacement(
+            new_id, checksum=lambda: _posted_checksum(upload)
+        ),
+    )
+
+    assert job is not None and job.state is JobState.DONE, job.last_error if job else "no job"
+    assert delete.call_count == 1
+    assert json.loads(delete.calls.last.request.content)["force"] is expected_force
+
+
+@needs_ffmpeg
+@respx.mock
+async def test_the_uploaded_checksum_is_persisted_for_the_sweeper(
+    settings: Settings, video_payload_raw: dict[str, Any], tmp_path: Path
+) -> None:
+    """With a retention window the local file is long gone — the job row has to remember."""
+    settings.behavior.trash_original = True
+    settings.behavior.retention_days = 7
+    new_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+    job, delete = await _run_until_deletion(
+        settings,
+        video_payload_raw,
+        tmp_path,
+        new_id=new_id,
+        replacement=lambda upload: _mock_replacement(
+            new_id, checksum=lambda: _posted_checksum(upload)
+        ),
+    )
+
+    assert delete.call_count == 0
+    assert job is not None
+    assert job.state is JobState.PENDING_DELETE
+    assert job.new_checksum is not None
+    assert len(base64.b64decode(job.new_checksum)) == 20  # SHA-1
 
 
 # ------------------------------------------------------------------- webhook API

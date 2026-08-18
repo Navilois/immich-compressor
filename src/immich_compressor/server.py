@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .api import ImmichClient
-from .config import Settings, load_settings
+from .config import Settings, load_settings, warn_about_permanent_deletion
 from .encoder import probe_hardware_encoder
 from .models import JobState, WebhookPayload
 from .pipeline import Worker
@@ -80,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             timeout_s=resolved.immich.timeout_s,
             connect_timeout_s=resolved.immich.connect_timeout_s,
         )
+        warn_about_permanent_deletion(resolved.behavior)
         await _warn_about_unusable_hardware(resolved)
         worker = Worker(resolved, client, store)
         app.state.settings = resolved
@@ -193,6 +194,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body["config"] = {
             "dry_run": settings.behavior.dry_run,
             "trash_original": settings.behavior.trash_original,
+            "delete_mode": settings.behavior.delete_mode,
             "retention_days": settings.behavior.retention_days,
             "enabled_types": settings.behavior.enabled_types,
             "max_ratio": settings.behavior.max_ratio,

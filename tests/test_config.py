@@ -8,15 +8,21 @@ import pytest
 
 from immich_compressor.config import ConfigError, Preset, load_settings
 
-_MINIMAL = """
-behavior:
-  enabled_types: [VIDEO]
+_PRESETS = """
 presets:
   video-h265:
     match: { type: VIDEO }
     cmd: ffmpeg -i {input} -c:v libx265 {output}
     suffix: .mp4
 """
+
+_MINIMAL = "\nbehavior:\n  enabled_types: [VIDEO]\n" + _PRESETS
+
+
+def _with_behavior(**options: object) -> str:
+    """A minimal config whose `behavior` block carries the given options."""
+    lines = "".join(f"  {key}: {str(value).lower()}\n" for key, value in options.items())
+    return f"\nbehavior:\n  enabled_types: [VIDEO]\n{lines}{_PRESETS}"
 
 
 def _write(tmp_path: Path, body: str) -> Path:
@@ -105,6 +111,49 @@ def test_argv_renders_without_a_shell() -> None:
     # The space in the filename stays inside a single argv element — it can never be
     # re-split into another argument, let alone another command.
     assert argv == ["ffmpeg", "-i", "/tmp/in put.mov", "-c", "copy", "/tmp/out.mp4"]
+
+
+def test_permanent_delete_mode_requires_trashing_to_be_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting for good while `trash_original` says "never touch it" is a contradiction."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _with_behavior(dry_run=False, delete_mode="permanent")
+    with pytest.raises(ConfigError, match=r"needs trash_original: true"):
+        load_settings(_write(tmp_path, body))
+
+
+def test_permanent_delete_mode_is_rejected_in_a_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry run promises that nothing is mutated — it must not delete anything."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _with_behavior(dry_run=True, trash_original=True, delete_mode="permanent")
+    with pytest.raises(ConfigError, match=r"incompatible with dry_run"):
+        load_settings(_write(tmp_path, body))
+
+
+def test_permanent_delete_mode_loads_when_it_is_coherent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _with_behavior(
+        dry_run=False, trash_original=True, retention_days=0, delete_mode="permanent"
+    )
+    settings = load_settings(_write(tmp_path, body))
+    assert settings.behavior.delete_mode == "permanent"
+    assert settings.behavior.retention_days == 0
+
+
+def test_delete_mode_defaults_to_the_recoverable_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    assert load_settings(_write(tmp_path, _MINIMAL)).behavior.delete_mode == "trash"
 
 
 def test_argv_does_not_interpret_filenames_as_arguments() -> None:

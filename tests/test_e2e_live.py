@@ -23,7 +23,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from immich_compressor.api import ImmichClient
+from immich_compressor.api import ImmichClient, ImmichError
 from immich_compressor.config import Preset, Settings
 from immich_compressor.encoder import run_command
 from immich_compressor.models import JobState
@@ -248,6 +248,94 @@ async def test_live_end_to_end(tmp_path: Path, api: ImmichClient, raw: httpx.Asy
     finally:
         ids = [source_id] + ([new_id] if new_id else [])
         await raw.request("DELETE", "/assets", json={"ids": ids, "force": True})
+
+
+async def test_live_permanent_delete_leaves_nothing_behind(
+    tmp_path: Path, api: ImmichClient, raw: httpx.AsyncClient
+) -> None:
+    """`delete_mode: permanent` + `retention_days: 0`: the original is gone when the job ends.
+
+    The whole phase rests on `DELETE /assets {"force": true}` really bypassing the trash —
+    the OpenAPI spec only claims "force delete even if in use". This asserts the stronger
+    property directly against the server: no asset, and no trash entry either.
+    """
+    clip = await _make_fat_clip(tmp_path / f"{MARKER}-permanent.mp4")
+    stamp = datetime.now(UTC).strftime("%H%M%S%f")
+    upload = await raw.post(
+        "/assets",
+        files={"assetData": (f"{MARKER}-{stamp}.mp4", clip.read_bytes(), "video/mp4")},
+        data={
+            "fileCreatedAt": "2024-06-15T12:30:00.000Z",
+            "fileModifiedAt": "2024-06-15T12:30:00.000Z",
+            "filename": f"{MARKER}-{stamp}.mp4",
+            "duration": "6000",
+        },
+    )
+    assert upload.status_code in (200, 201), upload.text
+    source_id: str = upload.json()["id"]
+    await api.wait_for_metadata_extraction(source_id, timeout_s=60)
+    detail = (await raw.get(f"/assets/{source_id}")).json()
+
+    settings = _live_settings(tmp_path)
+    settings.behavior.trash_original = True
+    settings.behavior.retention_days = 0
+    settings.behavior.delete_mode = "permanent"
+
+    payload = {
+        "type": "AssetV1",
+        "trigger": "AssetMetadataExtraction",
+        "data": {
+            "asset": {
+                "id": source_id,
+                "type": "VIDEO",
+                "originalFileName": f"{MARKER}-{stamp}.mp4",
+                "fileCreatedAt": "2024-06-15T12:30:00.000Z",
+                "fileModifiedAt": "2024-06-15T12:30:00.000Z",
+                "localDateTime": detail.get("localDateTime"),
+                "isFavorite": False,
+                "isExternal": False,
+                "isEdited": False,
+                "visibility": "timeline",
+                "duration": 6000,
+                "exifInfo": {**detail.get("exifInfo", {}), "tags": []},
+            }
+        },
+    }
+
+    new_id: str | None = None
+    try:
+        async with JobStore(settings.database_path) as store:
+            await store.enqueue(source_id, payload, delay_seconds=0)
+            job = await store.claim_next()
+            assert job is not None
+            await Pipeline(settings, api, store).run_job(job)
+            job = await store.get(source_id)
+
+        assert job is not None
+        assert job.state is JobState.DONE, f"{job.state}: {job.skip_reason} {job.last_error}"
+        # Finished inside the job — the sweeper was never involved.
+        assert job.delete_after is None
+        new_id = job.new_asset_id
+        assert new_id is not None
+
+        # The checksum gate compared against a real server value, not a mock.
+        assert job.new_checksum == (await raw.get(f"/assets/{new_id}")).json()["checksum"]
+
+        # The original is not merely trashed — it is unreachable and absent from the trash.
+        gone = await raw.get(f"/assets/{source_id}")
+        assert gone.status_code in (400, 404), gone.text
+        trashed = await raw.post("/search/metadata", json={"withDeleted": True, "isTrashed": True})
+        trashed.raise_for_status()
+        assert source_id not in {item["id"] for item in trashed.json()["assets"]["items"]}
+
+        # Restoring is not a quiet no-op — the server rejects it outright, which is what
+        # the CLI turns into an explanation instead of a traceback.
+        with pytest.raises(ImmichError) as restore_failed:
+            await api.restore_assets([source_id])
+        assert restore_failed.value.status_code == 400
+    finally:
+        if new_id:
+            await raw.request("DELETE", "/assets", json={"ids": [new_id], "force": True})
 
 
 async def test_live_dry_run_changes_nothing(
