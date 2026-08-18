@@ -13,6 +13,7 @@ repository or an image layer.
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 from pathlib import Path
@@ -31,6 +32,9 @@ OUTPUT_PLACEHOLDER = "{output}"
 # Suffixes ffmpeg uses for encoders that need a GPU.
 HARDWARE_ENCODER_SUFFIXES = ("_qsv", "_vaapi", "_nvenc")
 DEFAULT_RENDER_NODE = "/dev/dri/renderD128"
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(RuntimeError):
@@ -71,6 +75,16 @@ class BehaviorSettings(BaseModel):
     dry_run: bool = True
     trash_original: bool = False
 
+    # How the original is removed once the replacement has been verified.
+    #   "trash"     — soft delete; recoverable from Immich's trash, `restore` undoes it.
+    #   "permanent" — `DELETE /assets` with force=true. Verified against a live v3.1.0
+    #                 instance: the asset vanishes from the database and its files are
+    #                 unlinked immediately, bypassing the trash entirely. There is no
+    #                 undo other than a backup of Postgres plus the upload directory.
+    delete_mode: Literal["trash", "permanent"] = "trash"
+
+    # 0 means "as soon as the verification chain passes", inline in the job rather than
+    # on the sweeper's next pass.
     retention_days: int = Field(default=7, ge=0)
     initial_delay_seconds: int = Field(default=300, ge=0)
     concurrency: int = Field(default=1, ge=1, le=4)
@@ -99,6 +113,28 @@ class BehaviorSettings(BaseModel):
 
     compressed_marker: str = ".cmp"
     metadata_key: str = "compressor"
+
+    @model_validator(mode="after")
+    def _validate_delete_mode(self) -> Self:
+        """Permanent deletion is irreversible — refuse the contradictory combinations.
+
+        Both guards catch a configuration that cannot mean what it says: deleting an
+        original for good while `trash_original` says not to touch it at all, or while
+        `dry_run` promises that nothing is mutated.
+        """
+        if self.delete_mode != "permanent":
+            return self
+        if not self.trash_original:
+            raise ConfigError(
+                "behavior.delete_mode: 'permanent' needs trash_original: true — "
+                "without it originals are never removed at all"
+            )
+        if self.dry_run:
+            raise ConfigError(
+                "behavior.delete_mode: 'permanent' is incompatible with dry_run: true — "
+                "a dry run must not delete anything"
+            )
+        return self
 
 
 class Preset(BaseModel):
@@ -289,3 +325,22 @@ def load_settings(config_path: Path | None = None) -> Settings:
     if not settings.webhook.token.get_secret_value():
         raise ConfigError("WEBHOOK__TOKEN is not set")
     return settings
+
+
+def warn_about_permanent_deletion(behavior: BehaviorSettings) -> None:
+    """Say it once, loudly, at startup — the setting has no undo and leaves no trace.
+
+    Called from the app lifespan rather than from :func:`load_settings`, because the
+    config is loaded before logging is configured and the line would otherwise go out
+    through the last-resort handler.
+    """
+    if behavior.delete_mode != "permanent":
+        return
+    logger.warning(
+        "!!! behavior.delete_mode = 'permanent': originals are deleted with force=true "
+        "%s, bypassing the trash. They cannot be restored — the only rollback is a "
+        "backup of Postgres and the upload directory. !!!",
+        "immediately after the replacement is verified"
+        if behavior.retention_days == 0
+        else f"{behavior.retention_days} day(s) after the replacement is verified",
+    )

@@ -67,7 +67,7 @@ or time out the server.
 | 7 | Copy | `PUT /assets/copy` — albums, favourite, shared links, stack, sidecar (the sidecar indirectly carries tags/description/rating/GPS, see below) |
 | 8 | Nudge | Re-reads the source, then `PUT /assets/{new}` for description/rating/GPS/date and `PUT /tags/assets` for tags — idempotent, and independent of the extraction race |
 | 9 | Markers | `compressor` metadata key on both assets — the hard loop guard, versioned so a changed sanity gate can invalidate its own old verdicts |
-| 10 | Deferred trash | `delete_after = now + retention_days`, swept by a background task |
+| 10 | Remove the original | Verified against the replacement, then `DELETE /assets`. `retention_days: 0` runs it inline; anything higher sets `delete_after = now + retention_days` and leaves it to a background sweeper. `delete_mode` decides trash vs. permanent |
 
 Every step is idempotent and the state is persisted in SQLite, so a crash between upload
 and copy resumes rather than duplicating work.
@@ -201,7 +201,7 @@ permissions; grant exactly these and nothing more:
 | `asset.upload` | `POST /assets` |
 | `asset.update` | `PUT /assets/{id}`, `PUT /assets/{id}/metadata` |
 | `asset.copy` | `PUT /assets/copy` |
-| `asset.delete` | `DELETE /assets` — **only needed if `trash_original: true`** |
+| `asset.delete` | `DELETE /assets` — **only needed if `trash_original: true`**, and the same permission covers the permanent `force: true` delete |
 | `tag.read` | `GET /tags` |
 | `tag.create` | `PUT /tags` (upsert by name) |
 | `tag.asset` | `PUT /tags/assets` |
@@ -229,7 +229,12 @@ The shipped defaults are deliberately inert:
 behavior:
   dry_run: true          # download nothing, upload nothing, delete nothing
   trash_original: false  # originals are never trashed
+  delete_mode: trash     # and when they are, it is a recoverable soft delete
 ```
+
+`delete_mode: permanent` is rejected at startup unless `trash_original: true` and
+`dry_run: false` — a configuration that says "delete for good" while also saying "change
+nothing" cannot be honoured, so the service refuses to start rather than guess.
 
 ### 3. Start it
 
@@ -325,11 +330,34 @@ Notes on the workflow:
    tags, rating, description, GPS, timeline position, stack and shared links on the new
    asset.
 3. **Enable trashing.** Only then set `trash_original: true` and grant `asset.delete`.
-   Originals move to the trash after `retention_days` (default 7) and stay recoverable
-   until the trash is emptied.
+   With the defaults (`delete_mode: trash`, `retention_days: 7`) originals move to the
+   trash after a week and stay recoverable until the trash is emptied.
+4. **Reclaim space immediately** — optional, and the point of no return. `delete_mode:
+   permanent` plus `retention_days: 0` deletes the original with `force: true` the moment
+   the replacement passes the verification chain. It never enters the trash, so
+   `immich-compressor restore` cannot bring it back. Do not enable this until step 3 has
+   run long enough that you trust the replacements.
 
-**Disk space is only reclaimed when the Immich trash is emptied.** Until then you are
-using *more* space, not less.
+**With `delete_mode: trash`, disk space is only reclaimed when the Immich trash is
+emptied.** Until then you are using *more* space, not less. `delete_mode: permanent`
+reclaims it at once — at the cost of every rollback below except a full backup restore.
+
+### The verification chain
+
+Both delete modes gate on the same four conditions, checked against the live server
+immediately before the delete. If any of them fails, nothing is deleted: the job stays in
+`pending_delete` and retries in an hour.
+
+1. The replacement asset exists and is not itself in the trash.
+2. The server's `checksum` equals the base64 SHA-1 the encoder computed for the file it
+   uploaded — proof that the stored bytes are the bytes we made.
+3. `exifInfo.dateTimeOriginal` is set on the replacement — proof that Immich's metadata
+   extraction ran, so the asset sits at the right place in the timeline.
+4. The `compressor` metadata marker is present on the replacement — proof that step 9
+   completed and the replacement is traceable back to its source.
+
+The chain runs in both modes on purpose: in `trash` mode a failing condition costs a retry
+and you find out while the delete is still undoable.
 
 ---
 
@@ -412,8 +440,16 @@ Failures retry with exponential backoff up to `max_attempts` (default 3), then l
 
 ## Rollback
 
-Nothing this service does is irreversible as long as the Immich trash has not been
-emptied.
+With `delete_mode: trash` (the default), nothing this service does is irreversible as long
+as the Immich trash has not been emptied.
+
+> **With `delete_mode: permanent` there is no rollback for the originals.** They are
+> deleted with `force: true`, which bypasses the trash entirely: the asset row is gone from
+> the database and its files are unlinked. `immich-compressor restore` and
+> **Utilities → Trash → Restore** both have nothing to work with — step 2 below does not
+> apply, and `restore` answers `HTTP 400 Not found` for the whole batch rather than
+> silently doing nothing. The only way back is restoring a backup of Postgres *and* the
+> upload directory from before the run. Take one before enabling the mode.
 
 **1. Stop the flow.**
 
@@ -426,7 +462,7 @@ curl -X PUT "$IMMICH_URL/api/workflows/$WORKFLOW_ID" \
 docker compose stop immich-compressor
 ```
 
-**2. Restore trashed originals.**
+**2. Restore trashed originals** (`delete_mode: trash` only).
 
 ```bash
 # Everything this service trashed:
@@ -450,9 +486,9 @@ docker compose down
 docker volume rm immich-compressor_compressor-state
 ```
 
-> **If the trash was already emptied, the original is gone.** There is no undo. Set
-> `retention_days` generously and do not empty the trash until you have spot-checked the
-> replacements.
+> **If the trash was already emptied — or `delete_mode: permanent` was in effect — the
+> original is gone.** There is no undo. On `delete_mode: trash`, set `retention_days`
+> generously and do not empty the trash until you have spot-checked the replacements.
 
 ---
 
@@ -464,7 +500,7 @@ captured webhook payloads are committed as test fixtures in `tests/fixtures/`.
 | Assumption | Result |
 |---|---|
 | Webhook body is `{type, trigger, data.asset}` | ✅ exact; also carries `createdAt`, `updatedAt`, `status`, `duration` |
-| `checksum` arrives as `{"type":"Buffer","data":[…]}` | ✅ — ignored, we do not need it |
+| `checksum` arrives as `{"type":"Buffer","data":[…]}` | ✅ **in the webhook payload only.** `GET /assets/{id}` returns the same digest as a base64 string (`"02MpaJkpzGHNbGwxWtencVNK7uY="`), and `base64(sha1(file)) == checksum` holds exactly — that is what the delete gate compares |
 | `duration` unit | integer **milliseconds** (`20000` for a 20 s clip), same unit as `POST /assets` |
 | `exifInfo.tags` are names, not IDs | ✅ |
 | Upload fields: `assetData`, `fileCreatedAt`, `fileModifiedAt`, `filename`, `isFavorite`, `visibility`, `duration` | ✅; `deviceAssetId`/`deviceId` no longer exist in v3 |
@@ -474,6 +510,8 @@ captured webhook payloads are committed as test fixtures in `tests/fixtures/`.
 | Asset metadata KV accepts free string keys and nested object values | ✅ |
 | Duplicate upload returns `{"status":"duplicate","id":<existing>}` | ✅ |
 | `DELETE /assets` without `force` is a soft delete | ✅ (`isTrashed: true`, restorable) |
+| `DELETE /assets` with `force: true` is a *permanent* delete | ✅ — the spec only says "force delete even if in use", so this was measured: the asset returns HTTP 400 `Not found` afterwards, does not appear in the trash view, and its files are unlinked from the upload directory. It works the same on an asset that is already in the trash, which is why `POST /trash/empty` is not needed |
+| `POST /trash/restore/assets` on a force-deleted asset | HTTP 400 `Not found or no asset.delete access` — not a quiet no-op, so `immich-compressor restore` explains the situation instead of raising |
 | Negative-lookahead regex in `assetFileFilter` | ✅ works |
 | A compressed upload re-triggers the workflow | ✅ — loop protection is genuinely required |
 
@@ -560,7 +598,7 @@ captured webhook payloads are committed as test fixtures in `tests/fixtures/`.
   that still holds the file can upload it again, and the service will compress it again —
   the marker does not help, because it is a new asset. Watch this during the rollout with
   a real device; there is no clean fix from this side.
-- **Space is only reclaimed when the trash is emptied.**
+- **Space is only reclaimed once the original is really gone.** With `delete_mode: trash` that means emptying the Immich trash; with `delete_mode: permanent` it happens as part of the delete, and cannot be undone.
 - **ML load.** Every new asset re-triggers thumbnails, metadata, smart search, faces and
   OCR. On a small box, keep `concurrency: 1`.
 - **External libraries and live photos are never touched**, by design.

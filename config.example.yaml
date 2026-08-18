@@ -23,8 +23,21 @@ behavior:
   trash_original: false    # false = originals are never trashed, only reported
   # ---------------------------------------------------------------------------------
 
-  retention_days: 7          # how long an original survives after being replaced
+  retention_days: 7          # how long an original survives after being replaced; 0 = at once
+  delete_mode: trash         # trash = soft delete, recoverable | permanent = gone for good
   initial_delay_seconds: 300 # let Immich finish thumbnails/ML/OCR before we touch the asset
+
+  # ---- Reclaim disk space immediately (irreversible) -------------------------------
+  # With these three, a verified original is force-deleted the moment its replacement
+  # passes the four checks (replacement present and untrashed, checksum matches the
+  # uploaded file, dateTimeOriginal set, compressor marker written). It bypasses the
+  # trash, so `immich-compressor restore` cannot bring it back and the only rollback is
+  # a backup of Postgres plus the upload directory. Uncomment only if you mean it.
+  #
+  #   trash_original: true
+  #   retention_days: 0
+  #   delete_mode: permanent
+  # ---------------------------------------------------------------------------------
   concurrency: 1             # 2 vCPU box: one ffmpeg at a time
   max_attempts: 3
   poll_interval_seconds: 5

@@ -335,6 +335,9 @@ class Pipeline:
                 asset_id,
                 state=JobState.UPLOADED,
                 new_asset_id=new_asset_id,
+                # Recorded now so the sweeper can still check it hours later, once the
+                # local output file has long been cleaned up.
+                new_checksum=result.checksum,
                 new_bytes=result.new_bytes,
                 ratio=round(result.ratio, 4),
             )
@@ -372,7 +375,9 @@ class Pipeline:
         await self._safe_mark(new_asset_id, marker)
         await self._safe_mark(asset_id, marker)
 
-        # --- Step 10: delayed trash ----------------------------------------------
+        # --- Step 10: remove the original ----------------------------------------
+        # Strictly after steps 7 and 8: `copy_asset` and `_apply_fields`/`_apply_tags`
+        # both read from the source, so anything that removes it has to come last.
         self.stats.processed += 1
         self.stats.bytes_saved += max(result.orig_bytes - result.new_bytes, 0)
 
@@ -385,11 +390,113 @@ class Pipeline:
             await self._store.update(asset_id, state=JobState.DONE)
             return
 
+        await self._store.update(asset_id, state=JobState.PENDING_DELETE)
+        if behavior.retention_days == 0:
+            # No retention window asked for, so the 60 s sweeper interval would be pure
+            # latency. Same code, same verification chain, just called here.
+            await self.finalize_original(job, new_asset_id, result.checksum)
+            return
+
         delete_after = datetime.now(UTC) + timedelta(days=behavior.retention_days)
-        await self._store.update(
-            asset_id, state=JobState.PENDING_DELETE, delete_after=delete_after
+        await self._store.update(asset_id, delete_after=delete_after)
+        logger.info(
+            "original %s scheduled for %s at %s",
+            asset_id,
+            behavior.delete_mode,
+            delete_after.isoformat(),
         )
-        logger.info("original %s scheduled for trash at %s", asset_id, delete_after.isoformat())
+
+    # ------------------------------------------------------------------ deletion
+
+    async def finalize_original(
+        self, job: Job, new_asset_id: str, expected_checksum: str | None
+    ) -> bool:
+        """Step 10b: verify the replacement, then remove the original.
+
+        The single place the original is ever deleted. Two callers: ``_run_media_steps``
+        inline when ``retention_days == 0``, and ``Worker._trash_one`` once the retention
+        window has elapsed. Returns ``True`` when the original is gone.
+
+        Anything that does not check out leaves the job in ``pending_delete`` with a
+        one-hour backoff, so a transient server state costs a retry rather than the
+        original.
+        """
+        asset_id = job.source_asset_id
+        permanent = self._settings.behavior.delete_mode == "permanent"
+        try:
+            problem = await self._verify_replacement(new_asset_id, expected_checksum)
+            if problem is not None:
+                logger.error("refusing to delete %s: %s", asset_id, problem)
+                await self._defer_deletion(asset_id, problem)
+                return False
+            # Deliberately *not* POST /trash/empty: that endpoint drops the user's entire
+            # trash, including assets they deleted by hand and may still want back. A
+            # force delete on the one asset id we are responsible for reclaims the same
+            # space with no collateral damage. Do not "simplify" this.
+            await self._client.delete_assets([asset_id], force=permanent)
+        except ImmichError as exc:
+            logger.error("could not delete %s: %s", asset_id, exc)
+            await self._defer_deletion(asset_id, str(exc))
+            return False
+
+        await self._store.update(asset_id, state=JobState.DONE, delete_after=None)
+        self.stats.deleted += 1
+        logger.info(
+            "original %s %s (replacement %s)",
+            asset_id,
+            "permanently deleted — not recoverable" if permanent else "moved to trash",
+            new_asset_id,
+        )
+        return True
+
+    async def _verify_replacement(
+        self, new_asset_id: str, expected_checksum: str | None
+    ) -> str | None:
+        """The gate in front of the delete. Returns the first failure, or ``None``.
+
+        All four conditions are checked in both delete modes. In ``trash`` mode the delete
+        is undoable and the chain is merely cheap insurance; in ``permanent`` mode it is
+        the only thing standing between a bad upload and a lost original — and running it
+        in both modes means a deployment discovers a failing condition while the delete is
+        still reversible.
+        """
+        replacement = await self._client.get_asset(new_asset_id)
+
+        # 1. The replacement is there and is not itself on its way out.
+        if replacement.is_trashed:
+            return f"replacement {new_asset_id} is itself trashed"
+
+        # 2. The server stored exactly the bytes we uploaded.
+        if expected_checksum is None:
+            return f"no checksum recorded for the file uploaded as {new_asset_id}"
+        if replacement.checksum is None:
+            return f"replacement {new_asset_id} reports no checksum"
+        if replacement.checksum != expected_checksum:
+            return (
+                f"checksum mismatch on {new_asset_id}: "
+                f"server {replacement.checksum!r} != uploaded {expected_checksum!r}"
+            )
+
+        # 3. Metadata extraction ran — otherwise the replacement has no capture date and
+        #    would land at the wrong place in the timeline.
+        if not replacement.exif_info.date_time_original:
+            return f"replacement {new_asset_id} has no exifInfo.dateTimeOriginal"
+
+        # 4. Step 9 got its marker written, so the replacement is traceable back here.
+        key = self._settings.behavior.metadata_key
+        if await self._client.has_metadata_key(new_asset_id, key) is None:
+            return f"replacement {new_asset_id} carries no {key!r} marker"
+
+        return None
+
+    async def _defer_deletion(self, asset_id: str, error: str) -> None:
+        """Back off an hour and stay in ``pending_delete`` so the sweeper tries again."""
+        await self._store.reschedule(asset_id, delay_seconds=3600.0, error=error)
+        await self._store.update(
+            asset_id,
+            state=JobState.PENDING_DELETE,
+            delete_after=datetime.now(UTC) + timedelta(hours=1),
+        )
 
     # ------------------------------------------------------------------ helpers
 
@@ -466,10 +573,13 @@ class Worker:
             self._tasks.append(asyncio.create_task(self._loop(index), name=f"worker-{index}"))
         self._tasks.append(asyncio.create_task(self._sweeper(), name="trash-sweeper"))
         logger.info(
-            "worker started (concurrency=%d, dry_run=%s, trash_original=%s)",
+            "worker started (concurrency=%d, dry_run=%s, trash_original=%s, "
+            "delete_mode=%s, retention_days=%d)",
             self._settings.behavior.concurrency,
             self._settings.behavior.dry_run,
             self._settings.behavior.trash_original,
+            self._settings.behavior.delete_mode,
+            self._settings.behavior.retention_days,
         )
 
     async def stop(self) -> None:
@@ -498,7 +608,11 @@ class Worker:
                 await asyncio.sleep(interval)
 
     async def _sweeper(self) -> None:
-        """Step 10b: move due originals into the trash (soft delete)."""
+        """Step 10b for jobs with a retention window: remove originals once they are due.
+
+        Jobs configured with ``retention_days: 0`` never reach this loop — the pipeline
+        finalises them inline, so the 60 s interval costs them nothing.
+        """
         while not self._stop.is_set():
             try:
                 await asyncio.sleep(60.0)
@@ -512,28 +626,11 @@ class Worker:
                 logger.exception("trash sweeper error")
 
     async def _trash_one(self, job: Job) -> None:
-        asset_id = job.source_asset_id
+        """The sweeper's call into the shared finaliser."""
         if not job.new_asset_id:
-            logger.error("refusing to trash %s: no replacement asset recorded", asset_id)
-            await self._store.mark_failed(asset_id, "no replacement asset recorded")
+            logger.error(
+                "refusing to delete %s: no replacement asset recorded", job.source_asset_id
+            )
+            await self._store.mark_failed(job.source_asset_id, "no replacement asset recorded")
             return
-        try:
-            # Last-second safety: the replacement must still exist and not be trashed.
-            replacement = await self._client.get_asset(job.new_asset_id)
-            if replacement.is_trashed:
-                logger.error(
-                    "refusing to trash %s: replacement %s is itself trashed",
-                    asset_id,
-                    job.new_asset_id,
-                )
-                await self._store.mark_failed(asset_id, "replacement is trashed")
-                return
-            await self._client.delete_assets([asset_id])
-        except ImmichError as exc:
-            logger.error("could not trash %s: %s", asset_id, exc)
-            await self._store.reschedule(asset_id, delay_seconds=3600.0, error=str(exc))
-            await self._store.update(asset_id, state=JobState.PENDING_DELETE)
-            return
-        await self._store.update(asset_id, state=JobState.DONE)
-        self.pipeline.stats.deleted += 1
-        logger.info("original %s moved to trash (replacement %s)", asset_id, job.new_asset_id)
+        await self.pipeline.finalize_original(job, job.new_asset_id, job.new_checksum)

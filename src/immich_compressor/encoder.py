@@ -7,6 +7,8 @@ never a shell string — so a filename can never be interpreted as a command.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import shutil
@@ -93,10 +95,27 @@ class EncodeResult:
     orig_bytes: int
     new_bytes: int
     probe: MediaProbe
+    # Base64 SHA-1 of ``output_path``, in the exact shape Immich reports as
+    # ``AssetResponseDto.checksum`` — see :func:`file_checksum`.
+    checksum: str
 
     @property
     def ratio(self) -> float:
         return self.new_bytes / self.orig_bytes if self.orig_bytes else 1.0
+
+
+def file_checksum(path: Path) -> str:
+    """Base64-encoded SHA-1 of ``path`` — the form ``GET /assets/{id}`` returns.
+
+    Verified against a live Immich v3.1.0 instance: uploading a file whose SHA-1 digest
+    base64-encodes to ``X`` yields an asset with ``"checksum": "X"``. Streamed in chunks
+    so a multi-gigabyte video never lands in memory.
+    """
+    digest = hashlib.sha1()  # noqa: S324 - not a security decision; Immich picked SHA-1
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return base64.b64encode(digest.digest()).decode("ascii")
 
 
 async def run_command(argv: list[str], *, timeout_s: float) -> tuple[int, str, str]:
@@ -321,6 +340,9 @@ async def encode(source: Path, preset: Preset, work_dir: Path) -> EncodeResult:
         orig_bytes=orig_bytes,
         new_bytes=output.stat().st_size,
         probe=await probe(output, is_still=preset.match_type != "VIDEO"),
+        # Hashed here, after the last write to the file, so it describes exactly the
+        # bytes the upload will send.
+        checksum=file_checksum(output),
     )
 
 
