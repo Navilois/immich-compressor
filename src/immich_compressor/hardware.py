@@ -613,7 +613,9 @@ def _device_rejection(spec: EncoderSpec, node: RenderNode) -> str | None:
         return (
             f"vainfo reports no HEVC encode entrypoint on {node.path} "
             f"(VAProfileHEVCMain : VAEntrypointEncSlice is missing), so this chip cannot "
-            "encode HEVC through VAAPI"
+            "encode HEVC through VAAPI. Note that Immich's own transcoding uses H.264, "
+            "which is a different entrypoint — a chip can do one and not the other, so a "
+            "GPU that works for Immich can still land here"
         )
     return None
 

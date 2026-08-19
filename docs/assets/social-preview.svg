@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="immich-compressor — recompress the originals in your Immich library, automatically, without ever losing one">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="immich-compressor — recompress the originals in your Immich library; nothing is deleted before its replacement is verified">
   <title>immich-compressor</title>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -16,8 +16,8 @@
 
   <g font-family="'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif">
     <text x="96" y="196" font-size="76" font-weight="700" fill="#f4f4f6">immich-compressor</text>
-    <text x="96" y="256" font-size="32" fill="#b9b8c6">Recompress the originals in your Immich library,</text>
-    <text x="96" y="300" font-size="32" fill="#b9b8c6">automatically, without ever losing one.</text>
+    <text x="96" y="256" font-size="32" fill="#b9b8c6">Recompress the originals in your Immich library.</text>
+    <text x="96" y="300" font-size="32" fill="#b9b8c6">Nothing is deleted before its replacement is verified.</text>
 
     <!-- The size story, shown rather than claimed. -->
     <g transform="translate(96, 372)">

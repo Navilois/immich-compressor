@@ -281,6 +281,10 @@ async def test_a_decode_only_chip_is_rejected_before_anything_is_probed() -> Non
     reason = _reason_for(candidates, "hevc_vaapi")
     assert "no HEVC encode entrypoint" in reason
     assert "VAEntrypointEncSlice" in reason
+    # The predictable follow-up question is "but my GPU works for Immich". Immich
+    # transcodes H.264, which is a different entrypoint, so answer it in the reason
+    # itself rather than waiting for the issue.
+    assert "H.264" in reason
 
 
 async def test_an_unreadable_render_node_names_the_group_to_add() -> None:

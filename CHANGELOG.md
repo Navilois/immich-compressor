@@ -57,6 +57,23 @@ not write it.
   guard, an image build, CodeQL and Dependabot; a tag-triggered release workflow.
 - `immich-compressor --version`.
 
+### Fixed
+
+- `setup` aborted against a correctly configured Immich. It validated the API key with
+  `GET /users/me`, which needs `user.read` — a permission this service deliberately never
+  requests. A live v3.1.0 answers **403** there for a valid key and **401** for a bogus one;
+  403 now counts as valid, and the distinction is recorded in `docs/immich-api-notes.md`.
+- `scripts/quickstart.sh` ran the setup container on the default bridge network, so the
+  documented `http://immich-server:2283/api` could never resolve. It now joins the Immich
+  network (`NETWORK=`, default `immich_default`).
+- `docker-compose.test.yaml` hard-coded `container_name: immich_server`, `immich_postgres`
+  and `immich_redis` — the same names Immich's own compose file uses — so the test stack
+  could not start on any host already running Immich. The names are gone and the host port
+  is configurable through `COMPOSE_HOST_PORT`.
+- `probe_hardware_encoder` reported libva's startup banner instead of the actual failure,
+  because the first five lines of ffmpeg's stderr are `libva info:` chatter and the
+  component prefix carries a per-run heap address.
+
 ### Changed
 
 - `docker-compose.yaml` pulls the published image instead of building locally, and

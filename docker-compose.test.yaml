@@ -1,16 +1,29 @@
-# Immich v3.1.0 test instance for developing/verifying immich-compressor.
+# Immich v3.1.0 test instance for developing and verifying immich-compressor.
 # Derived from the official docker-compose.yml of the v3.1.0 release.
 #
-# Host ports are bound to the container's routable address (see COMPOSE_BIND_IP,
-# default 172.25.0.2) instead of 0.0.0.0, as required by the environment rules.
+# NOT for production. It exists so the `live`-marked suite has something to drive.
 #
+#   cp testinstance/example.env testinstance/.env    # set a DB_PASSWORD of your own
 #   docker compose --env-file testinstance/.env -f docker-compose.test.yaml up -d
+#
+# Host ports bind to COMPOSE_BIND_IP (127.0.0.1 by default) rather than 0.0.0.0, so a
+# throwaway instance with a known admin password is never exposed on the network. The
+# port is COMPOSE_HOST_PORT, default 2283 — set it to something else when a real Immich
+# on the same host already has that port:
+#
+#   COMPOSE_HOST_PORT=12283 docker compose --env-file testinstance/.env \
+#     -f docker-compose.test.yaml up -d
+#
+# Deliberately no `container_name:` anywhere. Immich's own compose file names its
+# containers immich_server, immich_postgres and immich_redis, so pinning the same names
+# here made this stack impossible to start on a host that already runs Immich — which is
+# every host anyone would develop this on. Compose derives immich-test-immich-server-1
+# and friends from the project name instead, and the two stacks coexist.
 #
 name: immich-test
 
 services:
   immich-server:
-    container_name: immich_server
     image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-v3.1.0}
     volumes:
       - ./testinstance/library:/data
@@ -18,7 +31,7 @@ services:
     env_file:
       - testinstance/.env
     ports:
-      - '${COMPOSE_BIND_IP:-172.25.0.2}:2283:2283'
+      - '${COMPOSE_BIND_IP:-127.0.0.1}:${COMPOSE_HOST_PORT:-2283}:2283'
     depends_on:
       - redis
       - database
@@ -30,7 +43,6 @@ services:
   # significant CPU, and this container only has 2 vCPU / 8 GiB. Enable with
   # `--profile ml` if you want to test the `skip_if_named_people` guard end to end.
   immich-machine-learning:
-    container_name: immich_machine_learning
     image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-v3.1.0}
     profiles: ['ml']
     volumes:
@@ -42,14 +54,12 @@ services:
       disable: false
 
   redis:
-    container_name: immich_redis
     image: docker.io/valkey/valkey:9@sha256:8e8d64b405ce18f41b8e5ee20aa4687a8ed0022d1298f2ce31cdcf3a76e09411
     healthcheck:
       test: redis-cli ping || exit 1
     restart: unless-stopped
 
   database:
-    container_name: immich_postgres
     image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-immichtestpw}
@@ -66,7 +76,6 @@ services:
   # Records every webhook request verbatim to /out/webhook-capture.jsonl.
   # Only used while verifying the workflow payload shape.
   webhook-echo:
-    container_name: immich_webhook_echo
     image: python:3.12-alpine
     profiles: ['echo']
     volumes:
@@ -74,7 +83,7 @@ services:
     working_dir: /app
     command: ['python', '/app/echo_server.py']
     ports:
-      - '${COMPOSE_BIND_IP:-172.25.0.2}:8099:8099'
+      - '${COMPOSE_BIND_IP:-127.0.0.1}:${COMPOSE_ECHO_PORT:-8099}:8099'
     restart: unless-stopped
 
 volumes:
