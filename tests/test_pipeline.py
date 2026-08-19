@@ -25,19 +25,36 @@ from immich_compressor.store import JobStore
 
 BASE = "http://immich-test:2283/api"
 
-needs_ffmpeg = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None, reason="ffmpeg not installed"
-)
+needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 
 
 async def _make_clip(path: Path, *, bitrate: str = "8000k") -> Path:
     code, _, stderr = await run_command(
         [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=15:duration=2",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-            "-c:v", "mpeg4", "-b:v", bitrate, "-c:a", "aac", "-b:a", "128k",
-            "-shortest", "-metadata", "creation_time=2024-06-15T12:30:00Z", str(path),
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=15:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "mpeg4",
+            "-b:v",
+            bitrate,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            "-metadata",
+            "creation_time=2024-06-15T12:30:00Z",
+            str(path),
         ],
         timeout_s=180,
     )
@@ -54,9 +71,7 @@ async def _seed(store: JobStore, raw: dict[str, Any]) -> Job:
 
 
 def _mock_no_marker(asset_id: str) -> None:
-    respx.get(f"{BASE}/assets/{asset_id}/metadata").mock(
-        return_value=httpx.Response(200, json=[])
-    )
+    respx.get(f"{BASE}/assets/{asset_id}/metadata").mock(return_value=httpx.Response(200, json=[]))
 
 
 def _mock_extracted(asset_id: str) -> None:
@@ -197,9 +212,7 @@ def test_marker_blocks_reprocessing(value: dict[str, Any], blocks: bool) -> None
 
 
 @respx.mock
-async def test_named_people_are_left_alone(
-    settings: Settings, video_payload_raw: dict[str, Any]
-) -> None:
+async def test_named_people_are_left_alone(settings: Settings, video_payload_raw: dict[str, Any]) -> None:
     asset_id = video_payload_raw["data"]["asset"]["id"]
     _mock_no_marker(asset_id)
     _mock_asset_detail(asset_id, people=[{"id": "p1", "name": "Anna"}])
@@ -221,9 +234,7 @@ async def test_named_people_are_left_alone(
 
 @needs_ffmpeg
 @respx.mock
-async def test_full_pipeline(
-    settings: Settings, video_payload_raw: dict[str, Any], tmp_path: Path
-) -> None:
+async def test_full_pipeline(settings: Settings, video_payload_raw: dict[str, Any], tmp_path: Path) -> None:
     asset_id = video_payload_raw["data"]["asset"]["id"]
     new_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     clip = await _make_clip(tmp_path / "src.mp4")
@@ -246,15 +257,9 @@ async def test_full_pipeline(
             json=[{"id": "t1", "value": "urlaub"}, {"id": "t2", "value": "wien"}],
         )
     )
-    tag_assign = respx.put(f"{BASE}/tags/assets").mock(
-        return_value=httpx.Response(200, json={"count": 1})
-    )
-    mark_new = respx.put(f"{BASE}/assets/{new_id}/metadata").mock(
-        return_value=httpx.Response(200, json=[])
-    )
-    mark_old = respx.put(f"{BASE}/assets/{asset_id}/metadata").mock(
-        return_value=httpx.Response(200, json=[])
-    )
+    tag_assign = respx.put(f"{BASE}/tags/assets").mock(return_value=httpx.Response(200, json={"count": 1}))
+    mark_new = respx.put(f"{BASE}/assets/{new_id}/metadata").mock(return_value=httpx.Response(200, json=[]))
+    mark_old = respx.put(f"{BASE}/assets/{asset_id}/metadata").mock(return_value=httpx.Response(200, json=[]))
     delete = respx.delete(f"{BASE}/assets")
 
     async with JobStore(settings.database_path) as store:
@@ -432,9 +437,7 @@ async def test_no_gain_marks_the_original_and_uploads_nothing(
         return_value=httpx.Response(200, content=clip.read_bytes())
     )
     upload = respx.post(f"{BASE}/assets")
-    mark_old = respx.put(f"{BASE}/assets/{asset_id}/metadata").mock(
-        return_value=httpx.Response(200, json=[])
-    )
+    mark_old = respx.put(f"{BASE}/assets/{asset_id}/metadata").mock(return_value=httpx.Response(200, json=[]))
 
     async with JobStore(settings.database_path) as store:
         client = ImmichClient(BASE, "k")
@@ -595,9 +598,7 @@ async def test_retention_zero_deletes_inline_without_the_sweeper(
         video_payload_raw,
         tmp_path,
         new_id=new_id,
-        replacement=lambda upload: _mock_replacement(
-            new_id, checksum=lambda: _posted_checksum(upload)
-        ),
+        replacement=lambda upload: _mock_replacement(new_id, checksum=lambda: _posted_checksum(upload)),
     )
 
     assert job is not None
@@ -605,9 +606,7 @@ async def test_retention_zero_deletes_inline_without_the_sweeper(
     # Nothing left for the sweeper to pick up.
     assert job.delete_after is None
     assert delete.call_count == 1
-    assert json.loads(delete.calls.last.request.content)["ids"] == [
-        video_payload_raw["data"]["asset"]["id"]
-    ]
+    assert json.loads(delete.calls.last.request.content)["ids"] == [video_payload_raw["data"]["asset"]["id"]]
 
 
 @needs_ffmpeg
@@ -637,9 +636,7 @@ async def test_a_failed_verification_never_deletes_the_original(
     new_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
     def _replacement(upload: respx.Route) -> None:
-        _mock_replacement(
-            new_id, **{"checksum": lambda: _posted_checksum(upload), **broken}
-        )
+        _mock_replacement(new_id, **{"checksum": lambda: _posted_checksum(upload), **broken})
 
     job, delete = await _run_until_deletion(
         settings, video_payload_raw, tmp_path, new_id=new_id, replacement=_replacement
@@ -680,9 +677,7 @@ async def test_delete_mode_decides_the_force_flag(
         video_payload_raw,
         tmp_path,
         new_id=new_id,
-        replacement=lambda upload: _mock_replacement(
-            new_id, checksum=lambda: _posted_checksum(upload)
-        ),
+        replacement=lambda upload: _mock_replacement(new_id, checksum=lambda: _posted_checksum(upload)),
     )
 
     assert job is not None and job.state is JobState.DONE, job.last_error if job else "no job"
@@ -705,9 +700,7 @@ async def test_the_uploaded_checksum_is_persisted_for_the_sweeper(
         video_payload_raw,
         tmp_path,
         new_id=new_id,
-        replacement=lambda upload: _mock_replacement(
-            new_id, checksum=lambda: _posted_checksum(upload)
-        ),
+        replacement=lambda upload: _mock_replacement(new_id, checksum=lambda: _posted_checksum(upload)),
     )
 
     assert delete.call_count == 0
@@ -724,9 +717,7 @@ def _test_client(settings: Settings) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def test_webhook_requires_the_shared_secret(
-    settings: Settings, video_payload_raw: dict[str, Any]
-) -> None:
+def test_webhook_requires_the_shared_secret(settings: Settings, video_payload_raw: dict[str, Any]) -> None:
     with _test_client(settings) as client:
         assert client.post("/webhook", json=video_payload_raw).status_code == 401
         assert (
@@ -739,9 +730,7 @@ def test_webhook_requires_the_shared_secret(
         )
 
 
-def test_webhook_accepts_and_is_idempotent(
-    settings: Settings, video_payload_raw: dict[str, Any]
-) -> None:
+def test_webhook_accepts_and_is_idempotent(settings: Settings, video_payload_raw: dict[str, Any]) -> None:
     headers = {"X-Compressor-Token": "test-token"}
     settings.behavior.initial_delay_seconds = 3600  # keep the worker away from the job
     with _test_client(settings) as client:
@@ -760,9 +749,7 @@ def test_webhook_accepts_and_is_idempotent(
 
 def test_webhook_rejects_a_malformed_body(settings: Settings) -> None:
     with _test_client(settings) as client:
-        response = client.post(
-            "/webhook", json={"nope": True}, headers={"X-Compressor-Token": "test-token"}
-        )
+        response = client.post("/webhook", json={"nope": True}, headers={"X-Compressor-Token": "test-token"})
         assert response.status_code == 422
 
 
@@ -777,15 +764,11 @@ def test_stats_and_health(settings: Settings) -> None:
         assert stats["config"]["trash_original"] is False
 
 
-def test_reprocess_requires_the_shared_secret(
-    settings: Settings, video_payload_raw: dict[str, Any]
-) -> None:
+def test_reprocess_requires_the_shared_secret(settings: Settings, video_payload_raw: dict[str, Any]) -> None:
     asset_id = video_payload_raw["data"]["asset"]["id"]
     with _test_client(settings) as client:
         assert client.post(f"/reprocess/{asset_id}").status_code == 401
         assert (
-            client.post(
-                f"/reprocess/{asset_id}", headers={"X-Compressor-Token": "test-token"}
-            ).status_code
+            client.post(f"/reprocess/{asset_id}", headers={"X-Compressor-Token": "test-token"}).status_code
             == 404
         )

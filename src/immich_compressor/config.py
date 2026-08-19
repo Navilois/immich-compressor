@@ -228,13 +228,9 @@ class Preset(BaseModel):
     @property
     def render_node(self) -> str:
         """The DRM device the preset pins itself to, or the conventional default."""
-        return self._value_after(("-qsv_device", "-vaapi_device", "-hwaccel_device")) or (
-            DEFAULT_RENDER_NODE
-        )
+        return self._value_after(("-qsv_device", "-vaapi_device", "-hwaccel_device")) or (DEFAULT_RENDER_NODE)
 
-    def _value_after(
-        self, flags: tuple[str, ...], *, endswith: tuple[str, ...] | None = None
-    ) -> str | None:
+    def _value_after(self, flags: tuple[str, ...], *, endswith: tuple[str, ...] | None = None) -> str | None:
         tokens = shlex.split(self.cmd)
         for index, token in enumerate(tokens[:-1]):
             if token in flags:

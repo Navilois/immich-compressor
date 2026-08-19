@@ -34,11 +34,29 @@ needs_still_tools = pytest.mark.skipif(
 async def _make_clip(path: Path, *, seconds: int = 2, size: str = "320x240", bitrate: str = "4000k") -> Path:
     code, _, stderr = await run_command(
         [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=15:duration={seconds}",
-            "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
-            "-c:v", "mpeg4", "-b:v", bitrate, "-c:a", "aac", "-b:a", "128k",
-            "-shortest", "-metadata", "creation_time=2024-06-15T12:30:00Z",
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc2=size={size}:rate=15:duration={seconds}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={seconds}",
+            "-c:v",
+            "mpeg4",
+            "-b:v",
+            bitrate,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            "-metadata",
+            "creation_time=2024-06-15T12:30:00Z",
             str(path),
         ],
         timeout_s=180,
@@ -51,9 +69,20 @@ async def _rotate(source: Path, target: Path, degrees: int = 90) -> Path:
     """Remux with a display matrix — what every portrait phone clip carries."""
     code, _, stderr = await run_command(
         [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-display_rotation", str(degrees), "-i", str(source),
-            "-c", "copy", "-map_metadata", "0", "-movflags", "use_metadata_tags",
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-display_rotation",
+            str(degrees),
+            "-i",
+            str(source),
+            "-c",
+            "copy",
+            "-map_metadata",
+            "0",
+            "-movflags",
+            "use_metadata_tags",
             str(target),
         ],
         timeout_s=180,
@@ -71,7 +100,9 @@ async def _make_still(path: Path, *, orientation: int = 6, size: str = "1200x800
     assert code == 0, stderr
     code, _, stderr = await run_command(
         [
-            "exiftool", "-quiet", "-overwrite_original",
+            "exiftool",
+            "-quiet",
+            "-overwrite_original",
             f"-Orientation#={orientation}",
             "-DateTimeOriginal=2024:06:15 12:30:00",
             "-Make=TestCam",
@@ -154,9 +185,7 @@ async def test_encode_shrinks_and_passes_the_gate(
     assert sanity.ok, sanity.reason()
 
 
-async def test_sanity_rejects_when_there_is_no_gain(
-    tmp_path: Path, behavior: BehaviorSettings
-) -> None:
+async def test_sanity_rejects_when_there_is_no_gain(tmp_path: Path, behavior: BehaviorSettings) -> None:
     """A "compression" that barely shrinks must not reach the upload step."""
     clip = await _make_clip(tmp_path / "in.mp4", bitrate="600k")
     work = tmp_path / "work"
@@ -181,9 +210,7 @@ async def test_sanity_rejects_when_there_is_no_gain(
     assert any("no gain" in failure for failure in sanity.failures)
 
 
-async def test_sanity_rejects_resolution_change(
-    tmp_path: Path, behavior: BehaviorSettings
-) -> None:
+async def test_sanity_rejects_resolution_change(tmp_path: Path, behavior: BehaviorSettings) -> None:
     clip = await _make_clip(tmp_path / "in.mp4", size="640x480", bitrate="8000k")
     work = tmp_path / "work"
     work.mkdir()
@@ -316,11 +343,28 @@ async def test_sanity_rejects_a_bit_depth_drop(tmp_path: Path, behavior: Behavio
     source = tmp_path / "10bit.mp4"
     code, _, stderr = await run_command(
         [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=15:duration=1",
-            "-c:v", "libx265", "-preset", "ultrafast", "-crf", "20",
-            "-pix_fmt", "yuv420p10le", "-x265-params", "log-level=none:pools=2",
-            "-threads", "2", "-metadata", "creation_time=2024-06-15T12:30:00Z",
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=15:duration=1",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-x265-params",
+            "log-level=none:pools=2",
+            "-threads",
+            "2",
+            "-metadata",
+            "creation_time=2024-06-15T12:30:00Z",
             str(source),
         ],
         timeout_s=300,
