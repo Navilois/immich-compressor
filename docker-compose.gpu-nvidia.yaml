@@ -1,0 +1,29 @@
+# Optional overlay for an NVIDIA GPU, for the hevc_nvenc preset.
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.gpu-nvidia.yaml up -d
+#
+# `immich-compressor setup` writes
+# COMPOSE_FILE=docker-compose.yaml:docker-compose.gpu-nvidia.yaml into .env when it finds
+# a card, after which a plain `docker compose up -d` picks this file up on its own.
+#
+# Needs the NVIDIA Container Toolkit on the host (`nvidia-ctk runtime configure`). Unlike
+# /dev/dri there is no render group to join: the toolkit injects the devices and the
+# driver libraries into the container itself.
+#
+# NOT verified on real hardware by this project — there is no NVIDIA card on the machine
+# it was developed on. The preset and this overlay follow NVIDIA's documented setup, and
+# `immich-compressor hardware` will tell you within seconds whether it works on yours,
+# because it runs a real one-frame encode before choosing anything. Reports welcome.
+
+services:
+  immich-compressor:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: video,compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${NVIDIA_GPU_COUNT:-1}
+              capabilities: [gpu, video]

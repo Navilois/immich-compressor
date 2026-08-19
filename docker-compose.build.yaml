@@ -1,0 +1,15 @@
+# Build the image from this checkout instead of pulling the published one.
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.build.yaml up -d --build
+#
+# For contributors and for anyone who would rather not trust a prebuilt image. Everything
+# else — configuration, volumes, network — stays exactly as the base file has it.
+
+services:
+  immich-compressor:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-0.0.0-dev}
+    image: immich-compressor:local
+    pull_policy: never
