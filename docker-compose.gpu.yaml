@@ -1,7 +1,12 @@
-# Optional overlay that hands the container an Intel GPU, for the *_qsv / *_vaapi presets.
+# Optional overlay that hands the container an Intel or AMD GPU, for the *_qsv and
+# *_vaapi presets.
 #
 #   RENDER_GID=$(getent group render | cut -d: -f3) \
-#     docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d --build
+#     docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d
+#
+# `immich-compressor setup` writes both RENDER_GID and
+# COMPOSE_FILE=docker-compose.yaml:docker-compose.gpu.yaml into .env, after which a plain
+# `docker compose up -d` picks this file up on its own.
 #
 # Deliberately not part of the base file: `devices:` pointing at a path the host does not
 # have makes the container fail to start outright ("error gathering device information
@@ -10,11 +15,14 @@
 #
 # The container runs as uid 10001, so it also needs the host's render group — without it
 # opening renderD128 fails with "Permission denied", which reads like a driver problem
-# but is not.
+# but is not. `immich-compressor hardware` says so explicitly when it happens.
+#
+# Intel and AMD both work through the same passthrough: the driver differs, the device
+# does not. NVIDIA is different and lives in docker-compose.gpu-nvidia.yaml.
 
 services:
   immich-compressor:
     devices:
       - /dev/dri:/dev/dri
     group_add:
-      - "${RENDER_GID:?run: RENDER_GID=$(getent group render | cut -d: -f3)}"
+      - "${RENDER_GID:?set RENDER_GID, e.g. RENDER_GID=$(getent group render | cut -d: -f3)}"

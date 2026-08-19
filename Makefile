@@ -58,11 +58,16 @@ docs: $(PY)
 docs-check: $(PY)
 	$(PY) scripts/gen_docs.py --check
 
+# The base file refuses to render without the two secrets, which is the point. Feed it
+# obvious placeholders so validation does not depend on a configured deployment.
+COMPOSE_ENV := IMMICH_API_KEY=placeholder COMPRESSOR_TOKEN=placeholder RENDER_GID=993
+
 compose-check:
-	docker compose -f docker-compose.yaml config -q
-	docker compose -f docker-compose.yaml -f docker-compose.build.yaml config -q
-	RENDER_GID=$${RENDER_GID:-993} docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml config -q
-	docker compose -f docker-compose.yaml -f docker-compose.gpu-nvidia.yaml config -q
+	env $(COMPOSE_ENV) docker compose -f docker-compose.yaml config -q
+	env $(COMPOSE_ENV) docker compose -f docker-compose.yaml -f docker-compose.build.yaml config -q
+	env $(COMPOSE_ENV) docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml config -q
+	env $(COMPOSE_ENV) docker compose -f docker-compose.yaml -f docker-compose.gpu-nvidia.yaml config -q
+	env $(COMPOSE_ENV) docker compose -f docker-compose.yaml -f docker-compose.override.example.yaml config -q
 
 check: lint test docs-check compose-check
 

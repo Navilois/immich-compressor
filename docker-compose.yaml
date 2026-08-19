@@ -1,40 +1,52 @@
-# immich-compressor service.
+# immich-compressor.
 #
-# Attach it to the network your Immich stack already uses so the workflow webhook can
-# reach it by service name and it can reach immich-server the same way. Adjust
-# `networks.immich.name` to your Immich compose project's network.
-#
-#   cp config.example.yaml config.yaml
-#   export IMMICH_API_KEY=...  COMPRESSOR_TOKEN=...
 #   docker compose up -d
+#
+# `immich-compressor setup` writes the .env this file reads. Customise the deployment in
+# docker-compose.override.yaml (compose loads it automatically) rather than here — see
+# docker-compose.override.example.yaml.
+#
+# The service has to sit on the same docker network as your Immich stack, so the workflow
+# webhook can reach it by name and it can reach immich-server the same way. Set
+# IMMICH_NETWORK in .env to that network's name.
 #
 name: immich-compressor
 
 services:
   immich-compressor:
-    build: .
-    image: immich-compressor:1.1.0
+    image: ghcr.io/navilois/immich-compressor:1
     container_name: immich-compressor
-    #restart: unless-stopped
+    restart: unless-stopped
     environment:
       # Secrets come from the environment only; never from config.yaml.
-      IMMICH__API_KEY: ${IMMICH_API_KEY:?IMMICH_API_KEY is required}
-      WEBHOOK__TOKEN: ${COMPRESSOR_TOKEN:?COMPRESSOR_TOKEN is required}
+      IMMICH__API_KEY: ${IMMICH_API_KEY:?IMMICH_API_KEY is required — run `immich-compressor setup`}
+      WEBHOOK__TOKEN: ${COMPRESSOR_TOKEN:?COMPRESSOR_TOKEN is required — run `immich-compressor setup`}
       IMMICH__BASE_URL: ${IMMICH_BASE_URL:-http://immich-server:2283/api}
-      # Uncomment only after a dry run has been reviewed.
-      # BEHAVIOR__DRY_RUN: "false"
-      # BEHAVIOR__TRASH_ORIGINAL: "false"
+      # Going live is a change to docker-compose.override.yaml or config.yaml, never here.
+      # The shipped defaults are inert: nothing is uploaded, nothing is deleted.
+      # docs/safety.md walks through the four stages.
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - compressor-state:/var/lib/immich-compressor
       - compressor-work:/var/tmp/immich-compressor
-    # GPU encoding is opt-in through docker-compose.gpu.yaml — see the header there.
-    # 2 vCPU box: one ffmpeg run must not be able to starve Immich itself.
-    cpus: 1.5
-    mem_limit: 2g
+
+    # GPU encoding is opt-in through an overlay file — see the header of
+    # docker-compose.gpu.yaml for why it cannot live here.
+
+    # Sizing: leave Immich at least half the host's cores. The encoder reads this limit
+    # from the container's own cgroup and pins its thread count to it, so raising `cpus`
+    # is all you need to do — there is no second number to keep in sync.
+    # A 4-core box: cpus 2. An 8-core box: cpus 4. Memory is per encode, not per core.
+    cpus: ${COMPRESSOR_CPUS:-2}
+    mem_limit: ${COMPRESSOR_MEMORY:-2g}
     pids_limit: 512
-    # No host port by default — Immich reaches the service over the shared network.
-    # Publish deliberately (and never on 0.0.0.0) if you want /stats from outside:
+
+    # The image ships its own HEALTHCHECK (GET /healthz every 30s), so `docker compose ps`
+    # reports healthy/unhealthy without anything here. Repeating it in this file would only
+    # create a second copy to keep in sync.
+
+    # No host port by default — Immich reaches the service over the shared network, and
+    # /stats and /metrics are unauthenticated. Publish deliberately, never on 0.0.0.0:
     # ports:
     #   - '127.0.0.1:8080:8080'
     networks:

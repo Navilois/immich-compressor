@@ -23,6 +23,13 @@ from .encoder import (
 )
 from .hardware import HardwareReport, apply_to_settings, format_report
 from .models import JobState, SkipReason
+from .setup_cmd import (
+    DEFAULT_BASE_URL,
+    DEFAULT_NETWORK,
+    DEFAULT_WEBHOOK_URL,
+    SetupOptions,
+    run_setup,
+)
 from .store import JobStore
 
 logger = logging.getLogger("immich_compressor")
@@ -122,6 +129,24 @@ def cmd_check(args: argparse.Namespace) -> int:
 def _hardware_report(settings: Settings) -> HardwareReport:
     _, report = apply_to_settings(settings, always_detect=True)
     return report
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Guided first-run setup. Deliberately does not load config.yaml — it writes one."""
+    _configure_logging("WARNING")
+    return run_setup(
+        SetupOptions(
+            base_url=args.url,
+            api_key=args.api_key or "",
+            session_token=args.session_token,
+            network=args.network,
+            webhook_url=args.webhook_url,
+            directory=Path(args.directory),
+            non_interactive=args.non_interactive,
+            force=args.force,
+            skip_workflow=args.no_workflow,
+        )
+    )
 
 
 def cmd_hardware(args: argparse.Namespace) -> int:
@@ -387,6 +412,28 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("check", help="validate config, reach the Immich API, confirm the encoder").set_defaults(
         func=cmd_check
     )
+
+    setup_parser = sub.add_parser(
+        "setup", help="guided first-run setup: keys, permissions, hardware, config, workflow"
+    )
+    setup_parser.add_argument("--url", default=DEFAULT_BASE_URL, help="Immich API base URL")
+    setup_parser.add_argument("--api-key", help="Immich API key (or set IMMICH_API_KEY)")
+    setup_parser.add_argument(
+        "--session-token", help="browser session token, used only to create the workflow"
+    )
+    setup_parser.add_argument(
+        "--network", default=DEFAULT_NETWORK, help="docker network your Immich stack uses"
+    )
+    setup_parser.add_argument("--webhook-url", default=DEFAULT_WEBHOOK_URL, help="URL Immich should call")
+    setup_parser.add_argument("--directory", default=".", help="where to write config.yaml and .env")
+    setup_parser.add_argument(
+        "--non-interactive", action="store_true", help="never prompt; use flags and defaults"
+    )
+    setup_parser.add_argument(
+        "--force", action="store_true", help="overwrite config.yaml and replace stored secrets"
+    )
+    setup_parser.add_argument("--no-workflow", action="store_true", help="do not create the Immich workflow")
+    setup_parser.set_defaults(func=cmd_setup)
 
     hardware_parser = sub.add_parser(
         "hardware", help="show which encoder this machine gets, and why the others were not"
