@@ -174,8 +174,7 @@ class JobStore:
             return None
         asset_id: str = row["source_asset_id"]
         await self._conn.execute(
-            "UPDATE jobs SET state = ?, attempts = attempts + 1, updated_at = ? "
-            "WHERE source_asset_id = ?",
+            "UPDATE jobs SET state = ?, attempts = attempts + 1, updated_at = ? WHERE source_asset_id = ?",
             (JobState.RUNNING.value, now, asset_id),
         )
         await self._conn.commit()
@@ -264,9 +263,7 @@ class JobStore:
         return asset_ids
 
     async def delete(self, source_asset_id: str) -> bool:
-        cursor = await self._conn.execute(
-            "DELETE FROM jobs WHERE source_asset_id = ?", (source_asset_id,)
-        )
+        cursor = await self._conn.execute("DELETE FROM jobs WHERE source_asset_id = ?", (source_asset_id,))
         await self._conn.commit()
         return cursor.rowcount > 0
 
@@ -294,8 +291,7 @@ class JobStore:
     async def skipped_asset_ids(self, reason: SkipReason) -> list[str]:
         """Every asset currently parked in ``skipped`` for one specific reason."""
         async with self._conn.execute(
-            "SELECT source_asset_id FROM jobs WHERE state = ? AND skip_reason = ? "
-            "ORDER BY updated_at ASC",
+            "SELECT source_asset_id FROM jobs WHERE state = ? AND skip_reason = ? ORDER BY updated_at ASC",
             (JobState.SKIPPED.value, reason.value),
         ) as cursor:
             return [row["source_asset_id"] for row in await cursor.fetchall()]
@@ -313,8 +309,7 @@ class JobStore:
         async with self._conn.execute("SELECT state, COUNT(*) AS n FROM jobs GROUP BY state") as cur:
             by_state = {row["state"]: row["n"] for row in await cur.fetchall()}
         async with self._conn.execute(
-            "SELECT skip_reason, COUNT(*) AS n FROM jobs WHERE skip_reason IS NOT NULL "
-            "GROUP BY skip_reason"
+            "SELECT skip_reason, COUNT(*) AS n FROM jobs WHERE skip_reason IS NOT NULL GROUP BY skip_reason"
         ) as cur:
             by_reason = {row["skip_reason"]: row["n"] for row in await cur.fetchall()}
         async with self._conn.execute(

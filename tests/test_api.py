@@ -43,9 +43,7 @@ def test_sanitize_rating(value: int | None, expected: int | None) -> None:
 
 @respx.mock
 async def test_api_key_header_is_sent(client: ImmichClient) -> None:
-    route = respx.get(f"{BASE}/server/ping").mock(
-        return_value=httpx.Response(200, json={"res": "pong"})
-    )
+    route = respx.get(f"{BASE}/server/ping").mock(return_value=httpx.Response(200, json={"res": "pong"}))
     assert await client.ping() is True
     assert route.calls.last.request.headers["x-api-key"] == "test-key"
 
@@ -155,9 +153,7 @@ async def test_tag_flow(client: ImmichClient) -> None:
             ],
         )
     )
-    assign = respx.put(f"{BASE}/tags/assets").mock(
-        return_value=httpx.Response(200, json={"count": 2})
-    )
+    assign = respx.put(f"{BASE}/tags/assets").mock(return_value=httpx.Response(200, json={"count": 2}))
     tags = await client.upsert_tags(["urlaub", "wien"])
     count = await client.tag_assets([tag.id for tag in tags], ["a1"])
     assert count == 2
@@ -181,9 +177,7 @@ async def test_delete_is_soft_by_default(client: ImmichClient) -> None:
 
 @respx.mock
 async def test_download_streams_to_disk(client: ImmichClient, tmp_path: Path) -> None:
-    respx.get(f"{BASE}/assets/a1/original").mock(
-        return_value=httpx.Response(200, content=b"x" * 4096)
-    )
+    respx.get(f"{BASE}/assets/a1/original").mock(return_value=httpx.Response(200, content=b"x" * 4096))
     target = tmp_path / "orig.mp4"
     written = await client.download_original("a1", target)
     assert written == 4096
@@ -193,9 +187,7 @@ async def test_download_streams_to_disk(client: ImmichClient, tmp_path: Path) ->
 
 
 @respx.mock
-async def test_download_failure_leaves_no_partial_file(
-    client: ImmichClient, tmp_path: Path
-) -> None:
+async def test_download_failure_leaves_no_partial_file(client: ImmichClient, tmp_path: Path) -> None:
     respx.get(f"{BASE}/assets/a1/original").mock(return_value=httpx.Response(404))
     target = tmp_path / "orig.mp4"
     with pytest.raises(ImmichError):

@@ -100,9 +100,7 @@ def test_missing_api_key_fails_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         load_settings(_write(tmp_path, _MINIMAL))
 
 
-def test_enabled_type_without_preset_fails_fast(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_enabled_type_without_preset_fails_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
     body = _MINIMAL.replace("enabled_types: [VIDEO]", "enabled_types: [VIDEO, IMAGE]")
@@ -159,9 +157,7 @@ def test_suffix_must_start_with_dot() -> None:
 
 
 def test_argv_renders_without_a_shell() -> None:
-    preset = Preset(
-        name="p", type="VIDEO", cmd="ffmpeg -i {input} -c copy {output}", suffix=".mp4"
-    )
+    preset = Preset(name="p", type="VIDEO", cmd="ffmpeg -i {input} -c copy {output}", suffix=".mp4")
     argv = preset.argv(Path("/tmp/in put.mov"), Path("/tmp/out.mp4"))
     # The space in the filename stays inside a single argv element — it can never be
     # re-split into another argument, let alone another command.
@@ -195,17 +191,13 @@ def test_permanent_delete_mode_loads_when_it_is_coherent(
 ) -> None:
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
-    body = _with_behavior(
-        dry_run=False, trash_original=True, retention_days=0, delete_mode="permanent"
-    )
+    body = _with_behavior(dry_run=False, trash_original=True, retention_days=0, delete_mode="permanent")
     settings = load_settings(_write(tmp_path, body))
     assert settings.behavior.delete_mode == "permanent"
     assert settings.behavior.retention_days == 0
 
 
-def test_delete_mode_defaults_to_the_recoverable_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_delete_mode_defaults_to_the_recoverable_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
     assert load_settings(_write(tmp_path, _MINIMAL)).behavior.delete_mode == "trash"

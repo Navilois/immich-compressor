@@ -57,3 +57,16 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 ENTRYPOINT ["immich-compressor"]
 CMD ["serve"]
+
+# Last on purpose: the labels change on every release, and anything after them would lose
+# its build cache with each version bump.
+# Set by the release workflow and by `make image`; the single source of truth is
+# __version__ in src/immich_compressor/__init__.py.
+ARG VERSION=0.0.0-dev
+
+LABEL org.opencontainers.image.title="immich-compressor" \
+      org.opencontainers.image.description="Out-of-band recompression for Immich assets, driven by a workflow webhook." \
+      org.opencontainers.image.source="https://github.com/Navilois/immich-compressor" \
+      org.opencontainers.image.documentation="https://github.com/Navilois/immich-compressor#readme" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${VERSION}"

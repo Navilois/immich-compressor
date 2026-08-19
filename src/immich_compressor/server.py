@@ -19,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from . import __version__
 from .api import ImmichClient
 from .config import Settings, load_settings, warn_about_permanent_deletion
 from .encoder import probe_hardware_encoder
@@ -97,7 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="immich-compressor",
-        version="1.0.0",
+        version=__version__,
         description="Out-of-band recompression for Immich assets, driven by a workflow webhook.",
         lifespan=lifespan,
     )
@@ -111,9 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         successfully", so a schema mismatch is otherwise completely invisible on both
         sides — which is exactly how the `exifInfo.tags: null` bug hid.
         """
-        logger.error(
-            "rejected %s %s with 422: %s", request.method, request.url.path, exc.errors()
-        )
+        logger.error("rejected %s %s with 422: %s", request.method, request.url.path, exc.errors())
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
 
     async def verify_token(request: Request) -> None:
@@ -121,8 +120,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expected = resolved.webhook.token.get_secret_value()
         presented = request.headers.get(resolved.webhook.header_name, "")
         if not presented or not hmac.compare_digest(presented, expected):
-            logger.warning("rejected webhook from %s: bad or missing shared secret",
-                           request.client.host if request.client else "unknown")
+            logger.warning(
+                "rejected webhook from %s: bad or missing shared secret",
+                request.client.host if request.client else "unknown",
+            )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
     @app.post(

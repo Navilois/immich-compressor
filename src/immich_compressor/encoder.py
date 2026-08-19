@@ -281,9 +281,7 @@ async def copy_metadata(
         raise EncodeError(f"exiftool metadata copy failed: {stderr.strip()[:400]}")
 
 
-async def probe_hardware_encoder(
-    encoder_name: str, device: str, *, timeout_s: float = 60.0
-) -> str | None:
+async def probe_hardware_encoder(encoder_name: str, device: str, *, timeout_s: float = 60.0) -> str | None:
     """Encode a single black frame to prove the GPU path actually works.
 
     Returns ``None`` on success, otherwise the reason — a missing driver, a render node
@@ -398,9 +396,7 @@ async def check_sanity(
         if source_probe.duration_s is not None and out.duration_s is not None:
             drift = abs(source_probe.duration_s - out.duration_s)
             if drift > behavior.duration_tolerance_s:
-                failures.append(
-                    f"duration drift {drift:.3f}s exceeds {behavior.duration_tolerance_s}s"
-                )
+                failures.append(f"duration drift {drift:.3f}s exceeds {behavior.duration_tolerance_s}s")
         elif source_probe.duration_s is not None:
             failures.append("output has no readable duration")
 

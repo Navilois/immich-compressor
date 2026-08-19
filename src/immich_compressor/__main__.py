@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .api import ImmichClient, ImmichError
 from .config import ConfigError, Settings, load_settings
 from .encoder import EncodeError, MediaProbe, check_sanity, encode, probe, probe_hardware_encoder
@@ -327,13 +328,12 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="immich-compressor", description=__doc__)
+    parser.add_argument("--version", action="version", version=f"immich-compressor {__version__}")
     parser.add_argument("-c", "--config", help="path to config.yaml (default: $COMPRESSOR_CONFIG)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("serve", help="run the webhook service").set_defaults(func=cmd_serve)
-    sub.add_parser("check", help="validate config and reach the Immich API").set_defaults(
-        func=cmd_check
-    )
+    sub.add_parser("check", help="validate config and reach the Immich API").set_defaults(func=cmd_check)
 
     encode_parser = sub.add_parser("encode", help="run a preset on a local file (offline dry run)")
     encode_parser.add_argument("path")
@@ -348,9 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
     reprocess_parser.add_argument("asset_id")
     reprocess_parser.set_defaults(func=cmd_reprocess)
 
-    requeue_parser = sub.add_parser(
-        "requeue", help="re-queue every job that was skipped for one reason"
-    )
+    requeue_parser = sub.add_parser("requeue", help="re-queue every job that was skipped for one reason")
     requeue_parser.add_argument(
         "--reason",
         default=SkipReason.NO_GAIN.value,

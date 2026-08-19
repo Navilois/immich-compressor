@@ -1,8 +1,22 @@
 [project]
 name = "immich-compressor"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Webhook-driven post-processing service that recompresses Immich assets out of band."
+readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Alois Krichmayr" }]
+keywords = ["immich", "self-hosted", "ffmpeg", "transcoding", "hevc", "qsv", "vaapi", "nvenc", "photos"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video :: Conversion",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -24,9 +38,21 @@ dev = [
 [project.scripts]
 immich-compressor = "immich_compressor.__main__:main"
 
+[project.urls]
+Homepage = "https://github.com/Navilois/immich-compressor"
+Source = "https://github.com/Navilois/immich-compressor"
+Issues = "https://github.com/Navilois/immich-compressor/issues"
+Changelog = "https://github.com/Navilois/immich-compressor/blob/main/CHANGELOG.md"
+
 [build-system]
-requires = ["hatchling"]
+# 1.27 is the first release that understands the PEP 639 `license`/`license-files` keys.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
+
+# Single source of truth for the version: `__version__` in the package itself, which is
+# also what `immich-compressor --version` and the OCI image label report.
+[tool.hatch.version]
+path = "src/immich_compressor/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/immich_compressor"]
@@ -62,6 +88,15 @@ ignore = [
     # unlink() on local paths — sub-millisecond, not worth a thread hop.
     "ASYNC240",
 ]
+
+[tool.ruff.format]
+# Defaults, written out so nobody has to guess: the formatter is authoritative and
+# `ruff format --check` runs in CI. Line length comes from [tool.ruff] above.
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+docstring-code-format = true
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S105", "S106", "S108"]

@@ -234,9 +234,7 @@ class SkipReason(StrEnum):
     DRY_RUN = "dry_run"
 
 
-TERMINAL_STATES: frozenset[JobState] = frozenset(
-    {JobState.DONE, JobState.SKIPPED, JobState.FAILED}
-)
+TERMINAL_STATES: frozenset[JobState] = frozenset({JobState.DONE, JobState.SKIPPED, JobState.FAILED})
 
 
 class Job(BaseModel):

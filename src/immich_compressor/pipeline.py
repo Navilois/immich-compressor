@@ -83,9 +83,7 @@ def check_guards(asset: WebhookAsset, settings: Settings) -> None:
 
     size = asset.exif_info.file_size_in_byte
     if size is not None and size < behavior.min_size_bytes:
-        raise SkipJob(
-            SkipReason.TOO_SMALL, f"{size} bytes < min_size_bytes {behavior.min_size_bytes}"
-        )
+        raise SkipJob(SkipReason.TOO_SMALL, f"{size} bytes < min_size_bytes {behavior.min_size_bytes}")
     if behavior.compressed_marker in Path(asset.original_file_name).name:
         raise SkipJob(
             SkipReason.ALREADY_COMPRESSED,
@@ -200,12 +198,9 @@ class Pipeline:
         marker = await self._client.has_metadata_key(asset_id, behavior.metadata_key)
         if marker is not None:
             if marker_blocks_reprocessing(marker):
-                raise SkipJob(
-                    SkipReason.ALREADY_COMPRESSED, "compressor marker present on the asset"
-                )
+                raise SkipJob(SkipReason.ALREADY_COMPRESSED, "compressor marker present on the asset")
             logger.info(
-                "%s carries a v%s marker without a replacement — re-trying under the "
-                "current sanity gate",
+                "%s carries a v%s marker without a replacement — re-trying under the current sanity gate",
                 asset_id,
                 marker.value.get("v"),
             )
@@ -293,14 +288,10 @@ class Pipeline:
             # Mark the *original* so we do not burn CPU on it again on the next webhook.
             await self._safe_mark(
                 asset_id,
-                build_marker(
-                    source_id=asset_id, new_id=None, preset_name=preset.name, ratio=result.ratio
-                ),
+                build_marker(source_id=asset_id, new_id=None, preset_name=preset.name, ratio=result.ratio),
                 extra={"skipped": "no_gain", "detail": sanity.reason()[:300]},
             )
-            await self._store.update(
-                asset_id, new_bytes=result.new_bytes, ratio=round(result.ratio, 4)
-            )
+            await self._store.update(asset_id, new_bytes=result.new_bytes, ratio=round(result.ratio, 4))
             raise SkipJob(SkipReason.NO_GAIN, sanity.reason())
 
         # --- Step 6: upload ------------------------------------------------------
@@ -325,8 +316,9 @@ class Pipeline:
                 visibility=asset.visibility,
             )
             if upload.status == "duplicate":
-                logger.info("upload of %s reported duplicate of %s — leaving original alone",
-                            asset_id, upload.id)
+                logger.info(
+                    "upload of %s reported duplicate of %s — leaving original alone", asset_id, upload.id
+                )
                 await self._store.update(asset_id, new_asset_id=upload.id)
                 raise SkipJob(SkipReason.DUPLICATE, f"server already has this file as {upload.id}")
 
@@ -408,9 +400,7 @@ class Pipeline:
 
     # ------------------------------------------------------------------ deletion
 
-    async def finalize_original(
-        self, job: Job, new_asset_id: str, expected_checksum: str | None
-    ) -> bool:
+    async def finalize_original(self, job: Job, new_asset_id: str, expected_checksum: str | None) -> bool:
         """Step 10b: verify the replacement, then remove the original.
 
         The single place the original is ever deleted. Two callers: ``_run_media_steps``
@@ -449,9 +439,7 @@ class Pipeline:
         )
         return True
 
-    async def _verify_replacement(
-        self, new_asset_id: str, expected_checksum: str | None
-    ) -> str | None:
+    async def _verify_replacement(self, new_asset_id: str, expected_checksum: str | None) -> str | None:
         """The gate in front of the delete. Returns the first failure, or ``None``.
 
         All four conditions are checked in both delete modes. In ``trash`` mode the delete
@@ -500,9 +488,7 @@ class Pipeline:
 
     # ------------------------------------------------------------------ helpers
 
-    async def _apply_fields(
-        self, asset: WebhookAsset, source_detail: AssetDetail, new_asset_id: str
-    ) -> None:
+    async def _apply_fields(self, asset: WebhookAsset, source_detail: AssetDetail, new_asset_id: str) -> None:
         """Step 8a: description / rating / GPS / capture date.
 
         The live source state wins over the webhook snapshot: the payload was produced at
@@ -523,9 +509,7 @@ class Pipeline:
             return
         await self._client.update_asset(new_asset_id, fields)
 
-    async def _apply_tags(
-        self, asset: WebhookAsset, source_detail: AssetDetail, new_asset_id: str
-    ) -> None:
+    async def _apply_tags(self, asset: WebhookAsset, source_detail: AssetDetail, new_asset_id: str) -> None:
         """Step 8b: tags.
 
         The live source carries real tag objects; the webhook payload only has names in
@@ -628,9 +612,7 @@ class Worker:
     async def _trash_one(self, job: Job) -> None:
         """The sweeper's call into the shared finaliser."""
         if not job.new_asset_id:
-            logger.error(
-                "refusing to delete %s: no replacement asset recorded", job.source_asset_id
-            )
+            logger.error("refusing to delete %s: no replacement asset recorded", job.source_asset_id)
             await self._store.mark_failed(job.source_asset_id, "no replacement asset recorded")
             return
         await self.pipeline.finalize_original(job, job.new_asset_id, job.new_checksum)
