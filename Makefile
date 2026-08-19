@@ -1,0 +1,71 @@
+# One obvious entry point for everything a contributor needs.
+#
+#   make dev     create .venv and install the project with its dev extras
+#   make lint    ruff check + ruff format --check
+#   make format  apply ruff format and ruff's safe fixes
+#   make test    the unit suite (the live suite needs a real Immich, see CONTRIBUTING.md)
+#   make image   build the container image locally
+#   make docs    regenerate the generated documentation and the config JSON schema
+#   make check   everything CI runs, in one go
+
+PY      := .venv/bin/python
+VERSION := $(shell sed -n 's/^__version__ = "\(.*\)"$$/\1/p' src/immich_compressor/__init__.py)
+IMAGE   ?= immich-compressor:$(VERSION)
+PLATFORMS ?= linux/amd64,linux/arm64
+
+.DEFAULT_GOAL := help
+.PHONY: help dev lint language format test test-live image image-multiarch docs docs-check compose-check clean
+
+help:
+	@sed -n 's/^#   //p' $(MAKEFILE_LIST) | head -8
+
+$(PY):
+	python3 -m venv .venv
+
+dev: $(PY)
+	$(PY) -m pip install --upgrade pip
+	$(PY) -m pip install -e '.[dev]'
+
+lint: $(PY)
+	$(PY) -m ruff check .
+	$(PY) -m ruff format --check .
+
+# English-only guard over tracked text files. Folded into `lint` once PLAN.md, the last
+# German document in the tree, has been retired.
+language:
+	./scripts/check-language.sh
+
+format: $(PY)
+	$(PY) -m ruff check --fix .
+	$(PY) -m ruff format .
+
+test: $(PY)
+	$(PY) -m pytest -m 'not live' -q
+
+# Needs E2E_IMMICH_URL and E2E_IMMICH_KEY pointing at a throwaway instance.
+test-live: $(PY)
+	$(PY) -m pytest -m live -q
+
+image:
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
+
+image-multiarch:
+	docker buildx build --platform $(PLATFORMS) --build-arg VERSION=$(VERSION) -t $(IMAGE) .
+
+docs: $(PY)
+	$(PY) scripts/gen_docs.py
+
+docs-check: $(PY)
+	$(PY) scripts/gen_docs.py --check
+
+compose-check:
+	docker compose -f docker-compose.yaml config -q
+	docker compose -f docker-compose.yaml -f docker-compose.build.yaml config -q
+	RENDER_GID=$${RENDER_GID:-993} docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml config -q
+	docker compose -f docker-compose.yaml -f docker-compose.gpu-nvidia.yaml config -q
+
+check: lint test docs-check compose-check
+
+clean:
+	rm -rf .venv .pytest_cache .ruff_cache build dist src/*.egg-info
+	find . -name __pycache__ -type d -prune -exec rm -rf {} +
