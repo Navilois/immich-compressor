@@ -16,13 +16,15 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from . import __version__
 from .api import ImmichClient
 from .config import Settings, load_settings, warn_about_permanent_deletion
 from .encoder import probe_hardware_encoder
+from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
+from .metrics import render as render_metrics
 from .models import JobState, WebhookPayload
 from .pipeline import Worker
 from .store import JobStore
@@ -202,6 +204,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "min_size_bytes": settings.behavior.min_size_bytes,
         }
         return body
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    async def metrics(request: Request) -> PlainTextResponse:
+        """Prometheus exposition. Unauthenticated, like /stats — it carries no asset data.
+
+        No port is published by default, so this is reachable from the docker network the
+        service already shares with Immich, which is where a Prometheus in the same stack
+        lives anyway.
+        """
+        store: JobStore = request.app.state.store
+        worker: Worker = request.app.state.worker
+        settings: Settings = request.app.state.settings
+        stats = worker.pipeline.stats
+        body = render_metrics(
+            store_stats=await store.stats(),
+            session={
+                "processed": stats.processed,
+                "skipped": stats.skipped,
+                "failed": stats.failed,
+                "deleted": stats.deleted,
+                "bytes_saved": stats.bytes_saved,
+            },
+            encode_seconds=stats.encode_seconds,
+            config={
+                "dry_run": settings.behavior.dry_run,
+                "trash_original": settings.behavior.trash_original,
+                "delete_mode": settings.behavior.delete_mode,
+            },
+            version=__version__,
+        )
+        return PlainTextResponse(body, media_type=METRICS_CONTENT_TYPE)
 
     @app.get("/jobs")
     async def jobs(

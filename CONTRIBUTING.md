@@ -118,3 +118,7 @@ One branch per topic. Say in the pull request what you changed, why, and how you
 The release workflow refuses to publish if the tag disagrees with `__version__` or the
 CHANGELOG has no section for it, then builds the multi-arch image, pushes it to ghcr.io with
 provenance and an SBOM, and creates the GitHub release from the CHANGELOG section.
+
+[docs/maintainers/launch-checklist.md](docs/maintainers/launch-checklist.md) covers the
+parts no workflow can do: repository metadata, making the published package public, the
+social preview in [docs/assets/](docs/assets/README.md), and where to announce.

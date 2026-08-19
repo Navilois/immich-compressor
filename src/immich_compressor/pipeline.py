@@ -14,13 +14,15 @@ import contextlib
 import json
 import logging
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import encoder
 from .api import ImmichClient, ImmichError, sanitize_rating
 from .config import Preset, Settings
+from .metrics import Histogram
 from .models import (
     AssetDetail,
     Job,
@@ -57,6 +59,9 @@ class PipelineStats:
     failed: int = 0
     deleted: int = 0
     bytes_saved: int = 0
+    # Wall-clock time of the encoder command, for /metrics. Observed around the encode
+    # itself, not around the whole job, so a slow download does not read as a slow encoder.
+    encode_seconds: Histogram = field(default_factory=Histogram)
 
 
 def check_guards(asset: WebhookAsset, settings: Settings) -> None:
@@ -267,7 +272,9 @@ class Pipeline:
         source_probe = await encoder.probe(source, is_still=not is_video)
 
         # --- Step 4: encode ------------------------------------------------------
+        started = time.monotonic()
         result = await encoder.encode(source, preset, tmp)
+        self.stats.encode_seconds.observe(time.monotonic() - started)
         logger.info(
             "encoded %s: %d -> %d bytes (ratio %.3f)",
             asset_id,

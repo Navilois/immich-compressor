@@ -25,18 +25,41 @@ services:
 
 ## `/metrics`
 
-Prometheus text format, hand-rolled, no extra dependency:
+Prometheus text exposition format, hand-rolled, no extra dependency. Every family carries
+`HELP` and `TYPE`, and is emitted even when empty so a dashboard query never disappears:
 
 ```
-immich_compressor_jobs{state="done"} 42
-immich_compressor_jobs_skipped{reason="no_gain"} 7
-immich_compressor_bytes_saved_total 1.28e+10
-immich_compressor_compressed_assets_total 42
-immich_compressor_dry_run 0
+immich_compressor_build_info{version="1.1.0"} 1
+immich_compressor_jobs{state="done"} 2
+immich_compressor_jobs{state="failed"} 1
+immich_compressor_jobs_skipped{reason="no_gain"} 1
+immich_compressor_jobs_total 5
+immich_compressor_compressed_assets 2
+immich_compressor_original_bytes 50710662
+immich_compressor_compressed_bytes 26686614
+immich_compressor_saved_bytes 24024048
+immich_compressor_session_processed_total 2
+immich_compressor_session_deleted_total 2
+immich_compressor_session_bytes_saved_total 24024048
+immich_compressor_encode_duration_seconds_bucket{le="60"} 3
+immich_compressor_encode_duration_seconds_bucket{le="+Inf"} 4
+immich_compressor_encode_duration_seconds_sum 418
+immich_compressor_encode_duration_seconds_count 4
+immich_compressor_config_dry_run 0
+immich_compressor_config_trash_original 1
+immich_compressor_config_permanent_delete 1
 ```
 
-Scrape it from inside the docker network — no port needs publishing for Prometheus if it
-runs there too.
+Gauges come from the job store and survive a restart. The `session_*` counters and the
+encode histogram are per process and reset when the container does, which is what
+Prometheus expects of a counter.
+
+The three `config_*` gauges are the ones worth alerting on. `config_dry_run 1` on a
+deployment you thought was live means nothing has been compressed for however long that has
+been true; `config_permanent_delete 1` means originals are being removed with no undo.
+
+Scrape it from inside the docker network — if your Prometheus runs there too, no port needs
+publishing at all.
 
 ## CLI
 
