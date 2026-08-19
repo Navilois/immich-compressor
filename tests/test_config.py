@@ -40,6 +40,34 @@ def test_loads_mapping_style_presets(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert settings.preset_for("IMAGE") is None
 
 
+def test_environment_beats_a_value_written_in_the_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file must lose against the environment, and used not to.
+
+    config.yaml was handed to BaseSettings as init arguments, and init outranks every
+    other source in pydantic-settings. Every key actually written in the file therefore
+    ignored its override: `BEHAVIOR__DRY_RUN=false` against a file saying `dry_run: true`
+    left the service in a dry run while the compose file, the README and the environment
+    all said otherwise. Only keys *absent* from the file — the secrets — ever worked,
+    which is why it went unnoticed.
+    """
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _with_behavior(dry_run=True, trash_original=False, max_ratio=0.6)
+
+    assert load_settings(_write(tmp_path, body)).behavior.dry_run is True
+
+    monkeypatch.setenv("BEHAVIOR__DRY_RUN", "false")
+    settings = load_settings(_write(tmp_path, body))
+    assert settings.behavior.dry_run is False
+    # The neighbours in the same nested block must survive the override, not be replaced
+    # wholesale by the single key the environment carries.
+    assert settings.behavior.trash_original is False
+    assert settings.behavior.max_ratio == 0.6
+    assert [p.name for p in settings.presets] == ["video-h265"]
+
+
 def test_shipping_defaults_are_inert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The delivered defaults must not upload and must not delete."""
     monkeypatch.setenv("IMMICH__API_KEY", "key")

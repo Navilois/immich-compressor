@@ -5,6 +5,13 @@ Layering, lowest priority first:
 1. defaults declared here
 2. ``config.yaml`` (path from ``COMPRESSOR_CONFIG``, default ``./config.yaml``)
 3. process environment (``IMMICH__API_KEY``, ``BEHAVIOR__DRY_RUN``, ...)
+4. arguments passed to ``Settings(...)`` directly — the programmatic escape hatch,
+   used by the tests; :func:`load_settings` never uses it.
+
+The file is fed in through a settings *source* rather than as init arguments, because
+init has the highest precedence in pydantic-settings. Passing the YAML there made it
+outrank the environment, so every key written in ``config.yaml`` silently ignored its
+``BEHAVIOR__*`` override — exactly the keys anyone would want to override.
 
 Secrets (``immich.api_key``, ``webhook.token``) are *only* read from the environment.
 Putting them in the YAML file is rejected at startup so they cannot leak into a
@@ -17,12 +24,13 @@ import logging
 import os
 import re
 import shlex
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
 from pydantic import BaseModel, Field, SecretStr, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 AssetType = Literal["IMAGE", "VIDEO", "AUDIO", "OTHER"]
 
@@ -247,6 +255,22 @@ class Preset(BaseModel):
         return rendered
 
 
+# The parsed config.yaml, handed to the settings source below. Scoped to the context so a
+# nested or concurrent load cannot leak its file into another one.
+_yaml_values: ContextVar[dict[str, Any] | None] = ContextVar("_yaml_values", default=None)
+
+
+class _YamlSource(PydanticBaseSettingsSource):
+    """Feeds the parsed ``config.yaml`` in as a source, below the environment."""
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        # Not used: __call__ supplies the whole mapping in one go.
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        return _yaml_values.get() or {}
+
+
 class Settings(BaseSettings):
     """Root settings object."""
 
@@ -255,6 +279,24 @@ class Settings(BaseSettings):
         extra="forbid",
         env_file=None,
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Highest priority first. The YAML sits *below* the environment, on purpose."""
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            _YamlSource(settings_cls),
+            file_secret_settings,
+        )
 
     immich: ImmichSettings = Field(default_factory=ImmichSettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
@@ -334,12 +376,15 @@ def load_settings(config_path: Path | None = None) -> Settings:
     _forbid_secrets_in_file(raw)
     _normalise_presets(raw)
 
+    token = _yaml_values.set(raw)
     try:
-        settings = Settings(**raw)
+        settings = Settings()
     except ConfigError:
         raise
     except Exception as exc:  # pydantic ValidationError and friends
         raise ConfigError(f"invalid configuration: {exc}") from exc
+    finally:
+        _yaml_values.reset(token)
 
     if not settings.immich.api_key.get_secret_value():
         raise ConfigError("IMMICH__API_KEY is not set")
