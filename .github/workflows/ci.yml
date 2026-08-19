@@ -82,6 +82,10 @@ jobs:
       # settings model — which is the point of generating them.
       - name: gen_docs --check
         run: python scripts/gen_docs.py --check
+      # Structural, offline: internal links and heading anchors only. External URLs are
+      # not fetched, so CI never fails because somebody else's site is down.
+      - name: Internal links resolve
+        run: python scripts/check-links.py
 
   compose:
     name: Compose files
