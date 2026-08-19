@@ -20,6 +20,9 @@ QUALITIES="${QUALITIES:-22 24 26 28 30}"
 FFPRESET="${FFPRESET:-slower}"
 DEVICE="${DEVICE:-/dev/dri/renderD128}"
 SECONDS_LIMIT="${SECONDS_LIMIT:-60}"
+# Match what the CPU preset uses, so the measurement reflects the real encode.
+# `immich-compressor hardware` prints the thread budget it derived for this container.
+THREADS="${THREADS:-2}"
 WORK="${WORK:-$(mktemp -d)}"
 
 if [ "$#" -eq 0 ]; then
@@ -47,7 +50,7 @@ encoder_args() {
             ;;
         *)
             printf '%s\n' -c:v "$ENCODER" -preset "$FFPRESET" -crf "$quality" \
-                -x265-params pools=2 -threads 2 -tag:v hvc1
+                -x265-params "pools=$THREADS" -threads "$THREADS" -tag:v hvc1
             ;;
     esac
 }
@@ -66,7 +69,7 @@ ssim_of() {
         | grep -o 'All:[0-9.]*' | tail -1 | cut -d: -f2
 }
 
-echo "encoder: $ENCODER   qualities: $QUALITIES   device: $DEVICE   work: $WORK"
+echo "encoder: $ENCODER   qualities: $QUALITIES   device: $DEVICE   threads: $THREADS   work: $WORK"
 
 for source in "$@"; do
     name="$(basename "$source")"

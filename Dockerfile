@@ -1,9 +1,27 @@
-FROM python:3.12-slim
+# syntax=docker/dockerfile:1
+#
+# Multi-arch: linux/amd64 and linux/arm64.
+#
+# Hardware encoding is not the same on both, and the image does not pretend otherwise:
+#
+#   amd64   Intel QSV and VAAPI, plus AMD VAAPI, through Intel's non-free iHD driver and
+#           the oneVPL runtime. NVENC works when the host has the NVIDIA Container Toolkit
+#           (nothing extra is needed in the image — the toolkit injects the driver).
+#   arm64   Mesa's VA drivers only. In practice that means CPU encoding on a Raspberry Pi
+#           or an Ampere box: the Intel packages do not exist for this architecture, and
+#           the SoC video engines that do exist are reached through V4L2 rather than VA-API.
+#           `immich-compressor hardware` tests what is actually there and says so.
+#
+# `immich-compressor hardware` never assumes any of the above — it runs a real one-frame
+# encode before selecting anything.
+
+FROM python:3.12-slim AS base
 
 # ffmpeg/ffprobe  -> video presets and the sanity gate
 # exiftool        -> metadata carry-over for stills
-# libjxl-tools    -> cjpegli (present from libjxl 0.9; Debian trixie ships 0.11)
-# imagemagick     -> fallback still encoder
+# imagemagick     -> the stills encoder
+# libjxl-tools    -> cjxl/djxl. NOT cjpegli: Debian trixie's 0.11.2 does not ship it,
+#                    which is why the stills preset uses ImageMagick.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -13,14 +31,19 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Intel GPU encoding (QSV / VAAPI). Roughly 70 MB; drop this layer if you only ever run
-# the CPU presets.
-#   intel-media-va-driver-non-free  the iHD VA driver, lives in Debian's non-free
+
+# --- amd64: Intel QSV/VAAPI + AMD VAAPI ------------------------------------------------
+#
+# Roughly 70 MB. Drop this stage if you only ever run the CPU preset.
+#   intel-media-va-driver-non-free  the iHD VA driver, which lives in Debian's non-free
 #   libmfx-gen1.2                   oneVPL GPU runtime, Gen12+ (Tiger Lake and newer, Arc)
-#   vainfo                          the only way to diagnose this from inside the container
-# Debian trixie no longer ships libmfx1, so the legacy MSDK path for Gen9-11 is gone:
-# on those chips use the hevc_vaapi preset instead of hevc_qsv. ffmpeg here is built
-# --disable-libmfx --enable-libvpl, so it reaches the GPU through oneVPL only.
+#   mesa-va-drivers                 radeonsi, for AMD cards on the same /dev/dri path
+#   vainfo                          the only way to diagnose any of this from inside
+#
+# Debian trixie no longer ships libmfx1, so the legacy MSDK path for Gen9-11 is gone: on
+# those chips hevc_qsv fails with "Error creating a MFX session: -9" and hevc_vaapi is
+# used instead. The service works that out on its own — measured on an Intel UHD 630.
+FROM base AS drivers-amd64
 RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
         /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
@@ -28,10 +51,27 @@ RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
         intel-media-va-driver-non-free \
         libmfx-gen1.2 \
         libigdgmm12 \
+        mesa-va-drivers \
+        vainfo \
+    && rm -rf /var/lib/apt/lists/*
+ENV LIBVA_DRIVER_NAME=iHD
+
+
+# --- arm64: Mesa VA drivers ------------------------------------------------------------
+#
+# No LIBVA_DRIVER_NAME here on purpose: there is no single right answer on arm64, so libva
+# is left to pick the driver that matches whatever DRM device is present.
+FROM base AS drivers-arm64
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        mesa-va-drivers \
         vainfo \
     && rm -rf /var/lib/apt/lists/*
 
-ENV LIBVA_DRIVER_NAME=iHD
+
+# --- the service ------------------------------------------------------------------------
+ARG TARGETARCH
+FROM drivers-${TARGETARCH} AS final
 
 # Non-root: the service never needs to write outside its own two directories.
 RUN useradd --system --create-home --uid 10001 compressor \
@@ -42,6 +82,9 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
+# WORKDIR is /app, so `scripts/calibrate.sh` is the same command inside the container
+# as it is in a checkout — which is what `immich-compressor hardware` tells you to run.
+COPY scripts/calibrate.sh ./scripts/calibrate.sh
 RUN pip install --no-cache-dir . \
     && rm -rf /root/.cache
 
