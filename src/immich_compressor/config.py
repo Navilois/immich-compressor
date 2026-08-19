@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -32,6 +33,21 @@ OUTPUT_PLACEHOLDER = "{output}"
 # Suffixes ffmpeg uses for encoders that need a GPU.
 HARDWARE_ENCODER_SUFFIXES = ("_qsv", "_vaapi", "_nvenc")
 DEFAULT_RENDER_NODE = "/dev/dri/renderD128"
+
+# Shell syntax a preset cannot use, because commands are executed directly, without a shell.
+#
+# The distinction is what matters here. A shell separates control operators into words of
+# their own, so a genuine `ffmpeg ... | tee log` leaves "|" as a standalone token after
+# shlex.split. A "|" *inside* a token is ordinary argument text: ffmpeg's filter syntax
+# uses it for format alternations (`-vf format=nv12|vaapi,hwupload`) and comparison
+# operators turn up in filter expressions. Testing the raw command string rejected those
+# too, which made every such preset impossible to load at all.
+SHELL_CONTROL_TOKENS = frozenset({"|", "||", "&", "&&", ";", ";;", "|&"})
+# Redirections may be written attached to their target (`>log`, `2>&1`), so they are
+# recognised by shape instead of by equality.
+SHELL_REDIRECT_RE = re.compile(r"^\d*[<>]")
+# Command substitution is never split off into a word, so it stays a substring test.
+SHELL_SUBSTITUTIONS = ("`", "$(")
 
 
 logger = logging.getLogger(__name__)
@@ -167,7 +183,12 @@ class Preset(BaseModel):
             raise ConfigError(f"preset {self.name!r}: command is not shell-splittable: {exc}") from exc
         if not argv:
             raise ConfigError(f"preset {self.name!r}: command is empty")
-        for meta in ("|", "&&", ";", ">", "<", "`", "$("):
+        for token in argv:
+            if token in SHELL_CONTROL_TOKENS or SHELL_REDIRECT_RE.match(token):
+                raise ConfigError(
+                    f"preset {self.name!r}: {token!r} is not supported — commands run without a shell"
+                )
+        for meta in SHELL_SUBSTITUTIONS:
             if meta in self.cmd:
                 raise ConfigError(
                     f"preset {self.name!r}: {meta!r} is not supported — commands run without a shell"

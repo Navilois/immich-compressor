@@ -91,11 +91,38 @@ def test_enabled_type_without_preset_fails_fast(
         "ffmpeg -i {input} && rm -rf / {output}",
         "ffmpeg -i {input} > {output}",
         "ffmpeg -i {input} $(whoami) {output}",
+        "ffmpeg -i {input} {output} ; rm -rf /",  # command separator
+        "ffmpeg -i {input} {output} >log",  # redirect attached to its target
+        "ffmpeg -i {input} {output} 2>&1",  # file-descriptor redirect
     ],
 )
 def test_invalid_preset_commands_are_rejected(cmd: str) -> None:
     with pytest.raises(ConfigError):
         Preset(name="bad", type="VIDEO", cmd=cmd, suffix=".mp4")
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # The Gen9-11 VAAPI preset: '|' is ffmpeg's format-alternation syntax, not a pipe.
+        # A raw-substring check rejected this outright, so the preset could never load.
+        "ffmpeg -i {input} -vf format=nv12|vaapi,hwupload -c:v hevc_vaapi {output}",
+        # Comparison operators inside a filter expression are argument text too.
+        "ffmpeg -i {input} -vf crop=w=if(gt(a,1),iw,ih) {output}",
+        "ffmpeg -i {input} -vf drawtext=text=a<b {output}",
+    ],
+)
+def test_shell_metacharacters_inside_a_token_are_argument_text(cmd: str) -> None:
+    """A metacharacter is shell syntax only where a shell would have split it off.
+
+    Inside a token it is ordinary argument text, and rejecting it locks out legitimate
+    ffmpeg commands.
+    """
+    preset = Preset(name="ok", type="VIDEO", cmd=cmd, suffix=".mp4")
+    argv = preset.argv(Path("/tmp/in.mov"), Path("/tmp/out.mp4"))
+    assert argv[0] == "ffmpeg"
+    # The metacharacter never becomes an argument of its own — that is the whole point.
+    assert not any(token in {"|", ">", "<"} for token in argv)
 
 
 def test_suffix_must_start_with_dot() -> None:

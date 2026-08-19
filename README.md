@@ -318,6 +318,33 @@ Notes on the workflow:
   Without the filter, the compressed upload re-triggers the workflow (confirmed).
 - Only one custom header can be configured, which is exactly our shared secret.
 
+> **`AssetMetadataExtraction` fires more often than `AssetCreate`, and it fires in bulk.**
+> `AssetCreate` fires once per asset. Metadata extraction is a maintenance operation that
+> can be started at any time from **Administration → Jobs → Extract Metadata**, and every
+> run emits the trigger again.
+>
+> Traced through the v3.1.0 server bundle: `handleQueueMetadataExtraction`
+> (`metadata.service.js`) queues one `AssetExtractMetadata` job per asset with
+> `data: { id }` and **no `source` field**; `handleMetadataExtraction` then emits
+> `AssetMetadataExtracted` with `source: undefined`; and `onAssetMetadataExtracted`
+> (`workflow-execution.service.js`) only returns early for `source === 'sidecar-write'`.
+> So **"Extract Metadata → All" fires the workflow for every asset in the library.**
+> "Missing" only reaches assets whose extraction never completed, which is normally none.
+>
+> Replays of a single asset stay harmless: `ON CONFLICT(source_asset_id) DO NOTHING` makes
+> anything this service has already recorded permanently immune, in *any* state including
+> `skipped`. Assets it has never seen have no such protection — and that is the whole
+> library until you have worked through it.
+>
+> - With `dry_run: false`, one click starts compressing every asset over `min_size_bytes`,
+>   one at a time, until the disk runs out.
+> - With `dry_run: true`, the same click records them all as `skipped: dry_run`. They are
+>   immune from then on, so clearing the dry run later will never pick them up. Recoverable
+>   with `requeue --reason dry_run --apply` — but only if you notice.
+>
+> **Disable the workflow (Utilities → Workflows → toggle) before running metadata
+> extraction**, unless the disk is already sized for a full pass over the library.
+
 ---
 
 ## Going live safely
@@ -341,6 +368,20 @@ Notes on the workflow:
 **With `delete_mode: trash`, disk space is only reclaimed when the Immich trash is
 emptied.** Until then you are using *more* space, not less. `delete_mode: permanent`
 reclaims it at once — at the cost of every rollback below except a full backup restore.
+
+**Work through the existing library with `backfill`, never by re-running metadata
+extraction.** The webhook only fires for assets moving through Immich's pipeline; the
+backlog already sitting in the library is invisible to it. `backfill` queues a batch whose
+size you choose, and is dry until you say otherwise:
+
+```bash
+immich-compressor backfill --type VIDEO --limit 50           # look first
+immich-compressor backfill --type VIDEO --limit 50 --apply
+```
+
+Re-running **Extract Metadata** reaches the same assets — by firing the workflow for the
+entire library at once, unbounded and with no way to stop it other than disabling the
+workflow. See the callout in [4. Create the Immich workflow](#4-create-the-immich-workflow).
 
 ### The verification chain
 
@@ -434,6 +475,7 @@ Failures retry with exponential backoff up to `max_attempts` (default 3), then l
 | Everything is `skipped: too_small` | `min_size_bytes` defaults to 20 MiB. |
 | Everything is `skipped: dry_run` | That is the shipped default. Set `BEHAVIOR__DRY_RUN=false`. |
 | `skipped: no_gain` | The preset did not reach `max_ratio` (0.6). Tune it offline with `immich-compressor encode`. |
+| The whole library queued at once | Something re-ran metadata extraction — that trigger fires once per extraction, not once per upload. Disable the workflow, then use `report` to see the extent. See [4. Create the Immich workflow](#4-create-the-immich-workflow). |
 | Nothing at all in the log | Immich cannot reach the service. Test from inside the Immich container: `docker exec immich_server curl -s -o /dev/null -w '%{http_code}' http://immich-compressor:8080/healthz`. |
 
 ---
