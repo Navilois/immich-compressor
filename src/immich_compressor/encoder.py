@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import logging
+import mmap
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,38 @@ _EXIF_ORIENTATION_ROTATION: dict[int, int] = {1: 0, 2: 0, 3: 180, 4: 180, 5: 90,
 # Transfer functions that mean "this is HDR". Flattening one of these to SDR without
 # tone mapping washes the picture out irreversibly.
 _HDR_TRANSFERS: frozenset[str] = frozenset({"smpte2084", "arib-std-b67"})
+
+# XMP tags a Samsung/Google motion photo carries. Their presence alone is not proof that
+# the video is still attached, but it is proof that the file was one.
+_MOTION_PHOTO_TAGS: tuple[str, ...] = (
+    "MotionPhoto",
+    "MotionPhotoVersion",
+    "MicroVideo",
+    "MicroVideoOffset",
+    "EmbeddedVideoType",
+)
+
+# Metadata groups the post-encode diff compares. `File:` and `Composite:` are excluded on
+# purpose: they are derived from the bytes on disk, not carried metadata, and would report
+# a difference for every successful re-encode.
+_METADATA_GROUPS: tuple[str, ...] = ("-EXIF:all", "-GPS:all", "-XMP:all", "-IPTC:all")
+
+# Tags that differ by design rather than by loss. Keep this list short and justified: every
+# entry is a hole in the guarantee.
+#
+#   EXIF:Orientation  `normalize_orientation` pins the output to 1 after `-auto-orient` has
+#                     baked the rotation into the pixels, and writes the tag even when the
+#                     source carried none — so both "changed" and "added" are expected.
+#   XMP:XMPToolkit    the version stamp of whatever last wrote the XMP packet, so exiftool
+#                     stamps its own on every copy. It describes the writing tool, not the
+#                     picture. Found by running the shipped preset against a real photo:
+#                     'Image::ExifTool 12.76' -> 'Image::ExifTool 13.25' would otherwise
+#                     fail every source that a different exiftool version had touched.
+_METADATA_IGNORED: frozenset[str] = frozenset({"EXIF:Orientation", "XMP:XMPToolkit"})
+
+# How many bytes may follow the JPEG's end-of-image marker before we call it a payload.
+# Some encoders leave a handful of padding bytes; a motion photo leaves megabytes.
+MAX_HARMLESS_TRAILER_BYTES = 4096
 
 
 class EncodeError(RuntimeError):
@@ -249,6 +282,189 @@ async def probe_exif(path: Path, *, timeout_s: float = 60.0) -> ExifFacts:
     )
 
 
+async def jpeg_quality(path: Path, *, timeout_s: float = 60.0) -> int | None:
+    """ImageMagick's estimate of the quality a JPEG was saved with, or ``None``.
+
+    Used to refuse a re-encode that cannot pay for itself: quantisation error is
+    cumulative, so running a q78 source through a q82 preset costs a second generation of
+    artefacts and usually produces a *larger* file. The estimate is derived from the
+    quantisation tables and is exact for anything libjpeg wrote.
+    """
+    if shutil.which("identify") is None:
+        return None
+    try:
+        code, stdout, _ = await run_command(
+            ["identify", "-format", "%Q", str(path)], timeout_s=timeout_s
+        )
+    except EncodeError:
+        return None
+    if code != 0:
+        return None
+    # A multi-frame file prints one value per frame with no separator; take the first.
+    digits = ""
+    for char in stdout.strip():
+        if not char.isdigit():
+            break
+        digits += char
+    return int(digits) if digits else None
+
+
+async def embedded_media_reason(path: Path, *, timeout_s: float = 60.0) -> str | None:
+    """Why this still must not be re-encoded, or ``None`` when it is a plain image.
+
+    A Samsung or Google motion photo is a JPEG with an MP4 glued on behind the
+    end-of-image marker. Re-encoding reads the JPEG and drops the trailer, and *every*
+    other check in this module says the result is fine: the metadata copy faithfully
+    carries `XMP:MotionPhoto=1` across, the size ratio looks excellent precisely because
+    the video is gone, and the picture itself is unchanged. Measured on a 1 935 292 byte
+    source: 389 697 bytes out, no `ftyp` left, all XMP tags intact.
+
+    Two independent signals, because neither alone is enough. The XMP tags identify the
+    format but can be absent on vendor variants; the trailer check is format-agnostic but
+    cannot tell a video from any other appended payload. Either one is a reason to stop.
+    """
+    trailer = _trailer_bytes(path)
+    if trailer is not None and trailer > MAX_HARMLESS_TRAILER_BYTES:
+        return f"{trailer} bytes of payload follow the JPEG end-of-image marker"
+
+    if shutil.which("exiftool") is None:
+        return None
+    argv = ["exiftool", "-json", "-n", *(f"-{tag}" for tag in _MOTION_PHOTO_TAGS), str(path)]
+    try:
+        code, stdout, _ = await run_command(argv, timeout_s=timeout_s)
+    except EncodeError:
+        return None
+    if code != 0:
+        return None
+    try:
+        entries = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not entries:
+        return None
+    present = [
+        tag for tag in _MOTION_PHOTO_TAGS if str(entries[0].get(tag, "")).strip() not in ("", "0")
+    ]
+    if present:
+        return f"motion photo markers present: {', '.join(present)}"
+    return None
+
+
+def _trailer_bytes(path: Path) -> int | None:
+    """Bytes after the JPEG's EOI marker, or ``None`` if the file is not a walkable JPEG.
+
+    ``None`` deliberately means "cannot tell", not "clean" — the caller then falls back to
+    the metadata signal rather than assuming the file is safe.
+    """
+    try:
+        with (
+            path.open("rb") as handle,
+            mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data,
+        ):
+            end = _jpeg_end_offset(data)
+            return None if end is None else len(data) - end
+    except (OSError, ValueError):
+        return None
+
+
+def _jpeg_end_offset(data: mmap.mmap) -> int | None:
+    """Offset just past the EOI marker, by walking the segment structure from the SOI.
+
+    Searching for the last ``FFD9`` in the file would be wrong twice over: an embedded
+    thumbnail is a complete JPEG and ends in one, and an appended MP4 can contain the byte
+    pair by chance. Walking the markers is the only way to find the real end.
+    """
+    size = len(data)
+    if size < 4 or data[0:2] != b"\xff\xd8":
+        return None
+    pos = 2
+    while pos + 1 < size:
+        if data[pos] != 0xFF:
+            return None
+        # Any number of 0xFF fill bytes may precede a marker code.
+        while pos < size and data[pos] == 0xFF:
+            pos += 1
+        if pos >= size:
+            return None
+        marker = data[pos]
+        pos += 1
+        if marker == 0xD9:  # EOI
+            return pos
+        if marker == 0x01 or 0xD0 <= marker <= 0xD8:  # standalone markers carry no payload
+            continue
+        if pos + 1 >= size:
+            return None
+        length = int.from_bytes(data[pos : pos + 2], "big")
+        if length < 2:
+            return None
+        pos += length
+        if marker == 0xDA:  # SOS - entropy-coded data follows the header
+            scanned = _skip_entropy_data(data, pos)
+            if scanned is None:
+                return None
+            pos = scanned
+    return None
+
+
+def _skip_entropy_data(data: mmap.mmap, pos: int) -> int | None:
+    """Advance past entropy-coded scan data to the next real marker.
+
+    Inside the scan a literal 0xFF is stuffed as ``FF 00``, and ``FFD0``-``FFD7`` are
+    restart markers that belong to the scan. Anything else is the next segment.
+    """
+    size = len(data)
+    while True:
+        index = data.find(b"\xff", pos)
+        if index < 0 or index + 1 >= size:
+            return None
+        following = data[index + 1]
+        if following == 0x00 or 0xD0 <= following <= 0xD7:
+            pos = index + 2
+            continue
+        return index
+
+
+async def verify_metadata(source: Path, target: Path, *, timeout_s: float = 120.0) -> list[str]:
+    """Every EXIF/GPS/XMP/IPTC tag of ``source`` that ``target`` lost or changed.
+
+    An empty list means the carry-over is complete. Tags *added* by the encode are not
+    reported: gaining a tag is not losing one.
+
+    Measured against a 39-tag source through the production path, the only difference is
+    ``EXIF:Orientation`` — which is why the ignore list is one entry long rather than
+    open-ended, and why a full diff is affordable here at all.
+    """
+    if shutil.which("exiftool") is None:
+        raise EncodeError("exiftool is not installed but the metadata gate requires it")
+
+    async def read(path: Path) -> dict[str, object]:
+        code, stdout, stderr = await run_command(
+            ["exiftool", "-json", "-G", "-n", *_METADATA_GROUPS, str(path)], timeout_s=timeout_s
+        )
+        if code != 0:
+            raise EncodeError(f"exiftool could not read {path.name}: {stderr.strip()[:300]}")
+        try:
+            entries = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise EncodeError(f"exiftool returned invalid JSON for {path.name}: {exc}") from exc
+        if not entries:
+            return {}
+        return {key: value for key, value in entries[0].items() if key != "SourceFile"}
+
+    before = await read(source)
+    after = await read(target)
+
+    differences: list[str] = []
+    for key, value in before.items():
+        if key in _METADATA_IGNORED:
+            continue
+        if key not in after:
+            differences.append(f"{key} lost")
+        elif after[key] != value:
+            differences.append(f"{key} changed: {value!r} -> {after[key]!r}")
+    return differences
+
+
 async def copy_metadata(
     source: Path,
     target: Path,
@@ -352,22 +568,35 @@ async def check_sanity(
     result: EncodeResult,
     source_probe: MediaProbe,
     behavior: BehaviorSettings,
+    preset: Preset,
     is_video: bool,
 ) -> SanityResult:
     """Gate the upload. Every condition must hold — otherwise nothing is uploaded.
 
     Deliberately conservative: a false negative wastes CPU, a false positive can lose
     picture quality or timeline position permanently.
+
+    The thresholds come from ``preset`` where it overrides ``behavior``, because video and
+    stills have opposite economics — see :class:`~immich_compressor.config.Preset`.
     """
     failures: list[str] = []
     out = result.probe
 
-    limit = result.orig_bytes * behavior.max_ratio
+    max_ratio = preset.effective_max_ratio(behavior)
+    limit = result.orig_bytes * max_ratio
     if result.new_bytes > limit:
         failures.append(
             f"no gain: {result.new_bytes} bytes > {limit:.0f} "
-            f"({result.ratio:.3f} > max_ratio {behavior.max_ratio})"
+            f"({result.ratio:.3f} > max_ratio {max_ratio})"
         )
+
+    # The economic gate. Ratio alone is the wrong axis for a cheap encode: 0.75 on a 12 MB
+    # photo saves 3 MB, 0.60 on a 371 KB photo saves 147 KB — and a saved 147 KB does not
+    # pay for a permanent asset lifecycle (thumbnails, embedding, faces, OCR, timeline).
+    min_savings = preset.effective_min_savings_bytes(behavior)
+    saved = result.orig_bytes - result.new_bytes
+    if saved < min_savings:
+        failures.append(f"saves only {saved} bytes, below min_savings_bytes {min_savings}")
 
     if not out.has_visual_stream:
         failures.append("output has no video/image stream")
@@ -410,7 +639,12 @@ async def check_sanity(
             )
 
     # `probe()` already folded exiftool's answer in for stills, so this holds for both.
-    if behavior.require_date_time_original and not out.has_date_time_original:
+    #
+    # Off for stills by default: the timeline position of a replacement does not come from
+    # the file. `upload_asset` sends `fileCreatedAt` from the source asset, and step 8
+    # writes `dateTimeOriginal` explicitly over the API afterwards. For video the tag is
+    # the real safety net, which is why the default stays on there.
+    if preset.effective_require_date_time_original(behavior) and not out.has_date_time_original:
         failures.append("output has no capture date — would land wrong in the timeline")
 
     if failures:

@@ -10,14 +10,18 @@ import pytest
 from immich_compressor.config import BehaviorSettings, ConfigError, Preset
 from immich_compressor.encoder import (
     EncodeError,
+    _trailer_bytes,
     check_sanity,
     compressed_filename,
+    embedded_media_reason,
     encode,
     has_free_space,
+    jpeg_quality,
     probe,
     probe_exif,
     probe_hardware_encoder,
     run_command,
+    verify_metadata,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -26,7 +30,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 needs_still_tools = pytest.mark.skipif(
-    shutil.which("convert") is None or shutil.which("exiftool") is None,
+    shutil.which("magick") is None or shutil.which("exiftool") is None,
     reason="imagemagick/exiftool not installed",
 )
 
@@ -65,7 +69,7 @@ async def _rotate(source: Path, target: Path, degrees: int = 90) -> Path:
 async def _make_still(path: Path, *, orientation: int = 6, size: str = "1200x800") -> Path:
     """A JPEG whose EXIF says "rotate me", with the metadata a real photo carries."""
     code, _, stderr = await run_command(
-        ["convert", "-size", size, "gradient:red-blue", "-quality", "95", str(path)],
+        ["magick", "-size", size, "gradient:red-blue", "-quality", "95", str(path)],
         timeout_s=120,
     )
     assert code == 0, stderr
@@ -86,7 +90,9 @@ async def _make_still(path: Path, *, orientation: int = 6, size: str = "1200x800
 
 @pytest.fixture
 def behavior(tmp_path: Path) -> BehaviorSettings:
-    return BehaviorSettings(work_dir=tmp_path / "work", max_ratio=0.6)
+    # min_savings_bytes off: these tests exercise the other gates, and a generated
+    # two-second clip never saves a megabyte.
+    return BehaviorSettings(work_dir=tmp_path / "work", max_ratio=0.6, min_savings_bytes=0)
 
 
 @pytest.fixture
@@ -149,6 +155,7 @@ async def test_encode_shrinks_and_passes_the_gate(
         result=result,
         source_probe=source_probe,
         behavior=behavior,
+        preset=h265_preset,
         is_video=True,
     )
     assert sanity.ok, sanity.reason()
@@ -175,6 +182,7 @@ async def test_sanity_rejects_when_there_is_no_gain(
         result=result,
         source_probe=source_probe,
         behavior=behavior,
+        preset=copy_preset,
         is_video=True,
     )
     assert not sanity.ok
@@ -202,6 +210,7 @@ async def test_sanity_rejects_resolution_change(
         result=result,
         source_probe=source_probe,
         behavior=behavior,
+        preset=downscale,
         is_video=True,
     )
     assert not sanity.ok
@@ -227,6 +236,7 @@ async def test_sanity_rejects_dropped_audio(tmp_path: Path, behavior: BehaviorSe
         result=result,
         source_probe=source_probe,
         behavior=behavior,
+        preset=no_audio,
         is_video=True,
     )
     assert not sanity.ok
@@ -276,6 +286,7 @@ async def test_rotated_video_passes_the_gate(tmp_path: Path, behavior: BehaviorS
         result=result,
         source_probe=source_probe,
         behavior=behavior,
+        preset=preset,
         is_video=True,
     )
     assert sanity.ok, sanity.reason()
@@ -306,6 +317,7 @@ async def test_sanity_rejects_a_lost_rotation(tmp_path: Path, behavior: Behavior
         result=result,
         source_probe=source_probe,
         behavior=behavior,
+        preset=lossy,
         is_video=True,
     )
     assert not sanity.ok
@@ -346,6 +358,7 @@ async def test_sanity_rejects_a_bit_depth_drop(tmp_path: Path, behavior: Behavio
         result=result,
         source_probe=source_probe,
         behavior=behavior,
+        preset=to_8bit,
         is_video=True,
     )
     assert not sanity.ok
@@ -392,7 +405,8 @@ async def test_still_orientation_is_normalised_and_metadata_survives(tmp_path: P
         source=source,
         result=result,
         source_probe=source_probe,
-        behavior=BehaviorSettings(work_dir=work, max_ratio=1.0),
+        behavior=BehaviorSettings(work_dir=work, max_ratio=1.0, min_savings_bytes=0),
+        preset=preset,
         is_video=False,
     )
     assert sanity.ok, sanity.reason()
@@ -422,7 +436,8 @@ async def test_still_double_rotation_is_rejected(tmp_path: Path) -> None:
         source=source,
         result=result,
         source_probe=source_probe,
-        behavior=BehaviorSettings(work_dir=work, max_ratio=1.0),
+        behavior=BehaviorSettings(work_dir=work, max_ratio=1.0, min_savings_bytes=0),
+        preset=trap,
         is_video=False,
     )
     assert not sanity.ok
@@ -506,3 +521,172 @@ def test_compressed_filename(original: str, expected: str) -> None:
 def test_free_space_check(tmp_path: Path) -> None:
     assert has_free_space(tmp_path / "sub", 1024) is True
     assert has_free_space(tmp_path / "sub", 10**18) is False
+
+
+# ------------------------------------------------------- embedded media / motion photos
+
+
+def _synthetic_jpeg(trailer: bytes = b"") -> bytes:
+    """A structurally valid minimal JPEG, optionally with a payload glued on behind EOI.
+
+    Hand-built so the marker walk can be tested without ImageMagick — and so the scan data
+    deliberately contains both a stuffed ``FF 00`` and a restart marker, the two things
+    that make "search for the last FFD9" the wrong answer.
+    """
+    app0 = b"\xff\xe0" + (16).to_bytes(2, "big") + b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    sos = b"\xff\xda" + (8).to_bytes(2, "big") + b"\x01\x01\x00\x00\x3f\x00"
+    scan = b"\x12\x34\xff\x00\x56\xff\xd0\x78\x9a"
+    return b"\xff\xd8" + app0 + sos + scan + b"\xff\xd9" + trailer
+
+
+def test_trailer_detection_walks_the_marker_structure(tmp_path: Path) -> None:
+    clean = tmp_path / "clean.jpg"
+    clean.write_bytes(_synthetic_jpeg())
+    assert _trailer_bytes(clean) == 0
+
+    with_payload = tmp_path / "motion.jpg"
+    payload = b"\x00\x00\x00\x18ftypmp42" + b"\xab" * 50_000
+    with_payload.write_bytes(_synthetic_jpeg(payload))
+    assert _trailer_bytes(with_payload) == len(payload)
+
+
+def test_trailer_detection_reports_unknown_for_a_non_jpeg(tmp_path: Path) -> None:
+    """``None`` means "cannot tell", and the caller must not read it as "clean"."""
+    other = tmp_path / "not.jpg"
+    other.write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+    assert _trailer_bytes(other) is None
+
+
+async def test_appended_payload_is_flagged(tmp_path: Path) -> None:
+    path = tmp_path / "motion.jpg"
+    path.write_bytes(_synthetic_jpeg(b"\x00\x00\x00\x18ftypmp42" + b"\xab" * 50_000))
+    reason = await embedded_media_reason(path)
+    assert reason is not None and "end-of-image marker" in reason
+
+
+async def test_padding_below_the_threshold_is_tolerated(tmp_path: Path) -> None:
+    path = tmp_path / "padded.jpg"
+    path.write_bytes(_synthetic_jpeg(b"\x00" * 16))
+    assert await embedded_media_reason(path) is None
+
+
+@needs_still_tools
+async def test_motion_photo_markers_are_flagged_without_a_trailer(tmp_path: Path) -> None:
+    """The second signal, on its own: a vendor variant that carries the XMP tags only."""
+    source = await _make_still(tmp_path / "in.jpg")
+    code, _, stderr = await run_command(
+        [
+            "exiftool", "-quiet", "-overwrite_original",
+            "-XMP-GCamera:MotionPhoto=1",
+            str(source),
+        ],
+        timeout_s=60,
+    )
+    assert code == 0, stderr
+    reason = await embedded_media_reason(source)
+    assert reason is not None and "MotionPhoto" in reason
+
+
+@needs_still_tools
+async def test_plain_still_is_not_flagged(tmp_path: Path) -> None:
+    source = await _make_still(tmp_path / "in.jpg")
+    assert await embedded_media_reason(source) is None
+
+
+# ------------------------------------------------------------- metadata verification
+
+
+@needs_still_tools
+async def test_metadata_survives_the_production_path(tmp_path: Path) -> None:
+    """The hard requirement, asserted end to end rather than trusted.
+
+    Orientation is the single expected difference: `-auto-orient` bakes the rotation into
+    the pixels and `normalize_orientation` pins the tag to 1, which is exactly why it is
+    the only entry on the ignore list.
+    """
+    source = await _make_still(tmp_path / "in.jpg", orientation=6)
+    code, _, stderr = await run_command(
+        [
+            "exiftool", "-quiet", "-overwrite_original",
+            "-GPSLatitude=48.2082", "-GPSLatitudeRef=N",
+            "-GPSLongitude=16.3738", "-GPSLongitudeRef=E",
+            "-Artist=A. Krichmayr", "-Copyright=(c) 2024",
+            "-XMP:Rating=4", "-XMP:Subject=urlaub", "-IPTC:City=Wien",
+            str(source),
+        ],
+        timeout_s=60,
+    )
+    assert code == 0, stderr
+
+    work = tmp_path / "work"
+    work.mkdir()
+    preset = Preset(
+        name="image-jpeg",
+        type="IMAGE",
+        extensions=[".jpg"],
+        cmd="magick {input} -auto-orient -quality 82 -interlace Plane {output}",
+        suffix=".jpg",
+        exiftool_copy=True,
+        normalize_orientation=True,
+        timeout_s=300,
+    )
+    result = await encode(source, preset, work)
+    assert await verify_metadata(source, result.output_path) == []
+
+
+@needs_still_tools
+async def test_metadata_gate_reports_a_lost_tag(tmp_path: Path) -> None:
+    """`-strip` is the failure this gate exists for: the picture is fine, the data is gone."""
+    source = await _make_still(tmp_path / "in.jpg", orientation=1)
+    work = tmp_path / "work"
+    work.mkdir()
+    stripping = Preset(
+        name="strips-everything",
+        type="IMAGE",
+        cmd="magick {input} -strip -quality 82 {output}",
+        suffix=".jpg",
+        timeout_s=300,
+    )
+    result = await encode(source, stripping, work)
+    differences = await verify_metadata(source, result.output_path)
+    assert differences, "a stripped output must not pass as complete"
+    assert any("Make" in entry for entry in differences)
+
+
+# -------------------------------------------------------------------- source quality
+
+
+@needs_still_tools
+async def test_jpeg_quality_reads_the_source(tmp_path: Path) -> None:
+    source = await _make_still(tmp_path / "in.jpg")  # written at -quality 95
+    assert await jpeg_quality(source) == 95
+
+
+@needs_still_tools
+async def test_sanity_rejects_a_result_below_min_savings(tmp_path: Path) -> None:
+    """The economic gate: a good ratio on a small file is still not worth an asset."""
+    source = await _make_still(tmp_path / "in.jpg", orientation=1)
+    work = tmp_path / "work"
+    work.mkdir()
+    preset = Preset(
+        name="image-jpeg",
+        type="IMAGE",
+        cmd="magick {input} -auto-orient -quality 40 -interlace Plane {output}",
+        suffix=".jpg",
+        exiftool_copy=True,
+        normalize_orientation=True,
+        min_savings_bytes=100 * 1024 * 1024,
+        timeout_s=300,
+    )
+    source_probe = await probe(source, is_still=True)
+    result = await encode(source, preset, work)
+    sanity = await check_sanity(
+        source=source,
+        result=result,
+        source_probe=source_probe,
+        behavior=BehaviorSettings(work_dir=work, max_ratio=1.0),
+        preset=preset,
+        is_video=False,
+    )
+    assert not sanity.ok
+    assert any("min_savings_bytes" in failure for failure in sanity.failures)

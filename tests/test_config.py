@@ -185,3 +185,125 @@ def test_a_cpu_preset_reports_no_hardware_encoder() -> None:
     )
     assert cpu.hardware_encoder is None
     assert cpu.render_node == "/dev/dri/renderD128"
+
+
+# ------------------------------------------------------------------- format allowlist
+
+_IMAGE_PRESETS = """
+presets:
+  video-h265:
+    match: { type: VIDEO }
+    cmd: ffmpeg -i {input} -c:v libx265 {output}
+    suffix: .mp4
+  image-jpeg:
+    match:
+      type: IMAGE
+      extensions: [.jpg, .JPEG]
+    cmd: magick {input} -auto-orient -quality 82 {output}
+    suffix: .jpg
+    exiftool_copy: true
+    normalize_orientation: true
+    max_ratio: 0.9
+    require_date_time_original: false
+    min_source_quality: 86
+"""
+
+_WITH_IMAGES = "\nbehavior:\n  enabled_types: [VIDEO, IMAGE]\n" + _IMAGE_PRESETS
+
+
+def _load_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str = _WITH_IMAGES):
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    return load_settings(_write(tmp_path, body))
+
+
+@pytest.mark.parametrize(
+    ("filename", "matches"),
+    [
+        ("holiday.jpg", True),
+        ("holiday.JPG", True),  # extensions are compared case-insensitively
+        ("holiday.jpeg", True),  # ... in both directions
+        ("scan.png", False),
+        ("raw.dng", False),  # ImageMagick would happily develop this one
+        ("clip.CR2", False),
+        ("noextension", False),
+    ],
+)
+def test_extension_allowlist_decides_the_preset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str, matches: bool
+) -> None:
+    settings = _load_images(tmp_path, monkeypatch)
+    assert (settings.preset_for("IMAGE", filename) is not None) is matches
+    # The type stays covered either way — that distinction is what separates
+    # SkipReason.UNSUPPORTED_FORMAT from SkipReason.NO_PRESET.
+    assert settings.type_is_covered("IMAGE") is True
+
+
+def test_empty_extensions_accept_everything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Video presets carry no extension list and must keep matching every container."""
+    settings = _load_images(tmp_path, monkeypatch)
+    for filename in ("clip.mp4", "clip.mov", "clip.avi", "clip.mkv"):
+        assert settings.preset_for("VIDEO", filename) is not None
+
+
+def test_preset_overrides_win_over_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load_images(tmp_path, monkeypatch)
+    behavior = settings.behavior
+    image = settings.preset_for("IMAGE", "a.jpg")
+    video = settings.preset_for("VIDEO", "a.mp4")
+    assert image is not None and video is not None
+
+    assert image.effective_max_ratio(behavior) == 0.9
+    assert image.effective_require_date_time_original(behavior) is False
+    # The video preset sets none of them and must fall back to the behavior block.
+    assert video.effective_max_ratio(behavior) == behavior.max_ratio
+    assert video.effective_require_date_time_original(behavior) is True
+    assert video.effective_min_savings_bytes(behavior) == behavior.min_savings_bytes
+
+
+def test_extension_without_dot_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _WITH_IMAGES.replace("extensions: [.jpg, .JPEG]", "extensions: [jpg]")
+    with pytest.raises(ConfigError, match="must start with a dot"):
+        load_settings(_write(tmp_path, body))
+
+
+def test_warn_mode_is_refused_with_permanent_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warning cannot undo a force-deleted original, so the pair is rejected at startup."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = (
+        "\nbehavior:\n"
+        "  enabled_types: [VIDEO]\n"
+        "  dry_run: false\n"
+        "  trash_original: true\n"
+        "  delete_mode: permanent\n"
+        "  metadata_verify: warn\n" + _PRESETS
+    )
+    with pytest.raises(ConfigError, match="metadata_verify"):
+        load_settings(_write(tmp_path, body))
+
+
+def test_warn_mode_is_allowed_with_recoverable_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = (
+        "\nbehavior:\n"
+        "  enabled_types: [VIDEO]\n"
+        "  dry_run: false\n"
+        "  trash_original: true\n"
+        "  delete_mode: trash\n"
+        "  metadata_verify: warn\n" + _PRESETS
+    )
+    assert load_settings(_write(tmp_path, body)).behavior.metadata_verify == "warn"

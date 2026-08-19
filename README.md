@@ -3,7 +3,8 @@
 Out-of-band recompression for [Immich](https://immich.app) v3, driven by a workflow webhook.
 
 An Immich workflow fires a webhook when a new asset finishes metadata extraction. This
-service downloads the original, recompresses it with ffmpeg/jpegli, uploads the result as
+service downloads the original, recompresses it with ffmpeg (video) or ImageMagick
+(JPEG stills), uploads the result as
 a new asset, carries over everything that can be carried over (album, favourite, shared
 links, stack, sidecar, tags, description, rating, GPS, capture date) and — only if you ask
 it to — moves the original into the trash after a retention period.
@@ -19,6 +20,8 @@ the public REST API.
 ## Table of contents
 
 - [How it works](#how-it-works)
+  - [Rotation and orientation](#rotation-and-orientation)
+  - [Metadata](#metadata)
 - [Requirements](#requirements)
 - [GPU encoding](#gpu-encoding)
 - [Setup](#setup)
@@ -59,10 +62,11 @@ or time out the server.
 | # | Step | Notes |
 |---|---|---|
 | 1 | Delay | `initial_delay_seconds` (default 300) so Immich's own thumbnail/ML/OCR jobs finish first |
-| 2 | Guards | external library, edited, live photo, locked, trashed, wrong type, too small, existing marker, named people |
+| 2 | Guards | external library, edited, live photo, locked, trashed, wrong type, **unsupported format**, too small, existing marker, named people |
 | 3 | Download | `GET /assets/{id}/original`, streamed to a temp file, free space checked first |
 | 4 | Encode | preset command, no shell; `exiftool -TagsFromFile` for stills, with the orientation normalised |
-| 5 | Sanity gate | size ratio, decodable, same display size (rotation-aware), no bit-depth or HDR loss, duration ±0.5 s, same audio stream count, capture date present |
+| 4b | Metadata gate | every EXIF/GPS/XMP/IPTC tag of the source must still be on the output with the same value — stills only, see [Metadata](#metadata) |
+| 5 | Sanity gate | size ratio, **absolute bytes saved**, decodable, same display size (rotation-aware), no bit-depth or HDR loss, duration ±0.5 s, same audio stream count, capture date present |
 | 6 | Upload | `POST /assets`, filename gets the `.cmp` marker |
 | 7 | Copy | `PUT /assets/copy` — albums, favourite, shared links, stack, sidecar (the sidecar indirectly carries tags/description/rating/GPS, see below) |
 | 8 | Nudge | Re-reads the source, then `PUT /assets/{new}` for description/rating/GPS/date and `PUT /tags/assets` for tags — idempotent, and independent of the extraction race |
@@ -81,13 +85,51 @@ a 90° display matrix that the player applies. Stills work the same way through 
 | | Without the countermeasure | With it |
 |---|---|---|
 | **Video** | ffmpeg's default `-autorotate` bakes the rotation into the pixels and drops the matrix, so 1920x1080 comes out as 1080x1920 — and the sanity gate rejects the clip as a resolution change | `-noautorotate` keeps the matrix, the stored frame is untouched. Also required for a full-GPU pipeline, where the rotate filter cannot run on hardware frames |
-| **Still** | `convert -auto-orient` rotates the pixels, then `exiftool -all:all` copies the source `Orientation` back on top — the image ends up rotated twice | `normalize_orientation: true` keeps `Orientation` out of the copy and pins the output to 1 |
+| **Still** | `magick -auto-orient` rotates the pixels, then `exiftool -all:all` copies the source `Orientation` back on top — the image ends up rotated twice | `normalize_orientation: true` keeps `Orientation` out of the copy and pins the output to 1 |
 
 The sanity gate therefore compares **display sizes**, not stored sizes: an encoder may keep
 the matrix or bake the rotation in, both are fine. What it rejects is the third case —
 pixels left unrotated *and* the matrix lost, which is the one that actually damages the
 picture. The same gate rejects a lost bit depth or a dropped HDR transfer function, so a
 10-bit HDR source can never be silently flattened to washed-out SDR.
+
+---
+
+### Metadata
+
+Stills lose **all** metadata on a re-encode; `exiftool -TagsFromFile … -all:all` puts it
+back. That mechanism was measured rather than assumed — a 39-tag source (Make, Model,
+LensModel, DateTimeOriginal, Artist, Copyright, UserComment, ISO, FNumber, GPS incl.
+altitude, XMP Rating/Description/Subject/Label, IPTC Keywords/City/Caption/By-line) came
+through with **0 tags lost and 0 unexpected additions**, and the embedded EXIF thumbnail
+survived byte-identical.
+
+It is still verified on every job, because the mechanism working in a test is not the same
+as it working on your camera's files. After the copy, both files are read back with
+`exiftool -G -n -EXIF:all -GPS:all -XMP:all -IPTC:all` and compared tag by tag. Anything
+missing or changed is reported.
+
+Two tags are on the ignore list, and both are earned rather than convenient:
+
+| Tag | Why |
+|---|---|
+| `EXIF:Orientation` | `normalize_orientation` pins it to 1 by design, and writes it even when the source had none |
+| `XMP:XMPToolkit` | the version stamp of whatever last wrote the XMP packet, so exiftool stamps its own on every copy. It names the writing tool, not the picture |
+
+`behavior.metadata_verify` decides what a difference costs:
+
+- `strict` (default) — the job fails, the original is never touched, the asset shows up in
+  `report` as `failed`.
+- `warn` — logged only. Useful for the first days on unfamiliar camera material, where an
+  unlisted MakerNotes quirk would otherwise block every image. **The config refuses this
+  together with `delete_mode: permanent`**: the two failure directions are not symmetric.
+  A gate that fires wrongly costs a failed job; a gate that stays silent wrongly costs the
+  metadata *and* the original, with no rollback but a Postgres backup.
+
+`immich-compressor encode <file> --type IMAGE` runs the whole thing against a local file
+and prints `metadata_differences`, `source_quality` and `embedded_media` without touching
+the server — the way to check the gate against your own photos before it starts failing
+jobs for real.
 
 ---
 
@@ -255,13 +297,13 @@ and fired successfully against a live v3.1.0 instance:
 ```json
 {
   "name": "compressor",
-  "description": "Recompress large videos out of band",
+  "description": "Recompress large videos and photos out of band",
   "trigger": "AssetMetadataExtraction",
   "enabled": true,
   "steps": [
     {
       "method": "immich-plugin-core#assetTypeFilter",
-      "config": { "allowedTypes": ["VIDEO"] },
+      "config": { "allowedTypes": ["VIDEO", "IMAGE"] },
       "enabled": true
     },
     {
@@ -419,6 +461,7 @@ immich-compressor requeue --reason no_gain --apply
 
 `queued → running → uploaded → linked → pending_delete → done`, plus `skipped` (with a
 `skip_reason`) and `failed`. Skip reasons: `already_compressed`, `too_small`, `wrong_type`,
+`unsupported_format`, `embedded_media`, `source_quality`,
 `no_gain`, `duplicate`, `named_people`, `edited`, `external_library`, `live_photo`,
 `locked`, `trashed`, `no_preset`, `dry_run`.
 
@@ -431,7 +474,10 @@ Failures retry with exponential backoff up to `max_attempts` (default 3), then l
 |---|---|
 | Immich says the workflow ran, nothing happens here | The service log. Immich discards the webhook response, so a 401 (wrong `headerValue`) or 422 (payload the service could not parse) is invisible on the Immich side. Both are logged here. |
 | Webhook arrives, job never runs | `initial_delay_seconds` (default 300). `GET /jobs/{id}` shows `run_after`. |
-| Everything is `skipped: too_small` | `min_size_bytes` defaults to 20 MiB. |
+| Everything is `skipped: too_small` | `min_savings_bytes` (default 1 MiB). An asset smaller than that cannot save that much, so it is rejected before the download. |
+| Images are `skipped: unsupported_format` | The IMAGE preset is a JPEG allowlist. RAW, PNG, GIF, TIFF, WebP and HEIC are out by design — see [Known limits](#known-limits). |
+| Images are `skipped: source_quality` | The source is already at or below `min_source_quality`. Re-encoding it would enlarge the file — measured: a q60 source through the q82 preset comes out 20 % **bigger**. |
+| Jobs `failed` with `metadata carry-over incomplete` | The metadata gate found a tag the copy did not carry. The original is untouched. `immich-compressor encode <file> --type IMAGE` prints the exact list. |
 | Everything is `skipped: dry_run` | That is the shipped default. Set `BEHAVIOR__DRY_RUN=false`. |
 | `skipped: no_gain` | The preset did not reach `max_ratio` (0.6). Tune it offline with `immich-compressor encode`. |
 | Nothing at all in the log | Immich cannot reach the service. Test from inside the Immich container: `docker exec immich_server curl -s -o /dev/null -w '%{http_code}' http://immich-compressor:8080/healthz`. |
@@ -581,8 +627,19 @@ captured webhook payloads are committed as test fixtures in `tests/fixtures/`.
    `-x265-params pools=2 -threads 2`.
 11. **`cjpegli` does not exist as a package.** The plan's stills preset assumed it comes
    with `libjxl-tools`; Debian trixie's 0.11.2 build ships only `cjxl`, `djxl` and
-   `jxlinfo`. The shipped IMAGE preset uses ImageMagick instead (verified: 371 kB → 244 kB
-   with full EXIF/GPS/rating carry-over via exiftool).
+   `jxlinfo`. The shipped IMAGE preset uses ImageMagick instead (verified: 371 kB → 224 kB
+   at q82 with full EXIF/GPS/rating carry-over via exiftool).
+12. **`-interlace Plane` is free.** Progressive JPEG reorders the same DCT coefficients, so
+   the decoded pixels are bit-identical — verified with `compare -metric AE`, which returns
+   **0** — while the file shrinks 3–8 %.
+13. **ImageMagick inherits the source's chroma subsampling** when `-sampling-factor` is
+   omitted (verified: a 4:4:4 source stays 4:4:4 even at q82). The originally shipped
+   preset forced `4:2:0`, which halves chroma resolution on every 4:4:4 source — visible on
+   saturated edges, and invisible to every sanity check. The flag is gone.
+14. **JPEG quality does not transfer across content.** At q82 a detail-rich 4000x3000 photo
+   lands at ratio 0.38 (SSIM 0.79), a flat 3000x2000 one at 0.60 (SSIM 0.98). A fixed SSIM
+   floor is therefore useless as a gate: any threshold protecting the second rejects the
+   first. Size ratio plus absolute savings is what the gate uses instead.
 
 ---
 
@@ -591,8 +648,31 @@ captured webhook payloads are committed as test fixtures in `tests/fixtures/`.
 - **The asset ID changes.** There is no replace endpoint in the API, so the compressed
   version is a new asset with a new ID. External deep links to the old asset break.
 - **Faces and people are re-detected** for the new asset; manually assigned names can be
-  lost. `skip_if_named_people: true` (the default) avoids the problem by never touching
-  such assets.
+  lost — `PUT /assets/copy` does not carry people across. `skip_if_named_people: true` (the
+  default) avoids the problem by never touching such assets, which matters more for photos
+  than for video: in a mature library most family photos have named people. Note the
+  timing, though — the guard reads the *live* state, and a fresh upload has no names yet
+  when the job runs `initial_delay_seconds` later. Compressing on upload therefore has no
+  people problem at all; compressing a years-old backlog does.
+- **Only JPEG stills are compressed.** The IMAGE preset carries an extension allowlist, and
+  everything else Immich files under `IMAGE` is skipped as `unsupported_format`:
+  - **RAW (DNG/CR2/CR3/NEF/ARW)** — ImageMagick reads these through libraw, so without the
+    allowlist a raw file would be developed into an 8-bit JPEG, pass every sanity check,
+    and have its original deleted. 14-bit linear sensor data, gone.
+  - **HEIC** — it can only be written back as JPEG here (libheif is read-only in this
+    image), and HEVC-intra beats JPEG by roughly 2x, so the "compressed" file would be
+    *larger* than the source. HEIC is already the efficient format; there is nothing to win.
+  - **PNG** — screenshots and text turn into ringing artefacts, and transparency is lost.
+  - **GIF/TIFF/WebP** — animation is destroyed, and there is no WebP write support.
+- **Motion photos are skipped, not compressed.** A Samsung/Google motion photo is a JPEG
+  with an MP4 glued on behind the end-of-image marker. Re-encoding drops the video while
+  every other check reports success — measured: 1 935 292 → 389 697 bytes, no `ftyp` left,
+  and the metadata copy faithfully carries `XMP:MotionPhoto=1` onto a file that is no
+  longer a motion photo. Detected by two independent signals (the XMP markers, and payload
+  after the EOI marker) and skipped as `embedded_media`.
+- **Already-compressed sources are left alone.** Quantisation error is cumulative:
+  re-encoding a q60 JPEG at q82 produces a file **20 % larger** (measured: 158 368 →
+  190 488 bytes). `min_source_quality` on the preset skips anything at or below it.
 - **Mobile re-upload.** The app deduplicates by checksum
   (`POST /assets/bulk-upload-check`). Once the original is *permanently* deleted, a device
   that still holds the file can upload it again, and the service will compress it again —
@@ -600,7 +680,10 @@ captured webhook payloads are committed as test fixtures in `tests/fixtures/`.
   a real device; there is no clean fix from this side.
 - **Space is only reclaimed once the original is really gone.** With `delete_mode: trash` that means emptying the Immich trash; with `delete_mode: permanent` it happens as part of the delete, and cannot be undone.
 - **ML load.** Every new asset re-triggers thumbnails, metadata, smart search, faces and
-  OCR. On a small box, keep `concurrency: 1`.
+  OCR. On a small box, keep `concurrency: 1` — note that this is now per *lane*, and there
+  is one lane per entry in `enabled_types`, so `[VIDEO, IMAGE]` means up to two encoders at
+  once. The split is deliberate: without it a single clip with `timeout_s: 7200` holds the
+  only worker for two hours while every one-second image job queues up behind it.
 - **External libraries and live photos are never touched**, by design.
 - **Timeline position depends on GPS in the file.** Immich derives the time zone from GPS
   and computes `localDateTime` from `dateTimeOriginal` in that zone. As long as the
