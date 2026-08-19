@@ -18,3 +18,9 @@ dist/
 
 # Deployment secrets — API key and shared webhook token.
 .env
+
+# Local compose customisation — see docker-compose.override.example.yaml.
+docker-compose.override.yaml
+
+# Claude Code session material (prompts, scratch state); never part of the public repo.
+.claude/

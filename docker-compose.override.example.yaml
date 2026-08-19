@@ -1,0 +1,53 @@
+# Template for local customisation.
+#
+#   cp docker-compose.override.example.yaml docker-compose.override.yaml
+#
+# Compose merges `docker-compose.override.yaml` on top of `docker-compose.yaml`
+# automatically, so `docker compose up -d` picks it up with no extra flags. Editing the
+# tracked `docker-compose.yaml` instead means every `git pull` becomes a merge conflict —
+# put your changes here.
+#
+# `docker-compose.override.yaml` is gitignored. Keep secrets in `.env`, not here.
+
+services:
+  immich-compressor:
+    # ---- Going live -----------------------------------------------------------------
+    # The repository ships an inert configuration: nothing is uploaded, nothing is
+    # deleted. Turn these on one stage at a time, and read docs/safety.md first.
+    #
+    # environment:
+    #   BEHAVIOR__DRY_RUN: "false"        # stage 2: encode and upload, keep the original
+    #   BEHAVIOR__TRASH_ORIGINAL: "true"  # stage 3: move the verified original to the trash
+    #   BEHAVIOR__RETENTION_DAYS: "7"     # how long it stays there
+    #   BEHAVIOR__DELETE_MODE: "trash"    # stage 4: "permanent" bypasses the trash — no undo
+
+    # ---- Resources ------------------------------------------------------------------
+    # Sized so one encode cannot starve Immich itself. Rule of thumb: leave at least half
+    # the host's cores to Immich, and match the CPU preset's `-threads` to what you give
+    # the container here.
+    #
+    # cpus: 2
+    # mem_limit: 2g
+
+    # ---- Build from source instead of pulling the published image -------------------
+    # Contributors: use `-f docker-compose.yaml -f docker-compose.build.yaml` instead,
+    # or pin your own tag here.
+    #
+    # build: .
+    # image: immich-compressor:local
+
+    # ---- Reach /stats from the host -------------------------------------------------
+    # Never publish on 0.0.0.0: the endpoint is unauthenticated.
+    #
+    # ports:
+    #   - '127.0.0.1:8080:8080'
+
+    # ---- Keep the compressor from touching your library at all ----------------------
+    # A read-only, observe-only deployment. Useful for a first week of reporting.
+    #
+    # environment:
+    #   BEHAVIOR__DRY_RUN: "true"
+
+    # Nothing is active in this template — every block above is a comment.
+    # Uncomment what you need; the empty mapping below keeps the file valid meanwhile.
+    {}
