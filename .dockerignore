@@ -1,8 +1,31 @@
+# Keep the build context small and the image free of anything but the service.
 .venv/
+.git/
+.github/
+.claude/
 testinstance/
 tests/
-.git/
+docs/
+scripts/
+# ...except the calibration helper, which belongs next to ffmpeg.
+!scripts/calibrate.sh
 __pycache__/
 *.pyc
-config.yaml
 .pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Deployment-local, and one of them holds secrets.
+config.yaml
+.env
+docker-compose.override.yaml
+
+# README.md is COPYied in (pyproject declares it as the readme); the rest is not.
+CHANGELOG.md
+CLAUDE.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+PLAN.md

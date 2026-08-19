@@ -770,9 +770,15 @@ class HardwareReport:
         )
 
     def calibrate_hint(self) -> str:
+        """How to measure the quality number on this machine's own footage."""
         selected = self.selected
         encoder = selected.encoder if selected else "libx265"
-        return f"ENCODER={encoder} scripts/calibrate.sh /path/to/your/clip.mov"
+        threads = self.facts.cpu.threads
+        return (
+            f"ENCODER={encoder} THREADS={threads} scripts/calibrate.sh /path/to/your/clip.mov\n"
+            f"  in the container:  docker compose exec -e ENCODER={encoder} "
+            "immich-compressor scripts/calibrate.sh /path/clip.mov"
+        )
 
     def to_dict(self) -> dict[str, object]:
         """The ``--json`` shape. Also what a hardware bug report should carry."""

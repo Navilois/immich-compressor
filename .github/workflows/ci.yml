@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default: nothing in CI needs to write to the repository.
+permissions:
+  contents: read
+
+# One run per ref. A new push supersedes the one in flight instead of queueing behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: ruff check
+        run: python -m ruff check --output-format=github .
+      - name: ruff format
+        run: python -m ruff format --check .
+
+  language:
+    name: English only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: German stopword guard
+        run: ./scripts/check-language.sh
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      # ffmpeg, ffprobe, exiftool and ImageMagick unlock the encoder tests that are
+      # skipped without them — about a quarter of the suite.
+      - name: Install media tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libimage-exiftool-perl imagemagick
+      - name: pytest
+        run: python -m pytest -m 'not live' -q
+
+  docs:
+    name: Generated docs are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      # Fails when docs/configuration.md or docs/config.schema.json no longer match the
+      # settings model — which is the point of generating them.
+      - name: gen_docs --check
+        run: python scripts/gen_docs.py --check
+
+  compose:
+    name: Compose files
+    runs-on: ubuntu-latest
+    # The base file refuses to render without the two secrets, on purpose. Obvious
+    # placeholders keep validation independent of any real deployment.
+    env:
+      IMMICH_API_KEY: placeholder
+      COMPRESSOR_TOKEN: placeholder
+      RENDER_GID: '993'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate every overlay combination
+        run: |
+          docker compose -f docker-compose.yaml config -q
+          docker compose -f docker-compose.yaml -f docker-compose.build.yaml config -q
+          docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml config -q
+          docker compose -f docker-compose.yaml -f docker-compose.gpu-nvidia.yaml config -q
+          docker compose -f docker-compose.yaml -f docker-compose.override.example.yaml config -q
+          docker compose -f docker-compose.test.yaml --env-file testinstance/example.env config -q
+
+  image:
+    name: Image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Single arch here — the multi-arch build costs several minutes of emulation and
+      # belongs in the release workflow, not on every pull request.
+      - name: Build linux/amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: immich-compressor:ci
+          build-args: VERSION=ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The built image can answer for itself
+        run: |
+          docker run --rm immich-compressor:ci --version
+          docker run --rm immich-compressor:ci hardware --json > hardware.json
+          python -c "import json,sys; d=json.load(open('hardware.json')); sys.exit(0 if d['presets'] else 1)"

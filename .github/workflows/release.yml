@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Nothing here is granted by default.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  verify:
+    name: The tag matches the code
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # A tag that disagrees with __version__ would publish an image whose label lies
+      # about what is inside it. Fail before anything is built.
+      - name: Compare the tag with __version__
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code=$(python -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/immich_compressor/__init__.py').read_text()).group(1))")
+          if [ "$tag" != "$code" ]; then
+            echo "tag v$tag does not match __version__ $code" >&2
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+      - name: The CHANGELOG has a section for it
+        run: ./scripts/changelog-section.sh "${{ github.ref_name }}" > /dev/null
+      - name: Install and test
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m ruff check .
+          python -m ruff format --check .
+          python -m pytest -m 'not live' -q
+
+  image:
+    name: Publish the image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write      # push to ghcr.io
+      id-token: write      # provenance attestation
+      attestations: write  # attach provenance and the SBOM to the package
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # X.Y.Z, X.Y, X and latest. The compose file pins the major tag, so a patch release
+      # reaches every deployment without anyone editing anything.
+      - name: Tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ needs.verify.outputs.version }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    name: GitHub release
+    needs: [verify, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release notes from the CHANGELOG
+        run: ./scripts/changelog-section.sh "${{ github.ref_name }}" > release-notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes-file release-notes.md \
+            --verify-tag
