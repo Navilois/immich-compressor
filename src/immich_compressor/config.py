@@ -33,6 +33,8 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 AssetType = Literal["IMAGE", "VIDEO", "AUDIO", "OTHER"]
+HardwareMode = Literal["auto", "cpu", "qsv", "vaapi", "nvenc"]
+QualityLevel = Literal["balanced", "higher", "smaller"]
 
 # Placeholders a preset command template must contain.
 INPUT_PLACEHOLDER = "{input}"
@@ -115,6 +117,11 @@ class BehaviorSettings(BaseModel):
     max_attempts: int = Field(default=3, ge=1)
     poll_interval_seconds: float = Field(default=5.0, gt=0)
 
+    # Quality target for the *generated* presets, mapped per encoder to the right
+    # CRF / -global_quality / -cq number. Ignored when `presets:` is written by hand.
+    # "balanced" reproduces exactly what this project shipped before the catalog existed.
+    quality: QualityLevel = "balanced"
+
     min_size_bytes: int = Field(default=20 * 1024 * 1024, ge=0)
     max_ratio: float = Field(default=0.6, gt=0, le=1.0)
     enabled_types: list[AssetType] = Field(default_factory=lambda: ["VIDEO"])
@@ -159,6 +166,22 @@ class BehaviorSettings(BaseModel):
                 "a dry run must not delete anything"
             )
         return self
+
+
+class HardwareSettings(BaseModel):
+    """Which encoder to use. The default is "work it out for me"."""
+
+    model_config = {"extra": "forbid"}
+
+    # "auto"  detect the best encoder this machine can actually run (see hardware.py)
+    # "cpu"   never consider a GPU
+    # "qsv" / "vaapi" / "nvenc"  pin one hardware encoder; if it fails its one-frame
+    #         test encode the service still falls back to the CPU preset rather than
+    #         refusing to start
+    mode: HardwareMode = "auto"
+    # "auto", or a specific DRM render node such as /dev/dri/renderD129 on a box with
+    # more than one GPU.
+    render_node: str = "auto"
 
 
 class Preset(BaseModel):
@@ -297,6 +320,9 @@ class Settings(BaseSettings):
     immich: ImmichSettings = Field(default_factory=ImmichSettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     behavior: BehaviorSettings = Field(default_factory=BehaviorSettings)
+    hardware: HardwareSettings = Field(default_factory=HardwareSettings)
+    # Written by hand, this always wins. Left empty, the presets are generated from
+    # the detected hardware — see `immich_compressor.hardware`.
     presets: list[Preset] = Field(default_factory=list)
 
     database_path: Path = Path("/var/lib/immich-compressor/state.db")
@@ -310,9 +336,12 @@ class Settings(BaseSettings):
         duplicates = {name for name in names if names.count(name) > 1}
         if duplicates:
             raise ConfigError(f"duplicate preset names: {sorted(duplicates)}")
-        for asset_type in self.behavior.enabled_types:
-            if not any(preset.match_type == asset_type for preset in self.presets):
-                raise ConfigError(f"enabled_types contains {asset_type} but no preset matches it")
+        # Only meaningful once presets exist. An empty list means "generate them from the
+        # detected hardware", and `load_settings` fills it in before anyone sees it.
+        if self.presets:
+            for asset_type in self.behavior.enabled_types:
+                if not any(preset.match_type == asset_type for preset in self.presets):
+                    raise ConfigError(f"enabled_types contains {asset_type} but no preset matches it")
         return self
 
     def preset_for(self, asset_type: str) -> Preset | None:
@@ -355,11 +384,22 @@ def _normalise_presets(raw: dict[str, Any]) -> None:
     raw["presets"] = items
 
 
-def load_settings(config_path: Path | None = None) -> Settings:
+def load_settings(
+    config_path: Path | None = None,
+    *,
+    require_secrets: bool = True,
+    autodetect: bool = True,
+) -> Settings:
     """Read YAML + environment into a validated :class:`Settings`.
 
     Raises :class:`ConfigError` on any structural problem so a misconfigured deployment
     dies at startup rather than halfway through a job.
+
+    ``require_secrets=False`` is for the commands that inspect the machine rather than the
+    server (``hardware``): they must work before an API key exists. ``autodetect=False``
+    returns the configuration exactly as written, without generating presets — which is
+    what the ``hardware`` command wants, because it runs detection itself and would
+    otherwise probe the GPU twice.
     """
     path = config_path or Path(os.environ.get("COMPRESSOR_CONFIG", "config.yaml"))
     raw: dict[str, Any] = {}
@@ -382,11 +422,37 @@ def load_settings(config_path: Path | None = None) -> Settings:
     finally:
         _yaml_values.reset(token)
 
-    if not settings.immich.api_key.get_secret_value():
-        raise ConfigError("IMMICH__API_KEY is not set")
-    if not settings.webhook.token.get_secret_value():
-        raise ConfigError("WEBHOOK__TOKEN is not set")
-    return settings
+    if require_secrets:
+        if not settings.immich.api_key.get_secret_value():
+            raise ConfigError("IMMICH__API_KEY is not set")
+        if not settings.webhook.token.get_secret_value():
+            raise ConfigError("WEBHOOK__TOKEN is not set")
+    if not autodetect:
+        return settings
+    return resolve_hardware(settings)
+
+
+def resolve_hardware(settings: Settings) -> Settings:
+    """Fill in generated presets when the configuration did not write any by hand.
+
+    Imported lazily: ``hardware`` needs ``Preset`` and ``Settings`` from this module, so a
+    module-level import here would be circular. Nothing is detected when ``presets:`` is
+    written out, which is what keeps an upgrade from a hand-written 1.0.0 config a no-op.
+    """
+    if settings.presets:
+        return settings
+
+    from .hardware import apply_to_settings
+
+    try:
+        resolved, report = apply_to_settings(settings)
+    except ValueError as exc:
+        # build_presets refuses an asset type the catalog has no recipe for.
+        raise ConfigError(str(exc)) from exc
+    logger.info("%s", report.summary_line())
+    for candidate in report.rejected:
+        logger.info("  not using %s: %s", candidate.where(), candidate.reason)
+    return resolved
 
 
 def warn_about_permanent_deletion(behavior: BehaviorSettings) -> None:

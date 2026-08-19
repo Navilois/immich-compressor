@@ -13,7 +13,15 @@ from typing import Any
 from . import __version__
 from .api import ImmichClient, ImmichError
 from .config import ConfigError, Settings, load_settings
-from .encoder import EncodeError, MediaProbe, check_sanity, encode, probe, probe_hardware_encoder
+from .encoder import (
+    EncodeError,
+    MediaProbe,
+    check_sanity,
+    encode,
+    probe,
+    probe_hardware_encoder,
+)
+from .hardware import HardwareReport, apply_to_settings, format_report
 from .models import JobState, SkipReason
 from .store import JobStore
 
@@ -27,8 +35,12 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def _load(args: argparse.Namespace) -> Settings:
-    return load_settings(Path(args.config) if args.config else None)
+def _load(args: argparse.Namespace, *, require_secrets: bool = True, autodetect: bool = True) -> Settings:
+    return load_settings(
+        Path(args.config) if args.config else None,
+        require_secrets=require_secrets,
+        autodetect=autodetect,
+    )
 
 
 # ---------------------------------------------------------------------------- commands
@@ -69,25 +81,64 @@ async def _check(settings: Settings) -> int:
     print(f"Immich reachable, version {version}")
     print(f"presets: {', '.join(f'{p.name}({p.match_type})' for p in settings.presets) or 'none'}")
     print(f"dry_run={settings.behavior.dry_run} trash_original={settings.behavior.trash_original}")
+    return 0
 
-    unusable = 0
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Config, connectivity and hardware in one command.
+
+    The hardware half is the `hardware` command: everything a GPU problem needs is there,
+    and duplicating a shorter version of it here only invited the two to disagree.
+    """
+    settings = _load(args)
+    _configure_logging(settings.log_level)
+    result = asyncio.run(_check(settings))
+
+    report = _hardware_report(settings)
+    selected = report.selected
+    if report.explicit_presets:
+        print("encoder: presets come from config.yaml — see `immich-compressor hardware`")
+    elif selected is None:
+        print("encoder: NONE confirmed, falling back to CPU — run `immich-compressor hardware`")
+        result = result or 1
+    else:
+        where = f" on {selected.device}" if selected.device else ""
+        print(f"encoder: {selected.encoder}{where} confirmed by a one-frame test encode")
+
+    # A hand-written preset that names a GPU still deserves the probe `check` always did.
     for preset in settings.presets:
         encoder_name = preset.hardware_encoder
         if encoder_name is None:
             continue
-        problem = await probe_hardware_encoder(encoder_name, preset.render_node)
+        problem = asyncio.run(probe_hardware_encoder(encoder_name, preset.render_node))
         if problem is None:
             print(f"  {preset.name}: {encoder_name} on {preset.render_node} ok")
         else:
             print(f"  {preset.name}: {encoder_name} on {preset.render_node} UNUSABLE — {problem}")
-            unusable += 1
-    return 1 if unusable else 0
+            result = result or 1
+    return result
 
 
-def cmd_check(args: argparse.Namespace) -> int:
-    settings = _load(args)
-    _configure_logging(settings.log_level)
-    return asyncio.run(_check(settings))
+def _hardware_report(settings: Settings) -> HardwareReport:
+    _, report = apply_to_settings(settings, always_detect=True)
+    return report
+
+
+def cmd_hardware(args: argparse.Namespace) -> int:
+    """Explain, in one command, which encoder this machine gets and why.
+
+    Deliberately usable before anything else is configured: no API key, no reachable
+    server, no config file. Somebody evaluating the project should be able to run this
+    against their box and see the answer.
+    """
+    settings = _load(args, require_secrets=False, autodetect=False)
+    _configure_logging("WARNING")
+    report = _hardware_report(settings)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(format_report(report))
+    return 0
 
 
 async def _encode_local(settings: Settings, path: Path, asset_type: str) -> int:
@@ -333,7 +384,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("serve", help="run the webhook service").set_defaults(func=cmd_serve)
-    sub.add_parser("check", help="validate config and reach the Immich API").set_defaults(func=cmd_check)
+    sub.add_parser("check", help="validate config, reach the Immich API, confirm the encoder").set_defaults(
+        func=cmd_check
+    )
+
+    hardware_parser = sub.add_parser(
+        "hardware", help="show which encoder this machine gets, and why the others were not"
+    )
+    hardware_parser.add_argument(
+        "--json", action="store_true", help="machine-readable report (attach this to bug reports)"
+    )
+    hardware_parser.set_defaults(func=cmd_hardware)
 
     encode_parser = sub.add_parser("encode", help="run a preset on a local file (offline dry run)")
     encode_parser.add_argument("path")
