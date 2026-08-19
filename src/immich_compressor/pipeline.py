@@ -78,13 +78,29 @@ def check_guards(asset: WebhookAsset, settings: Settings) -> None:
         raise SkipJob(SkipReason.TRASHED, "asset is already in the trash")
     if asset.type not in behavior.enabled_types:
         raise SkipJob(SkipReason.WRONG_TYPE, f"type {asset.type} is not enabled")
-    if settings.preset_for(asset.type) is None:
+    if not settings.type_is_covered(asset.type):
         raise SkipJob(SkipReason.NO_PRESET, f"no preset matches type {asset.type}")
 
-    size = asset.exif_info.file_size_in_byte
-    if size is not None and size < behavior.min_size_bytes:
+    filename = asset.original_file_name
+    preset = settings.preset_for(asset.type, filename)
+    if preset is None:
+        # The type is covered, this file extension is not. An allowlist, because Immich
+        # files RAW, PNG, GIF, TIFF and WebP under IMAGE just like JPEG — and a RAW that
+        # reaches the encoder is developed to 8-bit and loses its sensor data for good.
         raise SkipJob(
-            SkipReason.TOO_SMALL, f"{size} bytes < min_size_bytes {behavior.min_size_bytes}"
+            SkipReason.UNSUPPORTED_FORMAT,
+            f"no {asset.type} preset accepts {Path(filename).suffix or 'a nameless file'!r}",
+        )
+
+    # The pre-download filter, and the only threshold here that needs no tuning: a file
+    # cannot save more bytes than it has, so this can never reject something that would
+    # have passed the gate after the encode.
+    size = asset.exif_info.file_size_in_byte
+    min_savings = preset.effective_min_savings_bytes(behavior)
+    if size is not None and size < min_savings:
+        raise SkipJob(
+            SkipReason.TOO_SMALL,
+            f"{size} bytes cannot save min_savings_bytes {min_savings}",
         )
     if behavior.compressed_marker in Path(asset.original_file_name).name:
         raise SkipJob(
@@ -192,7 +208,7 @@ class Pipeline:
         # --- Step 2: guards ------------------------------------------------------
         check_guards(asset, settings)
 
-        preset = settings.preset_for(asset.type)
+        preset = settings.preset_for(asset.type, asset.original_file_name)
         if preset is None:  # pragma: no cover - check_guards already rejected this
             raise SkipJob(SkipReason.NO_PRESET, f"no preset for {asset.type}")
 
@@ -269,6 +285,8 @@ class Pipeline:
         logger.info("downloaded %s (%d bytes)", asset_id, orig_bytes)
 
         is_video = asset.type == "VIDEO"
+        if not is_video:
+            await self._check_still(source, preset)
         source_probe = await encoder.probe(source, is_still=not is_video)
 
         # --- Step 4: encode ------------------------------------------------------
@@ -281,12 +299,17 @@ class Pipeline:
             result.ratio,
         )
 
+        # --- Step 4b: did the metadata actually survive? -------------------------
+        if preset.exiftool_copy:
+            await self._verify_metadata(source, result.output_path, asset_id)
+
         # --- Step 5: sanity gate -------------------------------------------------
         sanity = await encoder.check_sanity(
             source=source,
             result=result,
             source_probe=source_probe,
             behavior=behavior,
+            preset=preset,
             is_video=is_video,
         )
         if not sanity.ok:
@@ -405,6 +428,50 @@ class Pipeline:
             behavior.delete_mode,
             delete_after.isoformat(),
         )
+
+    # -------------------------------------------------------------- still guards
+
+    async def _check_still(self, source: Path, preset: Preset) -> None:
+        """Reasons a downloaded still must not be encoded at all. Raises :class:`SkipJob`.
+
+        Both checks need the file, so they cannot move into ``check_guards``. They still
+        pay for themselves: they cost one ``exiftool``/``identify`` call and save the whole
+        encode, the upload and — in the motion-photo case — the original.
+        """
+        embedded = await encoder.embedded_media_reason(source)
+        if embedded is not None:
+            # Re-encoding would drop the appended video while every downstream check
+            # reports success: the metadata copy carries the motion-photo markers across
+            # faithfully, and the size ratio looks *better* for the missing megabytes.
+            raise SkipJob(SkipReason.EMBEDDED_MEDIA, embedded)
+
+        if preset.min_source_quality is None:
+            return
+        quality = await encoder.jpeg_quality(source)
+        if quality is not None and quality < preset.min_source_quality:
+            raise SkipJob(
+                SkipReason.SOURCE_QUALITY,
+                f"source is already q{quality}, below min_source_quality "
+                f"{preset.min_source_quality} — a re-encode would only add artefacts",
+            )
+
+    async def _verify_metadata(self, source: Path, output: Path, asset_id: str) -> None:
+        """Compare the source's EXIF/GPS/XMP/IPTC against the encoded file.
+
+        ``metadata_verify: strict`` turns a difference into a job failure, which leaves the
+        original untouched and puts the asset in ``failed`` where it is visible. ``warn``
+        only logs — and the config refuses that combination together with
+        ``delete_mode: permanent``, because a warning cannot undo a force-deleted original.
+        """
+        differences = await encoder.verify_metadata(source, output)
+        if not differences:
+            return
+        summary = "; ".join(differences[:10])
+        if len(differences) > 10:
+            summary += f" (+{len(differences) - 10} more)"
+        if self._settings.behavior.metadata_verify == "strict":
+            raise RuntimeError(f"metadata carry-over incomplete: {summary}")
+        logger.warning("metadata carry-over incomplete for %s: %s", asset_id, summary)
 
     # ------------------------------------------------------------------ deletion
 
@@ -569,12 +636,21 @@ class Worker:
         self._stop = asyncio.Event()
 
     async def start(self) -> None:
-        for index in range(self._settings.behavior.concurrency):
-            self._tasks.append(asyncio.create_task(self._loop(index), name=f"worker-{index}"))
+        # One lane per enabled asset type, `concurrency` workers each. Without the split a
+        # single clip with `timeout_s: 7200` holds the only worker for two hours while
+        # every one-second image job queues up behind it.
+        behavior = self._settings.behavior
+        for asset_type in behavior.enabled_types:
+            for index in range(behavior.concurrency):
+                name = f"worker-{asset_type.lower()}-{index}"
+                self._tasks.append(
+                    asyncio.create_task(self._loop(name, (asset_type,)), name=name)
+                )
         self._tasks.append(asyncio.create_task(self._sweeper(), name="trash-sweeper"))
         logger.info(
-            "worker started (concurrency=%d, dry_run=%s, trash_original=%s, "
+            "worker started (lanes=%s, concurrency=%d each, dry_run=%s, trash_original=%s, "
             "delete_mode=%s, retention_days=%d)",
+            ",".join(behavior.enabled_types),
             self._settings.behavior.concurrency,
             self._settings.behavior.dry_run,
             self._settings.behavior.trash_original,
@@ -591,20 +667,20 @@ class Worker:
                 await task
         self._tasks.clear()
 
-    async def _loop(self, index: int) -> None:
+    async def _loop(self, name: str, types: tuple[str, ...]) -> None:
         interval = self._settings.behavior.poll_interval_seconds
         while not self._stop.is_set():
             try:
-                job = await self._store.claim_next()
+                job = await self._store.claim_next(types=types)
                 if job is None:
                     await asyncio.sleep(interval)
                     continue
-                logger.info("worker-%d picked up %s", index, job.source_asset_id)
+                logger.info("%s picked up %s", name, job.source_asset_id)
                 await self.pipeline.run_job(job)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("worker-%d loop error", index)
+                logger.exception("%s loop error", name)
                 await asyncio.sleep(interval)
 
     async def _sweeper(self) -> None:

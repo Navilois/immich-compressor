@@ -33,6 +33,15 @@ RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
 
 ENV LIBVA_DRIVER_NAME=iHD
 
+# ImageMagick is built with OpenMP and sizes its thread pool from the *host* core count,
+# ignoring the container's cgroup CPU limit — the same trap the video preset defuses with
+# `pools=2 -threads 2`. Set as ENV rather than as `-limit` inside a preset so it also
+# covers a hand-written one. The memory limits matter for large stills: the Q16 pixel
+# cache is ~96 MB for a 12 MP image but ~800 MB for a 100 MP panorama.
+ENV MAGICK_THREAD_LIMIT=2 \
+    MAGICK_MEMORY_LIMIT=512MiB \
+    MAGICK_MAP_LIMIT=1GiB
+
 # Non-root: the service never needs to write outside its own two directories.
 RUN useradd --system --create-home --uid 10001 compressor \
     && mkdir -p /var/lib/immich-compressor /var/tmp/immich-compressor \

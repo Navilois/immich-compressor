@@ -12,7 +12,17 @@ from typing import Any
 
 from .api import ImmichClient, ImmichError
 from .config import ConfigError, Settings, load_settings
-from .encoder import EncodeError, MediaProbe, check_sanity, encode, probe, probe_hardware_encoder
+from .encoder import (
+    EncodeError,
+    MediaProbe,
+    check_sanity,
+    embedded_media_reason,
+    encode,
+    jpeg_quality,
+    probe,
+    probe_hardware_encoder,
+    verify_metadata,
+)
 from .models import JobState, SkipReason
 from .store import JobStore
 
@@ -90,19 +100,34 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 async def _encode_local(settings: Settings, path: Path, asset_type: str) -> int:
-    preset = settings.preset_for(asset_type)
+    # Matched by name too, so `encode photo.png` reports the same "no preset" the pipeline
+    # would rather than silently running the JPEG recipe against it.
+    preset = settings.preset_for(asset_type, path.name)
     if preset is None:
-        print(f"no preset for type {asset_type}", file=sys.stderr)
+        print(f"no {asset_type} preset accepts {path.name}", file=sys.stderr)
         return 2
     work_dir = settings.behavior.work_dir
     work_dir.mkdir(parents=True, exist_ok=True)
-    source_probe = await probe(path, is_still=asset_type != "VIDEO")
+    is_video = asset_type == "VIDEO"
+
+    # The two still guards report here instead of aborting: this command exists to tell you
+    # what the pipeline *would* do with a file, and "it would refuse this one" is the most
+    # useful answer it can give. It is also the cheapest way to check the metadata gate
+    # against real camera material before the gate starts failing jobs for real.
+    embedded = None if is_video else await embedded_media_reason(path)
+    source_quality = None if is_video else await jpeg_quality(path)
+
+    source_probe = await probe(path, is_still=not is_video)
     result = await encode(path, preset, work_dir)
+    metadata_differences = (
+        await verify_metadata(path, result.output_path) if preset.exiftool_copy else []
+    )
     sanity = await check_sanity(
         source=path,
         result=result,
         source_probe=source_probe,
         behavior=settings.behavior,
+        preset=preset,
         is_video=asset_type == "VIDEO",
     )
     print(
@@ -116,13 +141,16 @@ async def _encode_local(settings: Settings, path: Path, asset_type: str) -> int:
                 "ratio": round(result.ratio, 4),
                 "source_probe": _probe_summary(source_probe),
                 "output_probe": _probe_summary(result.probe),
+                "source_quality": source_quality,
+                "embedded_media": embedded,
+                "metadata_differences": metadata_differences,
                 "sanity_ok": sanity.ok,
                 "sanity_failures": sanity.failures,
             },
             indent=2,
         )
     )
-    return 0 if sanity.ok else 1
+    return 0 if sanity.ok and not metadata_differences and embedded is None else 1
 
 
 def _probe_summary(probe_result: MediaProbe) -> dict[str, Any]:
@@ -242,7 +270,7 @@ async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool
         JobStore(settings.database_path) as store,
     ):
         async for item in client.search_large_assets(
-            min_file_size=settings.behavior.min_size_bytes,
+            min_file_size=settings.behavior.min_savings_bytes,
             asset_type=asset_type,
             size=min(limit, 200),
         ):

@@ -42,10 +42,21 @@ behavior:
   max_attempts: 3
   poll_interval_seconds: 5
 
-  min_size_bytes: 20971520   # 20 MiB — below this the effort is not worth it
+  # How many bytes a job has to actually save. Replaces the old `min_size_bytes`, which
+  # guessed from the input size; this measures the outcome. It doubles as the free
+  # pre-download filter: a file cannot save more bytes than it has, so an asset smaller
+  # than this is rejected before the download, with no heuristic involved.
+  min_savings_bytes: 1048576 # 1 MiB
   max_ratio: 0.6             # reject the result unless it is <= 60 % of the original
-  enabled_types: [VIDEO]
+  enabled_types: [VIDEO, IMAGE]
   skip_if_named_people: true # never risk losing manually named faces
+
+  # What happens when the post-encode metadata diff finds a tag the copy did not carry.
+  #   strict — the job fails and the original is never touched (required with
+  #            delete_mode: permanent, which the startup validation enforces)
+  #   warn   — logged only; for the first days on unfamiliar camera material, and only
+  #            defensible while delete_mode is 'trash' and the delete can be undone
+  metadata_verify: strict
 
   duration_tolerance_s: 0.5
   require_same_resolution: true
@@ -160,17 +171,54 @@ presets:
   # `-auto-orient` is idempotent and settles that either way; pinning Orientation to 1
   # afterwards stops exiftool from copying the source tag back onto pixels that are
   # already upright, which would rotate the image a second time.
-  image-magick:
-    match: { type: IMAGE }
-    cmd: convert {input} -auto-orient -quality 82 -sampling-factor 4:2:0 {output}
+  image-jpeg:
+    # JPEG only, and an allowlist rather than a denylist. Immich files RAW, PNG, GIF,
+    # TIFF and WebP under type IMAGE just like JPEG, and ImageMagick here reads DNG/CR2/
+    # CR3/NEF/ARW through libraw — so without this list a RAW would be developed into an
+    # 8-bit JPEG, pass every sanity check, and have its original deleted. HEIC is left
+    # out for a different reason: it can only be written as JPEG here, and HEVC-intra
+    # beats JPEG by roughly 2x, so the "compressed" file would be larger than the source.
+    match:
+      type: IMAGE
+      extensions: [.jpg, .jpeg, .jpe, .jfif]
+    cmd: magick {input} -auto-orient -quality 82 -interlace Plane {output}
     suffix: .jpg
     exiftool_copy: true          # a still loses ALL metadata on re-encode without this
     normalize_orientation: true  # requires -auto-orient above; validated at startup
+    # A still costs about a second to encode, so the ratio is the wrong economic axis:
+    # ratio 0.75 on a 12 MB photo saves 3 MB, ratio 0.60 on a 371 KB photo saves 147 KB.
+    # max_ratio is therefore only a "something went badly wrong" net here, and
+    # min_savings_bytes (from `behavior`) decides whether the result is worth keeping.
+    max_ratio: 0.9
+    # Off for stills on purpose: the replacement's timeline position comes from the
+    # `fileCreatedAt` sent at upload and from the explicit `dateTimeOriginal` write in
+    # step 8, not from the file. Requiring the tag would reject scans and EXIF-stripped
+    # exports after a full download and encode, for no gain in correctness.
+    require_date_time_original: false
+    # Quantisation error is cumulative. Running a q78 source through a q82 preset costs a
+    # second generation of artefacts and usually produces a *larger* file, so anything at
+    # or below q85 is left alone.
+    min_source_quality: 86
     timeout_s: 900
 
-  # Requires a self-built libjxl >= 0.9. Keep only one IMAGE preset active.
+  # Why these flags:
+  #   -quality 82          measured on two sources: ratio 0.38 on a detail-rich 4000x3000
+  #                        camera JPEG, 0.60 on a flat 3000x2000 one. Verify against your
+  #                        own material with `immich-compressor encode <file> --type IMAGE`.
+  #   -interlace Plane     progressive JPEG. Free: it reorders the same DCT coefficients,
+  #                        so the decoded pixels are bit-identical (verified with
+  #                        `compare -metric AE` = 0) while the file shrinks 3-8 %.
+  #   no -sampling-factor  ImageMagick then *inherits* the source's chroma subsampling
+  #                        (verified: a 4:4:4 source stays 4:4:4 even at q82). Forcing
+  #                        4:2:0 would halve chroma resolution on every 4:4:4 source —
+  #                        visible on saturated edges, and no sanity check would notice.
+  #   magick, not convert  `convert` is a deprecated alias in ImageMagick 7.
+
+  # Requires a self-built libjxl >= 0.9. Keep only one IMAGE preset per extension set.
   # image-jpegli:
-  #   match: { type: IMAGE }
+  #   match:
+  #     type: IMAGE
+  #     extensions: [.jpg, .jpeg]
   #   cmd: cjpegli {input} {output} -q 88
   #   suffix: .jpg
   #   exiftool_copy: true

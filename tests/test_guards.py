@@ -78,3 +78,72 @@ def test_marker_without_replacement_has_no_replaced_by() -> None:
     marker = build_marker(source_id="src", new_id=None, preset_name="p", ratio=None)
     assert "replacedBy" not in marker.value
     assert "ratio" not in marker.value
+
+
+# ------------------------------------------------------------------- format allowlist
+
+
+def _with_image_preset(settings: Settings) -> Settings:
+    """The shipped JPEG-only image preset alongside the video one."""
+    from immich_compressor.config import Preset
+
+    settings.behavior.enabled_types = ["VIDEO", "IMAGE"]
+    settings.presets = [
+        *settings.presets,
+        Preset(
+            name="image-jpeg",
+            type="IMAGE",
+            extensions=[".jpg", ".jpeg"],
+            cmd="magick {input} -auto-orient -quality 82 {output}",
+            suffix=".jpg",
+            exiftool_copy=True,
+            normalize_orientation=True,
+        ),
+    ]
+    return settings
+
+
+def test_jpeg_passes_the_allowlist(
+    image_payload_raw: dict[str, Any], settings: Settings
+) -> None:
+    check_guards(
+        _asset(image_payload_raw, originalFileName="holiday.jpg", exifInfo={"fileSizeInByte": 5_000_000}),
+        _with_image_preset(settings),
+    )  # must not raise
+
+
+@pytest.mark.parametrize("filename", ["raw.dng", "raw.CR2", "shot.nef", "screen.png", "anim.gif"])
+def test_non_jpeg_stills_are_skipped_as_unsupported(
+    image_payload_raw: dict[str, Any], settings: Settings, filename: str
+) -> None:
+    """A RAW that reaches the encoder is developed to 8-bit and loses its sensor data.
+
+    It must be rejected as UNSUPPORTED_FORMAT, not NO_PRESET: the type *is* covered, and
+    the two reasons mean different things when reading a report.
+    """
+    with pytest.raises(SkipJob) as excinfo:
+        check_guards(
+            _asset(
+                image_payload_raw,
+                originalFileName=filename,
+                exifInfo={"fileSizeInByte": 40_000_000},
+            ),
+            _with_image_preset(settings),
+        )
+    assert excinfo.value.reason is SkipReason.UNSUPPORTED_FORMAT
+
+
+def test_min_savings_is_the_pre_download_filter(
+    video_payload_raw: dict[str, Any], settings: Settings
+) -> None:
+    """A file smaller than min_savings_bytes provably cannot pass the gate after encoding."""
+    settings.behavior.min_savings_bytes = 1024 * 1024
+    with pytest.raises(SkipJob) as excinfo:
+        check_guards(
+            _asset(video_payload_raw, exifInfo={"fileSizeInByte": 1024 * 1024 - 1}), settings
+        )
+    assert excinfo.value.reason is SkipReason.TOO_SMALL
+
+    check_guards(
+        _asset(video_payload_raw, exifInfo={"fileSizeInByte": 1024 * 1024}), settings
+    )  # exactly at the threshold is allowed through
