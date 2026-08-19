@@ -35,12 +35,17 @@ not write it.
   server, names the permissions it is missing, runs hardware detection, writes a tuned
   `config.yaml`, generates a webhook token, writes `.env` with mode 0600, and creates the
   Immich workflow when the credentials allow it (otherwise prints the exact JSON and curl).
-- `/metrics` in Prometheus text format: jobs by state, skip reasons, bytes saved, encode
-  outcomes. No new dependency.
+- `/metrics` in Prometheus text format: jobs by state, skip reasons, bytes saved, session
+  counters and an encode-duration histogram, plus three `config_*` gauges so a deployment
+  that quietly went live — or quietly did not — is visible on a dashboard. Hand-rolled;
+  no new dependency.
 - Published multi-arch image (`linux/amd64`, `linux/arm64`) at
   `ghcr.io/navilois/immich-compressor`, with OCI labels, provenance and an SBOM.
 - `docker-compose.build.yaml`, `docker-compose.gpu-nvidia.yaml` and
   `docker-compose.override.example.yaml` overlays; `.env.example`; `scripts/quickstart.sh`.
+- `scripts/check-links.py`, which verifies every internal link and heading anchor offline,
+  and `scripts/check-language.sh`, an English-only guard — both wired into `make lint` and CI.
+- A social preview image in `docs/assets/`, and `docs/maintainers/launch-checklist.md`.
 - `docs/` tree: quickstart, installation, configuration (generated from the settings
   model), hardware, workflow setup, safety, operations, troubleshooting, architecture,
   the verified Immich API notes, FAQ, upgrading and a comparison with the alternatives.
