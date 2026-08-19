@@ -139,13 +139,37 @@ Details, calibration and the CPU-budget fix: **[docs/hardware.md](docs/hardware.
 
 ## What you get
 
-```bash
-$ curl -s localhost:8080/stats | jq '{by_state, by_skip_reason, saved_bytes, average_ratio}'
+A real report, from the deployment this project is developed against:
+
+```
+$ docker compose exec immich-compressor immich-compressor report
+
+=== immich-compressor report ===
+database: /var/lib/immich-compressor/state.db
+jobs total: 5
+  done             2
+  failed           1
+  skipped          2
+skip reasons:
+  dry_run              1
+  no_gain              1
+compressed assets: 2
+saved: 22.9 MiB (average ratio 0.5263)
+failed jobs (1):
+  <assetId>   GET /assets/<id>/metadata -> HTTP 400: {"message":"Not found or no asset.read access"}
 ```
 
-`report` and `/stats` give you job states, skip reasons, bytes saved and the average ratio.
-`/metrics` gives the same in Prometheus format. The numbers you see are yours — this project
-does not publish a compression figure it measured on somebody else's footage.
+Five jobs, two of them compressed to 53 % of the original. One skipped as `no_gain`,
+because the source was already efficient enough that the gate refused the result — that is
+the gate working. One failed with the API key missing a permission, named in the error.
+
+**Your number will be different, and this project will not pretend otherwise.** How much you
+save depends entirely on your footage: H.264 from a phone or a drone shrinks a lot,
+already-HEVC video from a recent iPhone often will not reach `max_ratio` at all. Run a dry
+run, then stage 2 on a few dozen files, and read your own report.
+
+The same data is available as JSON at `/stats` and in Prometheus format at `/metrics`. No
+port is published by default — see [operations.md](docs/operations.md#endpoints).
 
 - **Carries everything across**: album membership, favourite, shared links, stack, sidecar,
   tags, description, rating, GPS, capture date and timeline position.
