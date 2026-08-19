@@ -180,6 +180,7 @@ Start with `immich-compressor hardware`. It answers almost all of these directly
 | `no DRM render node under /dev/dri` | The device was not passed through. Use `docker-compose.gpu.yaml`. |
 | `cannot open /dev/dri/renderD128: permission denied` | Missing render group. The message names the gid to add. |
 | `vainfo reports no HEVC encode entrypoint` | The driver in the container cannot encode HEVC on this chip. Not fixable from here; the CPU preset is used. |
+| The same, but *"my GPU works fine for Immich"* | Immich's own transcoding targets H.264, which uses a different VA entrypoint. A chip can implement `VAProfileH264High : VAEntrypointEncSlice` and not `VAProfileHEVCMain : VAEntrypointEncSlice` — so a GPU that accelerates Immich can still be unable to encode HEVC. Compare the two lines in `vainfo` output. |
 | `the one-frame test encode failed: Error creating a MFX session: -9` | Gen9–11 with QSV. Expected; `hevc_vaapi` is chosen instead. |
 | `this ffmpeg build has no hevc_qsv encoder` | You are on arm64, where the Intel packages do not exist. |
 | `no NVIDIA device found` | The NVIDIA Container Toolkit is not wired in. Use `docker-compose.gpu-nvidia.yaml`. |

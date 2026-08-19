@@ -118,11 +118,46 @@ def test_every_permission_probe_is_inert() -> None:
 
 @respx.mock
 def test_a_rejected_key_is_reported_before_anything_else_happens() -> None:
-    respx.get(f"{BASE}/users/me").mock(return_value=httpx.Response(401))
+    respx.get(f"{BASE}/users/me").mock(return_value=httpx.Response(401, json={"message": "Invalid API key"}))
     with httpx.Client(base_url=BASE, headers={"x-api-key": "bad"}) as client:
         ok, message = check_key(client)
     assert ok is False
-    assert "401" in message
+    assert "Invalid API key" in message
+
+
+@respx.mock
+def test_a_correctly_scoped_key_is_not_mistaken_for_a_bad_one() -> None:
+    """403 on /users/me is the *expected* answer, and used to abort setup entirely.
+
+    Measured against a live v3.1.0: a valid key without `user.read` gets
+    403 "Missing required permission: user.read", while a bogus key gets 401
+    "Invalid API key". This service deliberately never asks for `user.read`, so every
+    correctly configured deployment hits the 403 — and treating it as a failure meant
+    setup refused to run against a real server. A stub that answered 200 hid it.
+    """
+    respx.get(f"{BASE}/users/me").mock(
+        return_value=httpx.Response(403, json={"message": "Missing required permission: user.read"})
+    )
+    with httpx.Client(base_url=BASE, headers={"x-api-key": "good-but-scoped"}) as client:
+        ok, message = check_key(client)
+    assert ok is True
+    assert "user.read" in message
+
+
+@respx.mock
+def test_a_missing_permission_is_reported_in_the_servers_own_words() -> None:
+    """Immich names the permission exactly as the API-key editor spells it."""
+    for probe in PERMISSION_PROBES:
+        body = {"message": f"Missing required permission: {probe.permission}"}
+        status = 403 if probe.permission == "asset.copy" else 404
+        respx.route(method=probe.method, url=f"{BASE}{probe.url}").mock(
+            return_value=httpx.Response(status, json=body if status == 403 else {})
+        )
+    with httpx.Client(base_url=BASE, headers={"x-api-key": "k"}) as client:
+        results = check_permissions(client, include_delete=True)
+    missing = [r for r in results if not r.granted]
+    assert [r.probe.permission for r in missing] == ["asset.copy"]
+    assert missing[0].detail == "Missing required permission: asset.copy"
 
 
 @respx.mock

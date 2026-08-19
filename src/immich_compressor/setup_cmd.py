@@ -156,16 +156,41 @@ def _client(base_url: str, api_key: str) -> httpx.Client:
     )
 
 
+def _server_message(response: httpx.Response) -> str:
+    """Immich's own words for a refusal — better than anything we could invent.
+
+    A 403 body is ``{"message": "Missing required permission: asset.copy"}``, which names
+    the permission exactly as it appears in the API-key editor. Verified against v3.1.0.
+    """
+    try:
+        message = response.json().get("message")
+    except ValueError:
+        message = None
+    return str(message) if message else f"HTTP {response.status_code}"
+
+
 def check_key(client: httpx.Client) -> tuple[bool, str]:
-    """Is this key valid at all? Returns ``(ok, message)``."""
+    """Is this key valid at all? Returns ``(ok, message)``.
+
+    The distinction that matters, measured against a live v3.1.0: a **401** means the key
+    itself is wrong, while a **403** means Immich authenticated it and then refused the
+    permission. ``GET /users/me`` needs ``user.read``, which this service deliberately does
+    not ask for — so a 403 here is the *expected* answer for a correctly scoped key, and
+    treating it as a failure would make setup refuse every properly configured deployment.
+
+    ``GET /server/version`` cannot stand in for this: it answers 200 for a bogus key too,
+    because it needs no authentication at all.
+    """
     try:
         response = client.get("/users/me")
     except httpx.HTTPError as exc:
         return False, f"cannot reach the server: {exc}"
     if response.status_code == 401:
-        return False, "the server rejected the API key (HTTP 401)"
+        return False, f"the server rejected the API key: {_server_message(response)}"
+    if response.status_code == 403:
+        return True, "key accepted (it has no user.read permission, which is correct)"
     if response.status_code >= 400:
-        return False, f"GET /users/me answered HTTP {response.status_code}"
+        return False, f"GET /users/me answered {_server_message(response)}"
     body = response.json()
     return True, f"key accepted for user {body.get('email') or body.get('name') or 'unknown'}"
 
@@ -193,9 +218,11 @@ def check_permissions(client: httpx.Client, *, include_delete: bool) -> list[Per
             results.append(PermissionResult(probe, False, f"could not ask the server: {exc}"))
             continue
         if response.status_code == 403:
-            results.append(PermissionResult(probe, False, "the server refused it (HTTP 403 Forbidden)"))
+            results.append(PermissionResult(probe, False, _server_message(response)))
         elif response.status_code == 401:
-            results.append(PermissionResult(probe, False, "the key was not accepted (HTTP 401)"))
+            results.append(
+                PermissionResult(probe, False, f"the key was not accepted: {_server_message(response)}")
+            )
         else:
             results.append(PermissionResult(probe, True, f"HTTP {response.status_code}"))
     return results

@@ -1,7 +1,7 @@
 # immich-compressor
 
-**Recompress the originals in your [Immich](https://immich.app) library, automatically,
-without ever losing one.**
+**Recompress the originals in your [Immich](https://immich.app) library, automatically —
+and never delete one before its replacement has been verified.**
 
 [![CI](https://github.com/Navilois/immich-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/Navilois/immich-compressor/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Navilois/immich-compressor?sort=semver)](https://github.com/Navilois/immich-compressor/releases)
@@ -58,6 +58,12 @@ processed before. It never empties your trash.
 **You can undo it.** With the default `delete_mode: trash`, `immich-compressor restore
 --all-pending` brings every original back. There is no telemetry, no phone-home, and no
 network traffic to anything but your own Immich server.
+
+**One thing to know before you go live:** Immich's `AssetMetadataExtraction` trigger fires
+in bulk, so re-running **Administration → Jobs → Extract Metadata** queues your *entire*
+library at once, not just new uploads. Work through a backlog with `backfill --limit`
+instead, and disable the workflow before running extraction —
+[the details, and why](docs/operations.md#the-metadata-extraction-trap).
 
 Full detail, and the four stages of going live: **[docs/safety.md](docs/safety.md)**.
 

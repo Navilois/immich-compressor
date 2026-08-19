@@ -98,6 +98,11 @@ jobs:
       RENDER_GID: '993'
     steps:
       - uses: actions/checkout@v4
+      # The test stack's services declare `env_file: testinstance/.env`, which is the
+      # gitignored real one. Creating it from the template is the documented first step
+      # anyway, so validating this way checks the instructions too.
+      - name: Create the test instance env file
+        run: cp testinstance/example.env testinstance/.env
       - name: Validate every overlay combination
         run: |
           docker compose -f docker-compose.yaml config -q

@@ -204,7 +204,25 @@ workflow for every asset in the library.**
 
 See [operations.md](operations.md#the-metadata-extraction-trap) for what to do about it.
 
-### 13. Immich ignores the webhook's response status
+### 13. A scoped API key gets 403 on `/users/me`, and that is not an error
+
+Verified on v3.1.0 with two keys on the same instance:
+
+| Key | `GET /users/me` |
+|---|---|
+| Valid, with the permissions this service needs | `403 {"message": "Missing required permission: user.read"}` |
+| Bogus | `401 {"message": "Invalid API key"}` |
+| No key at all | `401 {"message": "Authentication required"}` |
+
+So **401 means the key is wrong and 403 means the key is right but scoped.** Immich runs
+the permission guard after authenticating, which is also what makes the inert permission
+probes in `immich-compressor setup` work at all: a 403 identifies a missing permission, and
+the body names it exactly as the API-key editor spells it.
+
+`GET /server/version` cannot stand in for a key check — it answers 200 for a bogus key,
+because it needs no authentication.
+
+### 14. Immich ignores the webhook's response status
 
 A 401, 422 or 500 from your service is still logged as *"Workflow … executed successfully"*.
 Never diagnose from the Immich side alone. Related: if a workflow stops firing, restart
