@@ -1,0 +1,9 @@
+libva info: VA-API version 1.22.0
+libva info: User environment variable requested driver 'iHD'
+libva info: Trying to open /usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so
+libva info: Found init function __vaDriverInit_1_22
+libva info: va_openDriver() returns 0
+[AVHWDeviceContext @ 0x5560dfe640c0] Error creating a MFX session: -9.
+Device creation failed: -1313558101.
+Failed to set value '/dev/dri/renderD128' for option 'qsv_device': Unknown error occurred
+Error parsing global options: Unknown error occurred

@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -281,6 +282,30 @@ async def copy_metadata(
         raise EncodeError(f"exiftool metadata copy failed: {stderr.strip()[:400]}")
 
 
+# libva announces itself on stderr before anything interesting happens, and ffmpeg prefixes
+# component messages with a heap address that differs on every run.
+_LIBVA_CHATTER = re.compile(r"^libva info:")
+_COMPONENT_PREFIX = re.compile(r"^\[[^\]]+@\s*0x[0-9a-f]+\]\s*")
+
+
+def first_diagnostic_line(stderr: str) -> str | None:
+    """The line of ffmpeg's stderr that actually says what went wrong.
+
+    The *first* meaningful line carries the diagnosis ("No VA display found for device
+    ...", "Error creating a MFX session: -9"); the last one is only ffmpeg giving up
+    ("Error parsing global options"). Two kinds of noise sit in front of it: five
+    ``libva info:`` lines that libva prints on every single VA-API call, and a
+    ``[AVHWDeviceContext @ 0x...]`` prefix whose address changes per run and would make
+    otherwise-identical failures look like different ones.
+    """
+    for line in stderr.strip().splitlines():
+        stripped = line.strip()
+        if not stripped or _LIBVA_CHATTER.match(stripped):
+            continue
+        return _COMPONENT_PREFIX.sub("", stripped)[:200]
+    return None
+
+
 async def probe_hardware_encoder(encoder_name: str, device: str, *, timeout_s: float = 60.0) -> str | None:
     """Encode a single black frame to prove the GPU path actually works.
 
@@ -305,10 +330,7 @@ async def probe_hardware_encoder(encoder_name: str, device: str, *, timeout_s: f
         return str(exc)
     if code == 0:
         return None
-    # The *first* line carries the diagnosis ("No VA display found for device ..."); the
-    # last one is only ffmpeg giving up ("Error parsing global options").
-    lines = [line for line in stderr.strip().splitlines() if line.strip()]
-    return lines[0][:200] if lines else f"ffmpeg exited {code}"
+    return first_diagnostic_line(stderr) or f"ffmpeg exited {code}"
 
 
 async def encode(source: Path, preset: Preset, work_dir: Path) -> EncodeResult:
