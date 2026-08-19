@@ -1,0 +1,62 @@
+name: Hardware report
+description: Tell us what your machine does — this is how the support matrix gets filled in
+title: '[hardware] '
+labels: [hardware-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This is the most useful thing you can send.** Most vendor and chip combinations in
+        [docs/hardware.md](https://github.com/Navilois/immich-compressor/blob/main/docs/hardware.md#support-matrix)
+        are marked "not verified on this project's hardware", because nobody here owns that
+        silicon. Your report changes that — whether it worked or not.
+
+        Failures are as valuable as successes. A rejection reason that turns out to be
+        misleading is a bug in the documentation, and this is where we find out.
+
+  - type: textarea
+    id: hardware-json
+    attributes:
+      label: 'Output of: immich-compressor hardware --json'
+      description: |
+        ```bash
+        docker compose exec immich-compressor immich-compressor hardware --json
+        ```
+        It contains no secrets — device ids, encoder names and rejection reasons only.
+      render: json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Did it choose what you expected?
+      options:
+        - Yes — it picked the right encoder
+        - It fell back to CPU and I think it should not have
+        - It picked a GPU encoder that then failed on real files
+        - I am not sure what to expect
+    validations:
+      required: true
+
+  - type: input
+    id: chip
+    attributes:
+      label: Which GPU or SoC is this?
+      placeholder: 'Intel N100 / AMD Radeon 780M / NVIDIA RTX 3050 / Raspberry Pi 5'
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Host OS and architecture
+      placeholder: 'Debian 13, amd64'
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: |
+        Encode speed and typical ratio if you have them, and whether the rejection reasons
+        made sense to you. Wording that misled you is a bug worth reporting on its own.

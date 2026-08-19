@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest something the project should do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth knowing before you write: this project deliberately has no web UI, no extra
+        services (no Postgres, Redis or message queue), no telemetry, no `curl | bash`
+        installer, and no support for Immich below v3.0.0. It also does not add a runtime
+        dependency for anything sixty lines of standard library can do.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you hitting?
+      description: The situation, not the solution. This is the part that decides the answer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What did you try instead?
+      description: Including whether an existing option or a hand-written preset covers it.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This does not need a new runtime dependency or a new service
+        - label: This cannot change a default in a way that could delete somebody's photo

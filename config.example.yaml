@@ -1,176 +1,63 @@
-# immich-compressor configuration.
+# yaml-language-server: $schema=docs/config.schema.json
+#
+# immich-compressor — minimal configuration.
+#
+# This whole file is optional. Every value has a default, and the encoder is detected
+# rather than configured, so an empty config.yaml is a working config.yaml.
+# `immich-compressor setup` writes one tuned to your machine.
+#
+# Full reference: docs/configuration.md (generated from the code, so it cannot drift).
 #
 # Secrets are NOT read from this file — they come from the environment only:
-#   IMMICH__API_KEY   the Immich API key (x-api-key)
+#   IMMICH__API_KEY   the Immich API key
 #   WEBHOOK__TOKEN    the shared secret; must equal `headerValue` in the workflow step
 # Setting either of them here makes the service refuse to start.
 #
-# Any value below can also be overridden by an env var using `__` as the nesting
-# separator, e.g. BEHAVIOR__DRY_RUN=false, IMMICH__BASE_URL=http://host:2283/api.
+# Any value below can also be overridden by an environment variable, with `__` as the
+# nesting separator: BEHAVIOR__DRY_RUN=false, IMMICH__BASE_URL=http://host:2283/api.
+# The environment wins over this file.
 
 immich:
+  # Reachable from inside the container. With both stacks on the same docker network this
+  # is the Immich service name, not localhost.
   base_url: http://immich-server:2283/api
-  timeout_s: 120
-  connect_timeout_s: 10
 
-webhook:
-  # Must match `headerName` in the workflow's webhook step.
-  header_name: X-Compressor-Token
+hardware:
+  # auto | cpu | qsv | vaapi | nvenc — see docs/hardware.md.
+  # `auto` enumerates the render nodes, asks ffmpeg and vainfo what they support, and
+  # confirms the winner with a real one-frame encode. Run `immich-compressor hardware` to
+  # see the choice it makes and every candidate it rejects.
+  mode: auto
+  render_node: auto
 
 behavior:
   # ---- Shipping defaults: the service observes and reports, it changes nothing. ----
-  dry_run: true            # true = download/encode nothing, upload nothing, delete nothing
-  trash_original: false    # false = originals are never trashed, only reported
+  dry_run: true            # true = download nothing, upload nothing, delete nothing
+  trash_original: false    # false = originals are never removed, only reported
+  delete_mode: trash       # trash = recoverable soft delete | permanent = gone for good
   # ---------------------------------------------------------------------------------
+  # Read docs/safety.md before changing any of the three above. `permanent` is refused at
+  # startup unless trash_original is true and dry_run is false.
 
-  retention_days: 7          # how long an original survives after being replaced; 0 = at once
-  delete_mode: trash         # trash = soft delete, recoverable | permanent = gone for good
-  initial_delay_seconds: 300 # let Immich finish thumbnails/ML/OCR before we touch the asset
+  # balanced | higher | smaller. Mapped per encoder to the right CRF / -global_quality /
+  # -cq number. `balanced` is what this project shipped in 1.0.0.
+  quality: balanced
 
-  # ---- Reclaim disk space immediately (irreversible) -------------------------------
-  # With these three, a verified original is force-deleted the moment its replacement
-  # passes the four checks (replacement present and untrashed, checksum matches the
-  # uploaded file, dateTimeOriginal set, compressor marker written). It bypasses the
-  # trash, so `immich-compressor restore` cannot bring it back and the only rollback is
-  # a backup of Postgres plus the upload directory. Uncomment only if you mean it.
-  #
-  #   trash_original: true
-  #   retention_days: 0
-  #   delete_mode: permanent
-  # ---------------------------------------------------------------------------------
-  concurrency: 1             # 2 vCPU box: one ffmpeg at a time
-  max_attempts: 3
-  poll_interval_seconds: 5
+  retention_days: 7          # how long a replaced original survives; 0 = remove at once
+  initial_delay_seconds: 300 # let Immich finish thumbnails/ML/OCR before touching an asset
 
   min_size_bytes: 20971520   # 20 MiB — below this the effort is not worth it
   max_ratio: 0.6             # reject the result unless it is <= 60 % of the original
-  enabled_types: [VIDEO]
+  enabled_types: [VIDEO]     # add IMAGE to compress stills too
   skip_if_named_people: true # never risk losing manually named faces
 
-  duration_tolerance_s: 0.5
-  require_same_resolution: true
-  require_date_time_original: true
-
-  work_dir: /var/tmp/immich-compressor
-  free_space_factor: 3.0     # need 3x the source size free before starting
-
-  compressed_marker: .cmp    # ends up in the filename AND in the workflow regex filter
-  metadata_key: compressor   # asset-metadata KV key used as the idempotency marker
-
-database_path: /var/lib/immich-compressor/state.db
-listen_host: 0.0.0.0
-listen_port: 8080
 log_level: INFO
 
-presets:
-  # ---------------------------------------------------------------------------------
-  # GPU encoding (Intel Quick Sync). Keep exactly ONE preset per type active — the first
-  # match wins. Before switching, prove the hardware is actually usable:
-  #
-  #   docker compose exec immich-compressor vainfo --display drm --device /dev/dri/renderD128
-  #     -> needs `VAProfileHEVCMain : VAEntrypointEncSlice` ("--display drm" is required
-  #        on a headless host; plain vainfo tries X11 and fails for unrelated reasons)
-  #   docker compose exec immich-compressor immich-compressor check
-  #     -> encodes one frame through the preset's encoder and exits non-zero if it fails
-  #
-  # Chip generation decides the encoder. Debian trixie dropped libmfx1, so the legacy
-  # MSDK path is gone: Gen12+ (Tiger Lake, Alder/Raptor Lake, N100, Arc) uses hevc_qsv,
-  # Gen9-11 (<= 10th gen Core) has to use hevc_vaapi.
-  #
-  # video-h265-qsv:
-  #   match: { type: VIDEO }
-  #   cmd: >
-  #     ffmpeg -y -loglevel error -noautorotate
-  #     -hwaccel qsv -qsv_device /dev/dri/renderD128 -i {input}
-  #     -map 0 -map_metadata 0 -movflags use_metadata_tags+faststart
-  #     -c:v hevc_qsv -preset slower -global_quality 26
-  #     -extbrc 1 -look_ahead_depth 40 -adaptive_i 1 -adaptive_b 1 -b_strategy 1
-  #     -bf 3 -g 250 -tag:v hvc1
-  #     -c:a copy
-  #     {output}
-  #   suffix: .mp4
-  #   timeout_s: 3600
-  #
-  # Why these flags:
-  #   -global_quality 26   ICQ, the QSV equivalent of CRF. Sweet spot for HEVC is 22-28.
-  #                        Verify with scripts/calibrate.sh that the size actually reacts
-  #                        to this number — in low-power (VDENC) mode some chips ignore
-  #                        ICQ silently, and then you are calibrating against a constant.
-  #   -extbrc 1            lookahead only takes effect with extended bitrate control;
-  #                        -look_ahead_depth alone is a no-op.
-  #   -preset slower       target usage 2. Nearly free on an iGPU: the fixed-function
-  #                        block is the limit, not compute time.
-  #   -c:a copy            re-encoding AAC to AAC is pure loss for no gain. Use
-  #                        `-c:a aac -b:a 128k` only if your sources carry PCM audio.
-  #   no -pix_fmt          8-bit sources produce Main, 10-bit/HDR sources produce Main10
-  #                        automatically. Forcing 8 bit would flatten HDR without tone
-  #                        mapping — washed out, and irreversible once the original is
-  #                        gone. The sanity gate rejects that, but better not to ask.
-  #   no -hwaccel_output_format qsv
-  #                        frames go through system memory. Costs a few percent on an
-  #                        iGPU and buys a software-decode fallback for sources the chip
-  #                        cannot decode (MJPEG-AVI, old DivX, 10-bit VP9), which would
-  #                        otherwise fail the job outright.
-  #
-  # Gen9-11 fallback. Note the missing `-map 0`: the filter chain does not survive extra
-  # streams, so subtitle/data tracks are dropped here.
-  # video-h265-vaapi:
-  #   match: { type: VIDEO }
-  #   cmd: >
-  #     ffmpeg -y -loglevel error -noautorotate
-  #     -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -i {input}
-  #     -vf format=nv12|vaapi,hwupload
-  #     -map_metadata 0 -movflags use_metadata_tags+faststart
-  #     -c:v hevc_vaapi -rc_mode ICQ -global_quality 26 -bf 3 -g 250 -tag:v hvc1
-  #     -c:a copy
-  #     {output}
-  #   suffix: .mp4
-  #   timeout_s: 3600
-  # ---------------------------------------------------------------------------------
-
-  # `-threads 2` / `pools=2` matter: x265 sizes its thread pool from the host core
-  # count and happily ignores a cgroup CPU limit, which starves everything else.
-  #
-  # `-noautorotate` is not cosmetic. Without it ffmpeg bakes the display matrix of a
-  # portrait clip into the pixels and drops the matrix, so a 1920x1080+rot90 source comes
-  # out as 1080x1920+rot0. The picture is fine, but the stored size changed — and with a
-  # full-GPU pipeline (-hwaccel_output_format) the rotate filter cannot run at all,
-  # because it does not accept hardware frames. Keeping the matrix avoids both.
-  video-h265:
-    match: { type: VIDEO }
-    cmd: >
-      ffmpeg -y -loglevel error -noautorotate -i {input}
-      -map_metadata 0 -map 0 -movflags use_metadata_tags+faststart
-      -c:v libx265 -preset medium -crf 26 -tag:v hvc1
-      -x265-params pools=2 -threads 2
-      -c:a aac -b:a 128k
-      {output}
-    suffix: .mp4
-    timeout_s: 7200
-
-  # ImageMagick, not cjpegli: Debian/Ubuntu package libjxl-tools WITHOUT the cjpegli
-  # binary (0.11.2 in trixie ships only cjxl/djxl/jxlinfo), so the plan's `cjpegli`
-  # preset cannot run on the stock image. See the README if you want to build libjxl
-  # from source; then swap in the commented preset below.
-  # `-strip` is deliberately absent — exiftool_copy restores metadata afterwards, but
-  # keeping the ICC profile through the encode gives better colour.
-  #
-  # `-auto-orient` + `normalize_orientation` belong together and fix a real trap: for
-  # HEIC the libheif decoder may already have applied the rotation, for JPEG it has not.
-  # `-auto-orient` is idempotent and settles that either way; pinning Orientation to 1
-  # afterwards stops exiftool from copying the source tag back onto pixels that are
-  # already upright, which would rotate the image a second time.
-  image-magick:
-    match: { type: IMAGE }
-    cmd: convert {input} -auto-orient -quality 82 -sampling-factor 4:2:0 {output}
-    suffix: .jpg
-    exiftool_copy: true          # a still loses ALL metadata on re-encode without this
-    normalize_orientation: true  # requires -auto-orient above; validated at startup
-    timeout_s: 900
-
-  # Requires a self-built libjxl >= 0.9. Keep only one IMAGE preset active.
-  # image-jpegli:
-  #   match: { type: IMAGE }
-  #   cmd: cjpegli {input} {output} -q 88
-  #   suffix: .jpg
-  #   exiftool_copy: true
+# presets:
+#   Leave this out and the service builds the preset for you from the detected hardware.
+#   Write it and it wins over everything: detection is skipped entirely, and `hardware.mode`
+#   and `behavior.quality` no longer apply. That is what makes an upgrade from a
+#   hand-written 1.0.0 config a no-op.
+#
+#   `immich-compressor hardware` prints the exact command it would use, ready to paste.
+#   The commented GPU presets that used to live here are in docs/hardware.md now.

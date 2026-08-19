@@ -103,6 +103,7 @@ docstring-code-format = true
 # The CLI modules print by definition; everything else logs.
 "src/immich_compressor/__main__.py" = ["T20"]
 "src/immich_compressor/setup_cmd.py" = ["T20"]
+"scripts/*.py" = ["T20"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

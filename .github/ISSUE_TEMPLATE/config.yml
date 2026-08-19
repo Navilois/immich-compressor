@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or "how do I…"
+    url: https://github.com/Navilois/immich-compressor/discussions
+    about: Discussions are the right place for usage questions.
+  - name: Documentation
+    url: https://github.com/Navilois/immich-compressor/tree/main/docs
+    about: Quickstart, safety, hardware, configuration, troubleshooting and the verified Immich API notes.
+  - name: Something went wrong with Immich itself
+    url: https://github.com/immich-app/immich/issues
+    about: This project only talks to Immich's public API — server bugs belong upstream.
+  - name: Security vulnerability
+    url: https://github.com/Navilois/immich-compressor/security/advisories/new
+    about: Report privately, not as a public issue.
