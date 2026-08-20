@@ -653,6 +653,104 @@ async def test_metadata_gate_reports_a_lost_tag(tmp_path: Path) -> None:
     assert any("Make" in entry for entry in differences)
 
 
+def _camera_still_preset() -> Preset:
+    """The shipped IMAGE preset, so these tests exercise the production recipe."""
+    return Preset(
+        name="image-jpeg",
+        type="IMAGE",
+        extensions=[".jpg"],
+        cmd="magick {input} -auto-orient -quality 82 -interlace Plane {output}",
+        suffix=".jpg",
+        exiftool_copy=True,
+        normalize_orientation=True,
+        timeout_s=300,
+    )
+
+
+@needs_still_tools
+async def test_metadata_gate_survives_rational_re_encoding(tmp_path: Path) -> None:
+    """Regression: a real camera JPEG failed the gate on arithmetic, not on loss.
+
+    EXIF stores rationals, and copying a tag re-approximates the fraction. Measured on the
+    phone JPEG that produced this test, through the shipped preset:
+
+        ExposureTime  2497831/250000000 -> 1/100          (prints "1/100" either way)
+        GPSLatitude   ...16316639/1000000 -> 39421/2416    (prints 48 deg 18' 16.32")
+        ThumbnailOffset       1008 -> 1026                 (a file position, not content)
+
+    Comparing exiftool's ``-n`` floats made every one of those a difference, so no
+    geotagged photo could pass a strict gate. The values a viewer is shown are identical.
+    """
+    source = await _make_still(tmp_path / "in.jpg", orientation=6)
+    thumb = tmp_path / "thumb.jpg"
+    code, _, stderr = await run_command(
+        ["magick", "-size", "160x120", "gradient:red-blue", "-quality", "70", str(thumb)],
+        timeout_s=120,
+    )
+    assert code == 0, stderr
+    code, _, stderr = await run_command(
+        [
+            "exiftool", "-quiet", "-overwrite_original",
+            # Awkward on purpose: enough decimals that exiftool cannot store the value
+            # exactly and has to pick a fraction, which the copy then picks differently.
+            "-GPSLatitude=48.3045323997222", "-GPSLatitudeRef=N",
+            "-GPSLongitude=14.2868721", "-GPSLongitudeRef=E",
+            "-ExposureTime=0.009991324",
+            "-ApertureValue=1.69",
+            "-MaxApertureValue=1.69",
+            "-Model=SM-G990B",
+            f"-ThumbnailImage<={thumb}",
+            str(source),
+        ],
+        timeout_s=120,
+    )
+    assert code == 0, stderr
+
+    work = tmp_path / "work"
+    work.mkdir()
+    result = await encode(source, _camera_still_preset(), work)
+    assert await verify_metadata(source, result.output_path) == []
+
+
+@needs_still_tools
+async def test_metadata_gate_reports_a_changed_value(tmp_path: Path) -> None:
+    """The other half of the regression: tolerating re-encoding must not tolerate edits.
+
+    A gate that passes the file above has to keep failing one where a tag really moved.
+    """
+    source = await _make_still(tmp_path / "in.jpg", orientation=6)
+    code, _, stderr = await run_command(
+        [
+            "exiftool", "-quiet", "-overwrite_original",
+            "-GPSLatitude=48.3045323997222", "-GPSLatitudeRef=N",
+            "-Model=SM-G990B",
+            str(source),
+        ],
+        timeout_s=120,
+    )
+    assert code == 0, stderr
+
+    work = tmp_path / "work"
+    work.mkdir()
+    result = await encode(source, _camera_still_preset(), work)
+    assert await verify_metadata(source, result.output_path) == []
+
+    # A camera model that is not the source's, and a latitude 1.3 degrees away.
+    code, _, stderr = await run_command(
+        [
+            "exiftool", "-quiet", "-overwrite_original",
+            "-Model=Not The Real Camera", "-GPSLatitude=47.0",
+            str(result.output_path),
+        ],
+        timeout_s=120,
+    )
+    assert code == 0, stderr
+
+    differences = await verify_metadata(source, result.output_path)
+    assert any("Model" in entry for entry in differences), differences
+    assert any("GPSLatitude" in entry for entry in differences), differences
+
+
 # -------------------------------------------------------------------- source quality
 
 

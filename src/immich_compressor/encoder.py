@@ -53,7 +53,21 @@ _METADATA_GROUPS: tuple[str, ...] = ("-EXIF:all", "-GPS:all", "-XMP:all", "-IPTC
 #                     picture. Found by running the shipped preset against a real photo:
 #                     'Image::ExifTool 12.76' -> 'Image::ExifTool 13.25' would otherwise
 #                     fail every source that a different exiftool version had touched.
-_METADATA_IGNORED: frozenset[str] = frozenset({"EXIF:Orientation", "XMP:XMPToolkit"})
+#   *Offset / *Start  byte positions of the embedded thumbnail and preview inside the file,
+#                     not content. Rewriting the EXIF block moves them by definition:
+#                     measured 1008 -> 1026 on a phone JPEG through the shipped preset.
+#                     The matching *Length tags stay compared — a length that changes is a
+#                     thumbnail that was truncated, which is a real loss.
+_METADATA_IGNORED: frozenset[str] = frozenset(
+    {
+        "EXIF:Orientation",
+        "XMP:XMPToolkit",
+        "EXIF:ThumbnailOffset",
+        "EXIF:PreviewImageStart",
+        "EXIF:OtherImageStart",
+        "EXIF:StripOffsets",
+    }
+)
 
 # How many bytes may follow the JPEG's end-of-image marker before we call it a payload.
 # Some encoders leave a handful of padding bytes; a motion photo leaves megabytes.
@@ -430,16 +444,25 @@ async def verify_metadata(source: Path, target: Path, *, timeout_s: float = 120.
     An empty list means the carry-over is complete. Tags *added* by the encode are not
     reported: gaining a tag is not losing one.
 
-    Measured against a 39-tag source through the production path, the only difference is
-    ``EXIF:Orientation`` — which is why the ignore list is one entry long rather than
-    open-ended, and why a full diff is affordable here at all.
+    Values are compared as exiftool *presents* them, not as ``-n`` floats. EXIF stores
+    rationals, and copying a tag re-approximates the fraction: measured on a phone JPEG
+    through the shipped preset, ``ExposureTime`` moved 2497831/250000000 -> 1/100 and the
+    GPS latitude seconds 16316639/1000000 -> 39421/2416. Every one of those prints
+    identically ("1/100", 48 deg 18' 16.32" N) because the change is below the precision
+    the value is written at, but as floats they differ in the 4th to 11th digit and an
+    exact comparison rejected every geotagged photo — with `metadata_verify: strict` and
+    `delete_mode: permanent` that is a gate no image can pass.
+
+    The cost of comparing the printed form is that a change too small to alter the printed
+    value cannot be seen here. That is the intended reading of "the metadata survived": the
+    value a viewer is shown is the value that has to survive.
     """
     if shutil.which("exiftool") is None:
         raise EncodeError("exiftool is not installed but the metadata gate requires it")
 
     async def read(path: Path) -> dict[str, object]:
         code, stdout, stderr = await run_command(
-            ["exiftool", "-json", "-G", "-n", *_METADATA_GROUPS, str(path)], timeout_s=timeout_s
+            ["exiftool", "-json", "-G", *_METADATA_GROUPS, str(path)], timeout_s=timeout_s
         )
         if code != 0:
             raise EncodeError(f"exiftool could not read {path.name}: {stderr.strip()[:300]}")
