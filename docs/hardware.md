@@ -120,6 +120,50 @@ without knowing which of `-crf`, `-global_quality` and `-cq` applies:
 `balanced` is exactly what this project shipped and ran in 1.0.0, so upgrading changes
 nothing you can see. These are starting points, not benchmarks.
 
+## The stills preset
+
+Stills are CPU-only on purpose. A GPU JPEG encoder exists but produces visibly worse output
+at the same size than a competent software encoder, and a still is small enough that the
+wall-clock saving is irrelevant. ImageMagick rather than `cjpegli`: Debian and Ubuntu
+package `libjxl-tools` **without** the `cjpegli` binary — trixie's 0.11.2 ships only `cjxl`,
+`djxl` and `jxlinfo`.
+
+```
+magick {input} -auto-orient -quality 82 -interlace Plane {output}
+```
+
+| Flag | Why |
+|---|---|
+| `magick`, not `convert` | `convert` is a deprecated alias in ImageMagick 7. |
+| `-auto-orient` | Bakes the EXIF rotation into the pixels. Required by `normalize_orientation`, and validated at startup — the two belong together, see [architecture.md](architecture.md#rotation-and-orientation). |
+| `-quality 82` | Measured on two sources: ratio 0.38 on a detail-rich 4000x3000 camera JPEG, 0.60 on a flat 3000x2000 one. |
+| `-interlace Plane` | Progressive JPEG. Free: it reorders the same DCT coefficients, so the decoded pixels are bit-identical — verified with `compare -metric AE`, which returns **0** — while the file shrinks 3-8 %. |
+| no `-sampling-factor` | ImageMagick then *inherits* the source's chroma subsampling (verified: a 4:4:4 source stays 4:4:4 even at q82). Forcing `4:2:0` would halve chroma resolution on every 4:4:4 source — visible on saturated edges, and invisible to every sanity check. |
+| no `-strip` | The metadata copy restores tags afterwards, but keeping the ICC profile through the encode gives better colour. |
+
+Three preset-level settings come with it, all of them consequences of a still being cheap to
+encode and small to store:
+
+| Setting | Value | Why |
+|---|---|---|
+| `match.extensions` | `.jpg .jpeg .jpe .jfif` | An allowlist, and the single most important line here — see [safety.md](safety.md#why-only-jpeg-stills). |
+| `max_ratio` | `0.9` | Only a "something went badly wrong" net. On a cheap encode the ratio is the wrong axis: 0.75 on a 12 MB photo saves 3 MB, 0.60 on a 371 KB photo saves 147 KB. `min_savings_bytes` does the real work. |
+| `min_source_quality` | `86` at `balanced` (92 / 79 at `higher` / `smaller`) | Four points above the preset's own quality target. Quantisation error is cumulative: a q60 source through the q82 preset was measured at 158 368 -> 190 488 bytes — a second generation of artefacts *and* a larger file. |
+| `require_date_time_original` | `false` | A replacement's timeline position comes from `fileCreatedAt` at upload and the explicit `dateTimeOriginal` write afterwards, not from the file. |
+
+**JPEG quality does not transfer across content.** At q82 a detail-rich 4000x3000 photo
+lands at ratio 0.38 (SSIM 0.79), a flat 3000x2000 one at 0.60 (SSIM 0.98). A fixed SSIM
+floor is therefore useless as a gate — any threshold that protects the second rejects the
+first. Size ratio plus absolute bytes saved is what the gate uses instead. Check your own
+material with `immich-compressor encode <file> --type IMAGE`.
+
+ImageMagick is built with OpenMP and sizes its thread pool from the **host** core count,
+ignoring the container's cgroup limit — the same trap the video preset defuses with
+`pools=2 -threads 2`. The image sets `MAGICK_THREAD_LIMIT`, `MAGICK_MEMORY_LIMIT` and
+`MAGICK_MAP_LIMIT` as environment variables so a hand-written preset is covered too. The
+memory limits matter for large stills: the Q16 pixel cache is about 96 MB for a 12 MP image
+but about 800 MB for a 100 MP panorama.
+
 ### Measuring instead of guessing
 
 ```bash
@@ -143,7 +187,9 @@ calibrating against a constant.
 
 Keep `concurrency: 1` on a GPU. An iGPU has one fixed-function encode block, and Immich's
 own transcoding competes for the same `/dev/dri`. The service pins concurrency to 1 by
-itself whenever a GPU preset is selected.
+itself whenever a GPU preset is selected. It counts per worker lane, and there is one lane
+per entry in `enabled_types` — with `[VIDEO, IMAGE]` that is one GPU video encode plus one
+CPU still encode, which do not contend for the same silicon.
 
 ## The CPU budget
 

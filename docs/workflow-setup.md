@@ -20,7 +20,7 @@ instance:
   "steps": [
     {
       "method": "immich-plugin-core#assetTypeFilter",
-      "config": { "allowedTypes": ["VIDEO"] },
+      "config": { "allowedTypes": ["VIDEO", "IMAGE"] },
       "enabled": true
     },
     {
@@ -90,24 +90,31 @@ Immich reports as success — see below.
 > a workflow run threw `NoResultError` — triggered by an asset being hard-deleted while its
 > workflow was executing. A restart cleared it.
 
-## Also compressing photos
+## Video only
 
-Add `IMAGE` to the type filter and to `behavior.enabled_types`:
+The type filter and `behavior.enabled_types` have to agree, and both ship with photos
+enabled. To leave stills alone, narrow both:
 
 ```json
 { "method": "immich-plugin-core#assetTypeFilter",
-  "config": { "allowedTypes": ["VIDEO", "IMAGE"] }, "enabled": true }
+  "config": { "allowedTypes": ["VIDEO"] }, "enabled": true }
 ```
 
 ```yaml
 behavior:
-  enabled_types: [VIDEO, IMAGE]
+  enabled_types: [VIDEO]
 ```
 
+Narrowing only one of the two is not harmful, just wasteful in one direction and useless in
+the other: the workflow would keep sending webhooks that the service skips as `wrong_type`,
+or the service would be ready for stills that never arrive.
+
 The stills preset re-encodes to JPEG with ImageMagick and carries metadata across with
-exiftool. Think about whether you want this: a JPEG re-encode is generationally lossy in a
-way an H.264 → HEVC video re-encode largely is not, and photos are small. Most people should
-leave this off.
+exiftool, which is verified tag by tag on every job. It only touches JPEG — RAW, HEIC, PNG,
+GIF, TIFF, WebP and motion photos are all refused, and a source that is already heavily
+compressed is left alone. A JPEG re-encode *is* generationally lossy in a way an
+H.264 → HEVC video re-encode largely is not, so read
+[safety.md](safety.md#why-only-jpeg-stills) before pointing it at a library you care about.
 
 ## Turning it off
 

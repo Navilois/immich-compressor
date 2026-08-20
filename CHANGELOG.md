@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **JPEG stills are compressed too.** `enabled_types: [VIDEO, IMAGE]` and `IMAGE` in the
+  workflow's type filter are what `setup` now writes. The encoder path already existed;
+  what was missing was the decision logic around it.
+- **Format allowlist** (`Preset.match.extensions`). Immich files RAW, PNG, GIF, TIFF, WebP
+  and HEIC under type `IMAGE` exactly like JPEG, and ImageMagick reads DNG/CR2/CR3/NEF/ARW
+  through libraw — without the list a raw file would be developed into an 8-bit JPEG, pass
+  every sanity check, and have its original deleted. Anything not on the list is skipped as
+  `unsupported_format`, which is deliberately a different reason from `no_preset`.
+- **A metadata gate.** After the encode, source and output are compared with
+  `exiftool -G -EXIF:all -GPS:all -XMP:all -IPTC:all`; any tag that is missing or changed is
+  a finding. `behavior.metadata_verify` decides whether that fails the job (`strict`, the
+  default) or only logs (`warn`), and `warn` is refused at startup together with
+  `delete_mode: permanent` — a warning cannot undo a force-deleted original.
+- **Motion photos are detected and skipped** as `embedded_media`. A Samsung or Google motion
+  photo is a JPEG with an MP4 behind the end-of-image marker; a re-encode drops the video
+  while every other check reports success. Two independent signals: the XMP markers, and
+  payload after the EOI marker found by walking the JPEG's segment structure rather than
+  searching for the last `FFD9`.
+- `Preset.min_source_quality` — skip a still that is already at or below the preset's own
+  quality target, since quantisation error is cumulative and a re-encode usually produces a
+  *larger* file (measured 158 368 -> 190 488 bytes for a q60 source through the q82 preset).
+  Skipped as `source_quality`.
+- Per-preset overrides of `max_ratio`, `min_savings_bytes` and `require_date_time_original`,
+  because video and stills have opposite economics.
+- **One worker lane per enabled asset type**, backed by a new `asset_type` column on the job
+  store (migrated automatically). Without it a single clip with `timeout_s: 7200` holds the
+  only worker for two hours while every one-second image job queues up behind it. Rows
+  written before the column existed carry `NULL` and stay claimable from every lane.
+- `immich-compressor encode` additionally reports `source_quality`, `embedded_media` and
+  `metadata_differences`, so every still-specific decision is visible before the pipeline
+  makes it — without touching the server.
+- `MAGICK_THREAD_LIMIT`, `MAGICK_MEMORY_LIMIT` and `MAGICK_MAP_LIMIT` in the image.
+  ImageMagick is built with OpenMP and sizes its thread pool from the host core count,
+  ignoring the container's cgroup limit — the same trap the video preset defuses with
+  `pools=2 -threads 2`.
+
+### Changed
+
+- **Breaking: `behavior.min_size_bytes` is replaced by `behavior.min_savings_bytes`**
+  (default 1 MiB, was 20 MiB). The old threshold guessed from the input size whether the
+  work was worth doing; the new one measures whether it *was*. It also serves as the
+  pre-download filter, and that half needs no calibration: a file cannot save more bytes
+  than it has. A config that still carries the old key is refused at startup with the
+  replacement named in the error. See [docs/upgrading.md](docs/upgrading.md).
+- The generated stills preset is now
+  `magick {input} -auto-orient -quality 82 -interlace Plane {output}`. `magick` because
+  `convert` is a deprecated alias in ImageMagick 7; `-interlace Plane` because it is free
+  (the same DCT coefficients reordered — `compare -metric AE` returns 0 — for 3-8 % less
+  size); and no `-sampling-factor`, because ImageMagick then inherits the source's chroma
+  subsampling instead of halving it on every 4:4:4 source, which no sanity check would
+  notice.
+- `immich-compressor hardware` lists the extensions a preset accepts, and `--json` carries
+  them.
+
+### Fixed
+
+- **The metadata gate rejected every geotagged camera JPEG.** EXIF stores rationals, and
+  copying a tag re-approximates the fraction, so a carry-over that loses nothing still moves
+  the float: measured on a phone JPEG through the shipped preset, `ExposureTime` went
+  `2497831/250000000` -> `1/100` and the GPS latitude seconds `16316639/1000000` ->
+  `39421/2416`. Both print identically. Values are now compared as exiftool *presents* them,
+  and the offset tags (`ThumbnailOffset`, `PreviewImageStart`, `OtherImageStart`,
+  `StripOffsets`) are ignored because they are file positions, not content — the matching
+  `*Length` tags stay compared, since a thumbnail length that moves is a truncated thumbnail.
+- `.dockerignore` matched `__pycache__/` and `*.pyc` at the context root only, so
+  `src/immich_compressor/__pycache__/` was copied into the image — 12 stale `.pyc` files on
+  a measured rebuild, three of them orphans from a branch that was not even checked out.
+  Harmless at runtime, but it made the image depend on which branch was last built.
+
 ## [1.1.0] - 2026-08-19
 
 The "someone else can install this" release. The pipeline is unchanged; everything

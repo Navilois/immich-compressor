@@ -11,6 +11,54 @@ and minor releases arrive that way and a breaking change never does. The
 
 Job state lives in a volume and survives. Schema changes are applied automatically on open.
 
+## Unreleased
+
+### Breaking: `behavior.min_size_bytes` is now `behavior.min_savings_bytes`
+
+**This one needs an edit.** The old key guessed from the *input* size whether a job was
+worth doing; the new one measures what the encode actually *saved*. Because they mean
+different things, the value does not carry across — the default drops from 20 MiB to 1 MiB.
+
+```yaml
+behavior:
+  min_savings_bytes: 1048576   # 1 MiB — was min_size_bytes: 20971520
+```
+
+A config that still says `min_size_bytes` is refused at startup with the replacement named
+in the error, rather than with a generic "extra inputs are not permitted".
+
+It also doubles as the pre-download filter, and that half needs no tuning at all: a file
+cannot save more bytes than it has, so rejecting an asset smaller than the threshold before
+the download is provably free of false negatives.
+
+### New: JPEG stills
+
+`enabled_types: [VIDEO, IMAGE]` and `IMAGE` in the workflow's type filter turn it on;
+`setup` now writes both. **JPEG only** — RAW, HEIC, PNG, GIF, TIFF and WebP are all skipped
+as `unsupported_format`, motion photos as `embedded_media`, and already-compressed sources
+as `source_quality`. Read [safety.md](safety.md#why-only-jpeg-stills) before enabling it on
+a library you care about, and note that `behavior.metadata_verify: warn` is refused
+together with `delete_mode: permanent`.
+
+To keep a video-only deployment exactly as it was, change nothing: `enabled_types` still
+defaults to `[VIDEO]` in the code, and an existing `config.yaml` is not rewritten.
+
+### The image preset changed if you had written one
+
+The generated stills preset is now
+`magick {input} -auto-orient -quality 82 -interlace Plane {output}` — `magick` because
+`convert` is a deprecated alias in ImageMagick 7, `-interlace Plane` because it is free
+(same DCT coefficients, `compare -metric AE` = 0, 3-8 % smaller), and without
+`-sampling-factor` because forcing 4:2:0 halves chroma resolution on a 4:4:4 source and no
+sanity check would notice. A hand-written `presets:` block is left alone, as always.
+
+### Worker lanes
+
+There is now one worker lane per entry in `enabled_types`, each running
+`behavior.concurrency` tasks — so `[VIDEO, IMAGE]` with `concurrency: 1` runs up to two
+encodes at once. Jobs queued by an earlier version carry no asset type and stay claimable
+from every lane, so the upgrade strands nothing.
+
 ## 1.0.0 → 1.1.0
 
 **Nothing is required.** A 1.0.0 deployment keeps working untouched.
@@ -95,4 +143,6 @@ services:
 
 The job store is forward-compatible within a major version: columns added by a newer release
 are ignored by an older one. Configuration keys an older version does not know (`hardware:`,
-`behavior.quality`) are rejected with `extra="forbid"`, so remove them when you downgrade.
+`behavior.quality`, `behavior.min_savings_bytes`, `behavior.metadata_verify`) are rejected
+with `extra="forbid"`, so remove them when you downgrade — and put `min_size_bytes` back if
+you are going below the release that renamed it.

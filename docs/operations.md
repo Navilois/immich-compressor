@@ -91,9 +91,15 @@ queued → running → uploaded → linked → pending_delete → done
 plus `skipped` (with a reason) and `failed`. Every transition is persisted in SQLite, so a
 crash between upload and linking resumes rather than duplicating work.
 
-Skip reasons: `already_compressed`, `too_small`, `wrong_type`, `no_gain`, `duplicate`,
-`named_people`, `edited`, `external_library`, `live_photo`, `locked`, `trashed`,
-`no_preset`, `dry_run`.
+Skip reasons: `already_compressed`, `too_small`, `wrong_type`, `unsupported_format`,
+`embedded_media`, `source_quality`, `no_gain`, `duplicate`, `named_people`, `edited`,
+`external_library`, `live_photo`, `locked`, `trashed`, `no_preset`, `dry_run`. The three
+stills-only ones — a format that is not JPEG, a motion photo, and a source already at or
+below the preset's quality target — are explained in
+[troubleshooting.md](troubleshooting.md#everything-is-skipped).
+
+Jobs are claimed by a worker lane, one per entry in `enabled_types`, so a long video job
+never blocks a queue of image jobs.
 
 Failures retry with exponential backoff up to `max_attempts` (3), then land in `failed` and
 show up in `report` and `/stats`.
