@@ -2,7 +2,7 @@
 testinstance/
 tests/
 .git/
-__pycache__/
-*.pyc
+**/__pycache__/
+**/*.pyc
 config.yaml
 .pytest_cache/
