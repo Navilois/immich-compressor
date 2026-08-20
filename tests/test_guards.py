@@ -1,14 +1,26 @@
-"""Guard logic: every one of these must abandon the job without touching the server."""
+"""Guard logic: every one of these must abandon the job without touching the server.
+
+The last section covers the ingest gate, which runs one step earlier still — in the
+webhook handler, before a job row exists at all.
+"""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
 from immich_compressor.config import Settings
-from immich_compressor.models import SkipReason, WebhookAsset, WebhookPayload
-from immich_compressor.pipeline import MARKER_VERSION, SkipJob, build_marker, check_guards
+from immich_compressor.models import RejectReason, SkipReason, WebhookAsset, WebhookPayload
+from immich_compressor.pipeline import (
+    MARKER_VERSION,
+    SkipJob,
+    WebhookRejected,
+    build_marker,
+    check_guards,
+    check_ingest_guards,
+)
 
 
 def _asset(raw: dict[str, Any], **overrides: Any) -> WebhookAsset:
@@ -143,3 +155,71 @@ def test_min_savings_is_the_pre_download_filter(
     check_guards(
         _asset(video_payload_raw, exifInfo={"fileSizeInByte": 1024 * 1024}), settings
     )  # exactly at the threshold is allowed through
+
+
+# ------------------------------------------------- the ingest gate (before a job exists)
+#
+# Immich's `AssetMetadataExtraction` trigger is a maintenance operation: one click on
+# Administration -> Jobs -> Extract Metadata re-fires the workflow for every asset in the
+# library. `createdAt` dates the upload, so it is what separates a real upload from a
+# re-trigger.
+
+NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+
+
+def _ingest(raw: dict[str, Any], settings: Settings, **overrides: Any) -> None:
+    check_ingest_guards(_asset(raw, **overrides), settings.behavior, now=NOW)
+
+
+def test_a_fresh_upload_passes_the_ingest_gate(video_payload_raw: dict[str, Any], settings: Settings) -> None:
+    """The live capture put 285 ms between the upload and the webhook."""
+    just_now = (NOW - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    _ingest(video_payload_raw, settings, createdAt=just_now)  # must not raise
+
+
+def test_an_asset_that_predates_the_window_is_refused_as_a_re_trigger(
+    video_payload_raw: dict[str, Any], settings: Settings
+) -> None:
+    month_old = (NOW - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+    with pytest.raises(WebhookRejected) as caught:
+        _ingest(video_payload_raw, settings, createdAt=month_old)
+    assert caught.value.reason is RejectReason.TOO_OLD
+    # The operator has to be told what to do instead, or they will reach for the button again.
+    assert "backfill" in caught.value.detail
+
+
+def test_the_boundary_is_inclusive(video_payload_raw: dict[str, Any], settings: Settings) -> None:
+    """Exactly at the limit is still a pass: a big video can sit behind a busy queue."""
+    settings.behavior.max_asset_age_hours = 24.0
+    on_the_line = (NOW - timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+    _ingest(video_payload_raw, settings, createdAt=on_the_line)  # must not raise
+
+    over_the_line = (NOW - timedelta(hours=24, minutes=1)).isoformat().replace("+00:00", "Z")
+    with pytest.raises(WebhookRejected):
+        _ingest(video_payload_raw, settings, createdAt=over_the_line)
+
+
+def test_a_clock_skewed_future_timestamp_passes(
+    video_payload_raw: dict[str, Any], settings: Settings
+) -> None:
+    """A negative age is not old. Refusing it would strand uploads on a skewed host."""
+    tomorrow = (NOW + timedelta(hours=6)).isoformat().replace("+00:00", "Z")
+    _ingest(video_payload_raw, settings, createdAt=tomorrow)  # must not raise
+
+
+def test_a_payload_without_created_at_is_refused(
+    video_payload_raw: dict[str, Any], settings: Settings
+) -> None:
+    """Fail closed: unable to tell means no, for something that deletes originals."""
+    with pytest.raises(WebhookRejected) as caught:
+        _ingest(video_payload_raw, settings, createdAt=None)
+    assert caught.value.reason is RejectReason.NO_CREATED_AT
+
+
+@pytest.mark.parametrize("created_at", ["2020-01-01T00:00:00.000Z", None])
+def test_the_gate_can_be_turned_off(
+    video_payload_raw: dict[str, Any], settings: Settings, created_at: str | None
+) -> None:
+    """`null` accepts any age — including a payload with no `createdAt` at all."""
+    settings.behavior.max_asset_age_hours = None
+    _ingest(video_payload_raw, settings, createdAt=created_at)  # must not raise

@@ -124,8 +124,9 @@ docker compose exec immich-compressor immich-compressor backfill --type VIDEO --
 docker compose exec immich-compressor immich-compressor backfill --type VIDEO --limit 50 --apply
 ```
 
-**Do not re-run Immich's metadata extraction to reach them.** See
-[the metadata-extraction trap](operations.md#the-metadata-extraction-trap).
+Re-running Immich's metadata extraction is *not* a way to reach them: that trigger fires for
+every asset in the library, and `behavior.max_asset_age_hours` refuses every one of them on
+arrival. See [the metadata-extraction trap](operations.md#the-metadata-extraction-trap).
 
 ## Next
 

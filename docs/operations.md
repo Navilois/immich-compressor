@@ -110,27 +110,43 @@ immich-compressor backfill --type VIDEO --limit 50 --apply
 
 ### The metadata-extraction trap
 
-**Do not re-run Immich's metadata extraction to reach the backlog.**
-
 `AssetCreate` fires once per asset. `AssetMetadataExtraction` is a maintenance operation
 that can be started at any time from **Administration → Jobs → Extract Metadata**, and every
 run emits the trigger again — for *every asset in the library*, unbounded, with no way to
-stop it other than disabling the workflow. This was traced through the v3.1.0 server bundle;
-see [immich-api-notes.md](immich-api-notes.md#12-assetmetadataextraction-fires-in-bulk-not-once-per-upload).
+stop it from the Immich side other than disabling the workflow. This was traced through the
+v3.1.0 server bundle; see
+[immich-api-notes.md](immich-api-notes.md#12-assetmetadataextraction-fires-in-bulk-not-once-per-upload).
 
-Replays of an asset the service has already seen are harmless: `ON CONFLICT DO NOTHING`
-makes anything already recorded permanently immune, in *any* state including `skipped`.
-Assets it has never seen have no such protection — and that is the whole library until you
-have worked through it.
+Replays of an asset the service has already seen were always harmless: `ON CONFLICT DO
+NOTHING` makes anything already recorded permanently immune, in *any* state including
+`skipped`. Assets it has never seen had no such protection — and that is the whole library
+until you have worked through it.
 
-- With `dry_run: false`, one click starts compressing every asset that could save
-  `min_savings_bytes`, one at a time, until the disk runs out.
-- With `dry_run: true`, the same click records them all as `skipped: dry_run`. They are
-  immune from then on, so clearing the dry run later will never pick them up. Recoverable
-  with `requeue --reason dry_run --apply` — but only if you notice.
+`behavior.max_asset_age_hours` is what closes that gap. Every webhook carries `createdAt`,
+the moment Immich created the asset's database row, which dates the **upload** rather than
+the exposure. A genuine upload reaches this service seconds old; a re-trigger carries
+whatever age the asset already had. Anything past the window is refused at ingest:
 
-**Disable the workflow before running metadata extraction**, unless the disk is already
-sized for a full pass over the library.
+```
+WARNING refused AssetMetadataExtraction asset=… type=IMAGE (too_old): added to Immich
+        712.4 h ago, past max_asset_age_hours 24 — this is a re-trigger, not a new upload;
+        use `immich-compressor backfill` if it was meant
+```
+
+Three properties are worth knowing:
+
+- **It does not fire on a bulk upload.** Importing a thousand photos from 2009 is a thousand
+  assets whose `createdAt` is today. A rate limit would have refused them; this does not.
+- **A refusal writes no job.** That is deliberate: `backfill` enqueues through the same `ON
+  CONFLICT DO NOTHING`, so a row recorded here — in any state — would put the asset
+  permanently out of `backfill`'s reach. Refused assets stay exactly as reachable as they
+  were.
+- **It cannot be switched off where it matters.** `max_asset_age_hours: null` together with
+  `delete_mode: permanent` is refused at startup.
+
+So the button is no longer a hazard, and the answer to *"can I re-run metadata extraction?"*
+is yes. It is still not a way to reach the backlog — every one of those assets is refused,
+by design. `backfill` is the way to reach the backlog.
 
 ## Re-queueing after a change
 

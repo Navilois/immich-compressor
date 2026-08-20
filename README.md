@@ -10,16 +10,17 @@ and never delete one before its replacement has been verified.**
 [![Immich](https://img.shields.io/badge/Immich-v3.0.0%2B-4250af)](https://immich.app)
 
 An Immich workflow fires a webhook when an asset finishes metadata extraction. This service
-downloads the original, recompresses it with ffmpeg on whatever encoder your machine can
-actually run, checks the result eight ways, uploads it, carries over everything that can be
-carried over — and only then, if you have asked it to, removes the original.
+downloads the original, recompresses it — video with ffmpeg on whatever encoder your machine
+can actually run, JPEG stills with ImageMagick — checks the result eight ways, uploads it,
+carries over everything that can be carried over, and proves the metadata survived. Only
+then, and only if you have asked it to, does it remove the original.
 
 ```
 Immich  (Workflow: AssetMetadataExtraction -> filters -> webhook)
    |  POST /webhook   {type, trigger, data.asset}
    v
 immich-compressor
-   guard -> download -> encode -> sanity gate -> upload
+   guard -> download -> encode -> metadata gate -> sanity gate -> upload
          -> copy links -> tags & fields -> markers -> (verified) remove original
 ```
 
@@ -55,14 +56,25 @@ washed-out SDR, and a rotated portrait clip cannot come back sideways.
 anything already in the trash, anything with manually named faces, or anything it has
 processed before. It never empties your trash.
 
+**Stills get three more refusals on top of that.** Only JPEG is compressed — RAW, HEIC, PNG,
+GIF, TIFF and WebP are all filed under `IMAGE` by Immich and all of them are skipped, because
+a raw file run through the encoder would be developed into an 8-bit JPEG, pass every check,
+and lose its original. Motion photos are detected and skipped rather than silently losing
+their video. An already-compressed source is left alone instead of buying a second generation
+of artefacts. And every EXIF/GPS/XMP/IPTC tag is compared before and after: a tag that does
+not survive fails the job, with the original untouched.
+
 **You can undo it.** With the default `delete_mode: trash`, `immich-compressor restore
 --all-pending` brings every original back. There is no telemetry, no phone-home, and no
 network traffic to anything but your own Immich server.
 
 **One thing to know before you go live:** Immich's `AssetMetadataExtraction` trigger fires
-in bulk, so re-running **Administration → Jobs → Extract Metadata** queues your *entire*
-library at once, not just new uploads. Work through a backlog with `backfill --limit`
-instead, and disable the workflow before running extraction —
+in bulk, so **Administration → Jobs → Extract Metadata** re-fires the workflow for your
+*entire* library, not just new uploads. Every webhook carries `createdAt`, which dates the
+upload rather than the exposure, and `behavior.max_asset_age_hours` (24 h by default)
+refuses anything older than that — so the button is safe to press, and importing a thousand
+photos from 2009 still goes through. It is still not a way to reach a backlog: use
+`backfill --limit` for that —
 [the details, and why](docs/operations.md#the-metadata-extraction-trap).
 
 Full detail, and the four stages of going live: **[docs/safety.md](docs/safety.md)**.
@@ -170,15 +182,21 @@ because the source was already efficient enough that the gate refused the result
 the gate working. One failed with the API key missing a permission, named in the error.
 
 **Your number will be different, and this project will not pretend otherwise.** How much you
-save depends entirely on your footage: H.264 from a phone or a drone shrinks a lot,
-already-HEVC video from a recent iPhone often will not reach `max_ratio` at all. Run a dry
-run, then stage 2 on a few dozen files, and read your own report.
+save depends entirely on your material: H.264 from a phone or a drone shrinks a lot,
+already-HEVC video from a recent iPhone often will not reach `max_ratio` at all, and JPEG
+quality does not transfer across content — at q82 a detail-rich 4000x3000 photo measured
+ratio 0.38 while a flat 3000x2000 one measured 0.60. Run a dry run, then stage 2 on a few
+dozen files, and read your own report.
 
 The same data is available as JSON at `/stats` and in Prometheus format at `/metrics`. No
 port is published by default — see [operations.md](docs/operations.md#endpoints).
 
 - **Carries everything across**: album membership, favourite, shared links, stack, sidecar,
-  tags, description, rating, GPS, capture date and timeline position.
+  tags, description, rating, GPS, capture date and timeline position. For stills the EXIF,
+  GPS, XMP and IPTC blocks are diffed tag by tag afterwards, and a difference fails the job
+  rather than the metadata.
+- **One worker lane per asset type**, so a two-hour clip cannot hold a one-second photo job
+  behind it.
 - **Three independent loop guards**: a versioned server-side marker, the SQLite job store,
   and the workflow's filename filter.
 - **Resumable**: every state transition is persisted, so a crash between upload and linking

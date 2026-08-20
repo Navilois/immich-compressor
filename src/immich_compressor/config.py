@@ -109,6 +109,20 @@ class BehaviorSettings(BaseModel):
     #                 undo other than a backup of Postgres plus the upload directory.
     delete_mode: Literal["trash", "permanent"] = "trash"
 
+    # The bulk-trigger gate. Refuse a webhook for an asset that was added to Immich longer
+    # ago than this, measured from the payload's `createdAt` (upload time, not capture
+    # date). The workflow trigger is `AssetMetadataExtraction`, and one click on
+    # Administration -> Jobs -> Extract Metadata re-fires it for *every asset in the
+    # library* — see docs/immich-api-notes.md. A fresh upload reaches this service seconds
+    # old, so a day of slack lets even a big video sit behind a backed-up extraction queue
+    # and still get through, while an asset that has been in the library for a week is
+    # unambiguously a re-trigger.
+    #
+    # `null` disables the gate, and is refused together with `delete_mode: permanent`.
+    # Working through an existing library is what `immich-compressor backfill` is for: it
+    # enqueues directly and is not subject to this gate.
+    max_asset_age_hours: float | None = Field(default=24.0, gt=0)
+
     # 0 means "as soon as the verification chain passes", inline in the job rather than
     # on the sweeper's next pass.
     retention_days: int = Field(default=7, ge=0)
@@ -190,6 +204,16 @@ class BehaviorSettings(BaseModel):
             raise ConfigError(
                 "behavior.metadata_verify: 'warn' is incompatible with "
                 "delete_mode: 'permanent' — a warning cannot undo a force-deleted original"
+            )
+        if self.max_asset_age_hours is None:
+            # Without the gate, one click on Extract Metadata re-fires the workflow for
+            # every asset in the library, and at this delete_mode each one that passes the
+            # verification chain is force-deleted. The gate is the only thing standing
+            # between a maintenance button and an unrecoverable full-library pass.
+            raise ConfigError(
+                "behavior.max_asset_age_hours: null is incompatible with "
+                "delete_mode: 'permanent' — without the gate a single bulk metadata "
+                "extraction force-deletes every original in the library"
             )
         return self
 

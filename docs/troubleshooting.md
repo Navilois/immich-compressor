@@ -72,11 +72,26 @@ See [hardware.md](hardware.md#troubleshooting). `immich-compressor hardware` ans
 all of them directly, including "permission denied" (a missing render group, not a broken
 driver) and the Gen9–11 QSV failure (expected; VAAPI is used instead).
 
-## The whole library queued at once
+## Webhooks are refused as `too_old`
+
+```
+WARNING refused AssetMetadataExtraction asset=… (too_old): added to Immich 712.4 h ago,
+        past max_asset_age_hours 24 — this is a re-trigger, not a new upload
+```
 
 Something re-ran Immich's metadata extraction. That trigger fires once per *extraction*, not
-once per upload. Disable the workflow, then use `report` to see the extent. Full explanation
-in [operations.md](operations.md#the-metadata-extraction-trap).
+once per upload, so it re-fires for every asset in the library; `behavior.max_asset_age_hours`
+is the gate that refuses those. This is the guard working. Nothing was queued and nothing was
+written, so the assets stay reachable by `backfill`, which is the intentional way through a
+library. Full explanation in [operations.md](operations.md#the-metadata-extraction-trap).
+
+If a *genuine* upload is being refused, its metadata extraction sat in Immich's queue for
+longer than the window — raise `max_asset_age_hours`.
+
+## The whole library queued at once
+
+Only possible with `max_asset_age_hours: null`, which turns the gate above off. Set it back
+to a number, then use `report` to see the extent.
 
 ## Disk fills up
 

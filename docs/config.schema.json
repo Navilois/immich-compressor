@@ -23,6 +23,19 @@
           "title": "Delete Mode",
           "type": "string"
         },
+        "max_asset_age_hours": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 24.0,
+          "title": "Max Asset Age Hours"
+        },
         "retention_days": {
           "default": 7,
           "minimum": 0,
