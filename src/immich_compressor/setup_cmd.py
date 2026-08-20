@@ -118,7 +118,7 @@ def workflow_json(*, webhook_url: str, token: str, marker: str = ".cmp") -> dict
         "steps": [
             {
                 "method": "immich-plugin-core#assetTypeFilter",
-                "config": {"allowedTypes": ["VIDEO"]},
+                "config": {"allowedTypes": ["VIDEO", "IMAGE"]},
                 "enabled": True,
             },
             {
@@ -296,10 +296,17 @@ behavior:
   retention_days: 7          # how long a replaced original survives; 0 = remove at once
   initial_delay_seconds: 300 # let Immich finish thumbnails/ML/OCR before touching an asset
 
-  min_size_bytes: 20971520   # 20 MiB — below this the effort is not worth it
+  min_savings_bytes: 1048576 # 1 MiB — how much a job has to actually save to be worth
+                             # a new asset. Also the free pre-download filter: a file
+                             # cannot save more bytes than it has.
   max_ratio: 0.6             # reject the result unless it is <= 60 % of the original
-  enabled_types: [VIDEO]
+  enabled_types: [VIDEO, IMAGE]  # drop IMAGE to leave stills alone
   skip_if_named_people: true # never risk losing manually named faces
+
+  # Stills lose ALL metadata on re-encode and get it back from an exiftool copy; this is
+  # the gate that proves the copy worked. `warn` only logs, and is refused together with
+  # delete_mode: permanent — a warning cannot undo a force-deleted original.
+  metadata_verify: strict
 
 log_level: INFO
 
@@ -423,7 +430,13 @@ def run_setup(options: SetupOptions) -> int:
     missing = _print_permissions(permissions)
 
     # ---- 2. the machine ----------------------------------------------------------
-    settings = Settings(immich={"api_key": api_key}, webhook={"token": "placeholder"})
+    # Both types, because the config this writes enables both — otherwise the report
+    # below would describe a video-only deployment and no stills preset would be shown.
+    settings = Settings(
+        immich={"api_key": api_key},
+        webhook={"token": "placeholder"},
+        behavior={"enabled_types": ["VIDEO", "IMAGE"]},
+    )
     _, report = apply_to_settings(settings, always_detect=True)
     print(f"\nHardware    {report.summary_line()}")
     for candidate in report.rejected:

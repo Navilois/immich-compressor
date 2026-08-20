@@ -9,8 +9,11 @@ docs/
 scripts/
 # ...except the calibration helper, which belongs next to ffmpeg.
 !scripts/calibrate.sh
-__pycache__/
-*.pyc
+# `**/` matters: without it the pattern is anchored at the context root and
+# src/immich_compressor/__pycache__/ was copied into the image — including orphaned
+# .pyc files from whichever branch was last built here.
+**/__pycache__/
+**/*.pyc
 .pytest_cache/
 .ruff_cache/
 *.egg-info/

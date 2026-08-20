@@ -135,7 +135,13 @@ NOTES: dict[str, str] = {
         "`balanced` reproduces exactly what this project shipped in 1.0.0. Ignored when "
         "`presets:` is written by hand."
     ),
-    "behavior.min_size_bytes": "Assets smaller than this are skipped as `too_small`.",
+    "behavior.min_savings_bytes": (
+        "How many bytes a job has to actually save to be worth a new asset — a database "
+        "row, thumbnails, an embedding, faces, OCR and a timeline entry, all permanent. "
+        "It doubles as the pre-download filter, and that half needs no tuning: a file "
+        "cannot save more bytes than it has, so an asset below this is skipped as "
+        "`too_small` before it is ever downloaded."
+    ),
     "behavior.max_ratio": (
         "Reject the result unless it is at most this fraction of the original. Footage "
         "that is *already* HEVC often fails here rather than shrinking — that is the gate "
@@ -143,6 +149,13 @@ NOTES: dict[str, str] = {
     ),
     "behavior.enabled_types": (
         "`VIDEO` and `IMAGE` have built-in presets. Any other type needs an explicit entry under `presets:`."
+    ),
+    "behavior.metadata_verify": (
+        "What a post-encode metadata difference costs. Stills lose **all** metadata on "
+        "re-encode and get it back from an `exiftool` copy, so this gate is what proves "
+        "the copy worked. `strict` fails the job and never touches the original; `warn` "
+        "only logs, and is refused at startup together with `delete_mode: permanent` "
+        "because a warning cannot undo a force-deleted original."
     ),
     "behavior.skip_if_named_people": (
         "Never touch an asset with manually named faces: the replacement is a new asset, "
@@ -172,6 +185,32 @@ NOTES: dict[str, str] = {
     "behavior.metadata_key": (
         "The asset-metadata key used as the idempotency marker. This is the hard loop "
         "guard; the filename marker is only the first line of defence."
+    ),
+    # Preset fields. `_rows(Preset, "")` looks them up unprefixed.
+    "extensions": (
+        "File extensions this preset accepts, e.g. `[.jpg, .jpeg]`. Empty means any, "
+        "which is what the video presets want. For stills it is an **allowlist and not "
+        "optional**: Immich files RAW, PNG, GIF, TIFF, WebP and HEIC under type `IMAGE` "
+        "exactly like JPEG, and ImageMagick reads DNG/CR2/CR3/NEF/ARW through libraw — "
+        "without the list a raw file would be developed into an 8-bit JPEG, pass every "
+        "sanity check, and have its original deleted. Anything not on the list is skipped "
+        "as `unsupported_format`."
+    ),
+    "max_ratio": "Overrides `behavior.max_ratio` for this preset. `null` uses the behavior value.",
+    "min_savings_bytes": (
+        "Overrides `behavior.min_savings_bytes` for this preset. `null` uses the behavior value."
+    ),
+    "require_date_time_original": (
+        "Overrides `behavior.require_date_time_original` for this preset. Off for stills "
+        "in the built-in catalog: a replacement's timeline position comes from the "
+        "`fileCreatedAt` sent at upload and the explicit `dateTimeOriginal` write "
+        "afterwards, not from the file."
+    ),
+    "min_source_quality": (
+        "Skip a still whose source JPEG quality is below this. Quantisation error is "
+        "cumulative, so re-encoding an already-compressed image buys a second generation "
+        "of artefacts and usually a *larger* file — measured 158 368 -> 190 488 bytes for "
+        "a q60 source through the q82 preset. `null` disables the check."
     ),
     "database_path": "SQLite job store. Back up this volume if you care about the report history.",
     "listen_host": "Inside the container. Publish selectively at the host, never on 0.0.0.0.",
@@ -338,6 +377,17 @@ def render_markdown() -> str:
         "      -c:a aac -b:a 128k",
         "      {output}",
         "    suffix: .mp4",
+        "  image-jpeg:",
+        "    match:",
+        "      type: IMAGE",
+        "      extensions: [.jpg, .jpeg, .jpe, .jfif]",
+        "    cmd: magick {input} -auto-orient -quality 82 -interlace Plane {output}",
+        "    suffix: .jpg",
+        "    exiftool_copy: true",
+        "    normalize_orientation: true",
+        "    max_ratio: 0.9",
+        "    require_date_time_original: false",
+        "    min_source_quality: 86",
         "```",
         "",
         "| Option | Type | Default | Notes |",
@@ -354,6 +404,11 @@ def render_markdown() -> str:
         "re-encode. `normalize_orientation` additionally keeps the source `Orientation` out "
         "of that copy and pins the output to 1 — correct only when the command normalises "
         "the pixels itself with `-auto-orient`, and validated at startup.",
+        "",
+        "Presets are matched in order, and the first one whose `type` **and** "
+        "`match.extensions` accept the file wins. A type with a preset but no matching "
+        "extension is skipped as `unsupported_format`, which is a different thing from "
+        "`no_preset` and reads differently in a report.",
         "",
     ]
     return "\n".join(lines) + "\n"

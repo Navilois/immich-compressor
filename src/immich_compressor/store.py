@@ -37,20 +37,33 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     run_after       TEXT NOT NULL,
-    delete_after    TEXT
+    delete_after    TEXT,
+    asset_type      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state_runafter ON jobs (state, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_delete_after   ON jobs (delete_after);
 """
 
+# Indexes over columns from `_ADDED_COLUMNS`. They have to run *after* the migration:
+# on a database created before that column existed, `CREATE INDEX` would fail here.
+_SCHEMA_POST_MIGRATION = """
+CREATE INDEX IF NOT EXISTS idx_jobs_lane ON jobs (state, asset_type, run_after);
+"""
+
 _COLUMNS = (
     "source_asset_id, state, skip_reason, new_asset_id, new_checksum, orig_bytes, new_bytes, "
-    "ratio, attempts, last_error, payload, created_at, updated_at, run_after, delete_after"
+    "ratio, attempts, last_error, payload, created_at, updated_at, run_after, delete_after, "
+    "asset_type"
 )
 
 # Columns added after the first release. `CREATE TABLE IF NOT EXISTS` cannot add them to a
 # database that already exists, so they are applied by hand on open.
-_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (("new_checksum", "TEXT"),)
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("new_checksum", "TEXT"),
+    # Lets a worker claim only its own kind of job. Without it a single two-hour video
+    # holds the queue and every one-second image job waits behind it.
+    ("asset_type", "TEXT"),
+)
 
 # States a worker is allowed to pick up and (re)drive.
 _RESUMABLE: tuple[str, ...] = (
@@ -101,6 +114,7 @@ class JobStore:
         await self._db.execute("PRAGMA busy_timeout=5000")
         await self._db.executescript(_SCHEMA)
         await self._migrate()
+        await self._db.executescript(_SCHEMA_POST_MIGRATION)
         await self._db.commit()
 
     async def _migrate(self) -> None:
@@ -132,17 +146,21 @@ class JobStore:
         payload: dict[str, Any],
         *,
         delay_seconds: int,
+        asset_type: str | None = None,
     ) -> bool:
         """Insert a new job. Returns ``False`` if the asset is already known.
 
         The ``ON CONFLICT DO NOTHING`` is the hard guarantee that a webhook replay for
         an asset we have already seen never starts a second pipeline run.
+
+        ``asset_type`` decides which worker lane picks the job up. It is derived from the
+        payload when not given, so callers never have to pass it twice.
         """
         now = _now()
         run_after = now + timedelta(seconds=delay_seconds)
         cursor = await self._conn.execute(
             f"INSERT INTO jobs ({_COLUMNS}) VALUES "  # noqa: S608 - _COLUMNS is a module constant
-            "(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, NULL) "
+            "(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, NULL, ?) "
             "ON CONFLICT(source_asset_id) DO NOTHING",
             (
                 source_asset_id,
@@ -151,6 +169,7 @@ class JobStore:
                 _iso(now),
                 _iso(now),
                 _iso(run_after),
+                asset_type or _asset_type_from_payload(payload),
             ),
         )
         await self._conn.commit()
@@ -159,15 +178,25 @@ class JobStore:
             logger.debug("asset %s is already queued/processed — ignoring replay", source_asset_id)
         return inserted
 
-    async def claim_next(self) -> Job | None:
-        """Atomically move one due job into ``running`` and return it."""
+    async def claim_next(self, *, types: Sequence[str] | None = None) -> Job | None:
+        """Atomically move one due job into ``running`` and return it.
+
+        ``types`` restricts the claim to one worker lane. Rows written before the
+        ``asset_type`` column existed carry ``NULL`` and are claimable from every lane, so
+        an upgrade never strands a job that was queued by the previous version.
+        """
         now = _iso(_now())
         placeholders = ", ".join("?" for _ in _RESUMABLE)
+        params: list[Any] = [*(state.value for state in _RESUMABLE), now]
+        lane = ""
+        if types:
+            lane = f"AND (asset_type IS NULL OR asset_type IN ({', '.join('?' for _ in types)})) "
+            params.extend(types)
         async with self._conn.execute(
-            "SELECT source_asset_id FROM jobs "  # noqa: S608 - placeholders are generated from a constant
-            f"WHERE state IN ({placeholders}) AND run_after <= ? "
+            "SELECT source_asset_id FROM jobs "  # noqa: S608 - placeholders are generated from constants
+            f"WHERE state IN ({placeholders}) AND run_after <= ? {lane}"
             "ORDER BY run_after ASC LIMIT 1",
-            (*[state.value for state in _RESUMABLE], now),
+            params,
         ) as cursor:
             row = await cursor.fetchone()
         if row is None:
@@ -341,9 +370,17 @@ class JobStore:
         return int(row["n"]) if row else 0
 
 
+def _asset_type_from_payload(payload: dict[str, Any]) -> str | None:
+    """``VIDEO``/``IMAGE`` out of a webhook body, or ``None`` when it is not in there."""
+    asset = payload.get("data", {}).get("asset", {}) if isinstance(payload.get("data"), dict) else {}
+    asset_type = asset.get("type") if isinstance(asset, dict) else None
+    return asset_type if isinstance(asset_type, str) and asset_type else None
+
+
 def _row_to_job(row: aiosqlite.Row) -> Job:
     return Job(
         source_asset_id=row["source_asset_id"],
+        asset_type=row["asset_type"],
         state=JobState(row["state"]),
         skip_reason=SkipReason(row["skip_reason"]) if row["skip_reason"] else None,
         new_asset_id=row["new_asset_id"],

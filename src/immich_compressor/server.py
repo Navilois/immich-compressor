@@ -201,7 +201,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "retention_days": settings.behavior.retention_days,
             "enabled_types": settings.behavior.enabled_types,
             "max_ratio": settings.behavior.max_ratio,
-            "min_size_bytes": settings.behavior.min_size_bytes,
+            "min_savings_bytes": settings.behavior.min_savings_bytes,
+            "metadata_verify": settings.behavior.metadata_verify,
         }
         return body
 

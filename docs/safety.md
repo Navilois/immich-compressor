@@ -18,12 +18,45 @@ the last of those is refused at startup unless the other two already agree.
 | **Locked-folder assets** | `visibility: locked` means skip. |
 | **Assets already in the trash** | Checked from the payload *and* re-checked live before anything happens. |
 | **Assets with manually named faces** | Faces are re-detected for the replacement, so a name you typed could be lost. `skip_if_named_people: true` is the default. |
-| **Anything below `min_size_bytes`** | 20 MiB by default. |
+| **Anything that cannot save `min_savings_bytes`** | 1 MiB by default. A file cannot save more bytes than it has, so this is decided before the download. |
 | **Anything it has already processed** | The `compressor` metadata marker on the asset is a hard, versioned loop guard. |
+| **Every still that is not a JPEG** | RAW, HEIC, PNG, GIF, TIFF and WebP are all filed under type `IMAGE` by Immich, and all of them are skipped as `unsupported_format` — see below. |
+| **Motion photos** | A JPEG with a video glued on behind it. Detected and skipped as `embedded_media` — see below. |
+| **Stills that are already heavily compressed** | At or below the preset's `min_source_quality`, a re-encode adds artefacts and usually *grows* the file. Skipped as `source_quality`. |
 
 It never calls `POST /trash/empty`, ever — that endpoint drops your *entire* trash,
 including assets you deleted by hand and may still want back. Originals are removed one
 asset id at a time.
+
+### Why only JPEG stills
+
+The `IMAGE` preset carries an extension allowlist (`match.extensions`), not a denylist, and
+that is the entry doing the most work in this whole table:
+
+- **RAW (DNG/CR2/CR3/NEF/ARW)** — ImageMagick reads these through libraw. Without the
+  allowlist a raw file would be *developed* into an 8-bit JPEG, pass every sanity check
+  looking perfectly healthy, and have its original deleted. 14-bit linear sensor data,
+  gone, with nothing anywhere reporting a problem.
+- **HEIC** — libheif is read-only in this image, so it could only be written back as JPEG,
+  and HEVC-intra beats JPEG by roughly 2x. The "compressed" file would be *larger* than the
+  source. HEIC is already the efficient format; there is nothing to win.
+- **PNG** — screenshots and text turn into ringing artefacts, and transparency is lost.
+- **GIF / TIFF / WebP** — animation is destroyed, and there is no WebP write support.
+
+### Why motion photos are skipped
+
+A Samsung or Google motion photo is a JPEG with an MP4 glued on behind the end-of-image
+marker. Re-encoding reads the JPEG and drops the trailer — and *every* other check reports
+success: the metadata copy faithfully carries `XMP:MotionPhoto=1` across, the size ratio
+looks excellent precisely because the video is gone, and the picture itself is unchanged.
+Measured on a 1 935 292 byte source: 389 697 bytes out, no `ftyp` left.
+
+Two independent signals catch it, because neither alone is enough. The XMP markers identify
+the format but can be absent on vendor variants; the trailer check is format-agnostic but
+cannot tell a video from any other appended payload. The trailer is found by walking the
+JPEG's marker structure from the SOI rather than searching for the last `FFD9` — an
+embedded thumbnail is itself a complete JPEG and ends in one, and an appended MP4 can
+contain the byte pair by chance.
 
 ## The verification chain
 
@@ -46,7 +79,12 @@ and you find out about it while the delete is still undoable.
 
 Before anything is *uploaded*, the encoded file has to pass every one of these:
 
-- it is at most `max_ratio` (0.6) of the original — otherwise there was no point;
+- it is at most `max_ratio` of the original — 0.6 for video; for stills the preset lowers
+  the bar to 0.9, because on a cheap encode the ratio is the wrong axis entirely;
+- it saved at least `min_savings_bytes` in absolute terms. Ratio 0.75 on a 12 MB photo
+  saves 3 MB, ratio 0.60 on a 371 KB photo saves 147 KB — and 147 KB does not pay for a
+  permanent asset lifecycle of thumbnails, an embedding, face detection, OCR and a timeline
+  entry;
 - it decodes, and has a video or image stream;
 - its **display** size matches the source's. Not the stored size: a portrait phone clip is
   coded 1920x1080 with a 90° display matrix, and an encoder may legitimately keep the matrix
@@ -56,10 +94,64 @@ Before anything is *uploaded*, the encoded file has to pass every one of these:
 - an HDR transfer function was not lost, so a 10-bit HDR source can never be silently
   flattened to washed-out SDR;
 - the duration is within 0.5 s of the source's, and the audio stream count is unchanged;
-- the output carries a capture date.
+- the output carries a capture date. Off for stills by preset, because a replacement's
+  timeline position comes from the `fileCreatedAt` sent at upload and the explicit
+  `dateTimeOriginal` write in step 8, not from the file — requiring the tag there would
+  reject scans and EXIF-stripped exports after a full download and encode, for no gain.
 
 A failure here marks the *original* so the same CPU is not burned on it again, and records
 the asset as `skipped: no_gain`. Nothing is uploaded and nothing is deleted.
+
+## The metadata gate
+
+A still loses **all** of its metadata on a re-encode; `exiftool -TagsFromFile … -all:all`
+puts it back. That mechanism was measured rather than assumed — a 39-tag source (Make,
+Model, LensModel, DateTimeOriginal, Artist, Copyright, UserComment, ISO, FNumber, GPS
+including altitude, XMP Rating/Description/Subject/Label, IPTC Keywords/City/Caption/
+By-line) came through with 0 tags lost and 0 unexpected additions, and the embedded EXIF
+thumbnail survived byte-identical.
+
+It is still verified on every single job, because a mechanism working on a test file is not
+the same as it working on your camera's files. After the copy, both files are read back
+with `exiftool -G -EXIF:all -GPS:all -XMP:all -IPTC:all` and compared tag by tag. Anything
+missing or changed is a finding. Tags the encode *added* are not reported: gaining a tag is
+not losing one.
+
+Values are compared as exiftool **presents** them, not as `-n` floats. EXIF stores
+rationals, and copying a tag re-approximates the fraction: measured on a phone JPEG through
+the shipped preset, `ExposureTime` moved `2497831/250000000` -> `1/100` and the GPS latitude
+seconds `16316639/1000000` -> `39421/2416`. Both print identically, and comparing the raw
+floats rejected every geotagged photo — with `metadata_verify: strict` and
+`delete_mode: permanent` that is a gate no image can pass. The cost is that a change too
+small to alter the printed value cannot be seen here, which is the intended reading of "the
+metadata survived": the value a viewer is shown is the value that has to survive.
+
+Four kinds of tag are on the ignore list, and each one is earned rather than convenient:
+
+| Tag | Why |
+|---|---|
+| `EXIF:Orientation` | `normalize_orientation` pins it to 1 by design, and writes it even when the source had none |
+| `XMP:XMPToolkit` | the version stamp of whatever last wrote the XMP packet, so exiftool stamps its own on every copy. It names the writing tool, not the picture |
+| `EXIF:ThumbnailOffset`, `EXIF:PreviewImageStart`, `EXIF:OtherImageStart`, `EXIF:StripOffsets` | byte positions inside the file, not content. Rewriting the EXIF block moves them by definition — measured 1008 -> 1026. The matching `*Length` tags stay compared, because a thumbnail length that changes is a truncated thumbnail |
+
+`behavior.metadata_verify` decides what a finding costs:
+
+- **`strict`** (the default) — the job fails, the original is never touched, and the asset
+  shows up in `report` as `failed`.
+- **`warn`** — logged only. For the first days on unfamiliar camera material, where an
+  unlisted MakerNotes quirk would otherwise block every image. **The config refuses this
+  together with `delete_mode: permanent`**, because the two failure directions are not
+  symmetric: a gate that fires wrongly costs a failed job, while a gate that stays silent
+  wrongly costs the metadata *and* the original, with no rollback but a Postgres backup.
+
+To check the gate against your own photos before it starts failing jobs for real:
+
+```bash
+docker compose exec immich-compressor immich-compressor encode /path/to/photo.jpg --type IMAGE
+```
+
+It runs the whole thing locally and prints `metadata_differences`, `source_quality` and
+`embedded_media` without touching the server.
 
 ## Going live, in four stages
 

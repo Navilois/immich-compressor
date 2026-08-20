@@ -175,6 +175,15 @@ class EncoderSpec:
     exiftool_copy: bool = False
     normalize_orientation: bool = False
     timeout_s: float = 7200.0
+    # Passed straight through to the generated `Preset`. Empty/None means "no opinion",
+    # which is what every video spec wants — the stills spec is the one that constrains
+    # the formats it accepts and overrides the gate for a cheap encode.
+    extensions: tuple[str, ...] = ()
+    max_ratio: float | None = None
+    require_date_time_original: bool | None = None
+    # Keyed by quality level like `quality` above, because the threshold only means
+    # anything relative to what the preset itself encodes at.
+    min_source_quality: dict[str, int] | None = None
 
     @property
     def is_hardware(self) -> bool:
@@ -195,11 +204,15 @@ class EncoderSpec:
         return Preset(
             name=name,
             type=self.match_type,
+            extensions=list(self.extensions),
             cmd=self.render(node=node, quality=quality, threads=threads),
             suffix=self.suffix,
             exiftool_copy=self.exiftool_copy,
             normalize_orientation=self.normalize_orientation,
             timeout_s=self.timeout_s,
+            max_ratio=self.max_ratio,
+            require_date_time_original=self.require_date_time_original,
+            min_source_quality=(self.min_source_quality[quality] if self.min_source_quality else None),
         )
 
 
@@ -297,6 +310,14 @@ VIDEO_ENCODERS: tuple[EncoderSpec, ...] = (
     ),
 )
 
+# JPEG only, and an allowlist rather than a denylist — this is the entry that keeps the
+# stills path from destroying data. Immich files RAW, PNG, GIF, TIFF, WebP and HEIC under
+# type IMAGE exactly like JPEG, and ImageMagick reads DNG/CR2/CR3/NEF/ARW through libraw.
+# Without the list a raw file would be developed into an 8-bit JPEG, pass every sanity
+# check, and have its original deleted — 14-bit linear sensor data, gone. HEIC is out for a
+# different reason: libheif is read-only in this image, so it would be written back as
+# JPEG, and HEVC-intra beats JPEG by roughly 2x — the "compressed" file would be larger.
+#
 # Stills are CPU-only on purpose. A GPU JPEG encoder exists but produces visibly worse
 # output at the same size than a competent software encoder, and stills are small enough
 # that the wall-clock saving is irrelevant.
@@ -306,8 +327,18 @@ VIDEO_ENCODERS: tuple[EncoderSpec, ...] = (
 # together with normalize_orientation fixes a real trap — the HEIC decoder may already have
 # applied the rotation while the JPEG decoder has not, and copying the source Orientation
 # back onto already-upright pixels rotates the image a second time.
+#
+# Why the flags are what they are:
+#   magick, not convert  `convert` is a deprecated alias in ImageMagick 7.
+#   -interlace Plane     progressive JPEG. Free: it reorders the same DCT coefficients, so
+#                        the decoded pixels are bit-identical (verified with
+#                        `compare -metric AE` = 0) while the file shrinks 3-8 %.
+#   no -sampling-factor  ImageMagick then *inherits* the source's chroma subsampling
+#                        (verified: a 4:4:4 source stays 4:4:4 even at q82). Forcing 4:2:0
+#                        would halve chroma resolution on every 4:4:4 source — visible on
+#                        saturated edges, and no sanity check would notice.
 IMAGE_ENCODER = EncoderSpec(
-    encoder="convert",
+    encoder="magick",
     label="ImageMagick JPEG",
     match_type="IMAGE",
     suffix=".jpg",
@@ -315,7 +346,25 @@ IMAGE_ENCODER = EncoderSpec(
     exiftool_copy=True,
     normalize_orientation=True,
     timeout_s=900.0,
-    template="convert {input} -auto-orient -quality $q -sampling-factor 4:2:0 {output}",
+    extensions=(".jpg", ".jpeg", ".jpe", ".jfif"),
+    # A still costs about a second to encode, so the ratio is the wrong economic axis:
+    # ratio 0.75 on a 12 MB photo saves 3 MB, ratio 0.60 on a 371 KB photo saves 147 KB.
+    # Here max_ratio is only a "something went badly wrong" net, and `min_savings_bytes`
+    # from the behavior block decides whether the result is worth an asset at all.
+    max_ratio=0.9,
+    # Off for stills on purpose: the replacement's timeline position comes from the
+    # `fileCreatedAt` sent at upload and from the explicit `dateTimeOriginal` write in
+    # step 8, not from the file. Requiring the tag would reject scans and EXIF-stripped
+    # exports after a full download and encode, for no gain in correctness.
+    require_date_time_original=False,
+    # Quantisation error is cumulative. Running a q60 source through the q82 preset was
+    # measured at 158 368 -> 190 488 bytes — 20 % *larger*, for a second generation of
+    # artefacts. So: leave a source alone unless it sits meaningfully above what this
+    # preset would write it back at. Four points above the target in each column, which
+    # makes `balanced` the q86 threshold this was measured with; a fixed number instead
+    # would make `smaller` (q75) refuse exactly the q76-q85 sources it shrinks best.
+    min_source_quality={"higher": 92, "balanced": 86, "smaller": 79},
+    template="magick {input} -auto-orient -quality $q -interlace Plane {output}",
 )
 
 # `hardware.mode` values that pin a specific hardware encoder.
@@ -834,7 +883,14 @@ class HardwareReport:
                 for c in self.candidates
             ],
             "presets": [
-                {"name": p.name, "type": p.match_type, "cmd": p.cmd, "suffix": p.suffix} for p in self.presets
+                {
+                    "name": p.name,
+                    "type": p.match_type,
+                    "cmd": p.cmd,
+                    "suffix": p.suffix,
+                    "extensions": p.extensions,
+                }
+                for p in self.presets
             ],
         }
 
@@ -986,6 +1042,10 @@ def format_report(report: HardwareReport) -> str:
     for preset in report.presets:
         lines.append(f"  {preset.name} ({preset.match_type}) -> {preset.suffix}")
         lines.append(f"    {preset.cmd}")
+        # The stills preset only accepts JPEG, and that allowlist is the difference
+        # between skipping a raw file and developing it into an 8-bit JPEG. Say so.
+        if preset.extensions:
+            lines.append(f"    accepts only {', '.join(preset.extensions)}")
     lines.append("")
 
     lines.append("To pin this choice, put it in config.yaml:")

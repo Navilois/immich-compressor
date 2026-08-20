@@ -6,8 +6,8 @@ Immich  (Workflow: AssetMetadataExtraction -> filters -> webhook)
    v
 immich-compressor (FastAPI, one process, one container)
    POST /webhook  -> verify secret, persist job, 202 Accepted    (must return instantly)
-   worker (asyncio)
-       guard -> download -> encode -> sanity gate -> upload
+   worker (asyncio, one lane per enabled asset type)
+       guard -> download -> encode -> metadata gate -> sanity gate -> upload
              -> copy -> tags/fields -> markers -> (deferred) remove original
    GET  /healthz  /stats  /metrics  /jobs[?status=]  /jobs/{id}
    POST /reprocess/{assetId}
@@ -32,10 +32,12 @@ shared secret, writes one row, and answers `202` — everything else is the work
 | # | Step | Notes |
 |---|---|---|
 | 1 | Delay | `initial_delay_seconds` (300) so Immich's own thumbnail, ML and OCR jobs finish first |
-| 2 | Guards | external library, edited, live photo, locked, trashed, wrong type, too small, existing marker, named people |
+| 2 | Guards | external library, edited, live photo, locked, trashed, wrong type, unsupported format, too small, existing marker, named people |
 | 3 | Download | `GET /assets/{id}/original`, streamed to a temp file; free space checked first |
+| 3b | Still guards | stills only: an appended payload (motion photo) or a source already at or below `min_source_quality` stops the job here, before the encode — see [safety.md](safety.md#what-it-never-touches) |
 | 4 | Encode | the preset command, without a shell; `exiftool -TagsFromFile` for stills, with orientation normalised |
-| 5 | Sanity gate | ratio, decodability, rotation-aware display size, bit depth, HDR transfer, duration, audio streams, capture date — see [safety.md](safety.md#the-sanity-gate) |
+| 4b | Metadata gate | stills only: every EXIF/GPS/XMP/IPTC tag of the source has to be on the output with the same presented value — see [safety.md](safety.md#the-metadata-gate) |
+| 5 | Sanity gate | ratio, bytes saved, decodability, rotation-aware display size, bit depth, HDR transfer, duration, audio streams, capture date — see [safety.md](safety.md#the-sanity-gate) |
 | 6 | Upload | `POST /assets`; the filename gets the `.cmp` marker |
 | 7 | Copy | `PUT /assets/copy` — albums, favourite, shared links, stack, sidecar |
 | 8 | Fields and tags | re-reads the source, then `PUT /assets/{new}` and `PUT /tags/assets`. Idempotent, and independent of the extraction race |
@@ -70,9 +72,20 @@ A portrait phone clip is not stored as a portrait frame. It is coded 1920x1080 a
 | | Without the countermeasure | With it |
 |---|---|---|
 | **Video** | ffmpeg's default `-autorotate` bakes the rotation into the pixels and drops the matrix, so 1920x1080 comes out as 1080x1920 — and the sanity gate rejects the clip as a resolution change | `-noautorotate` keeps the matrix and the stored frame untouched. Also required for a full-GPU pipeline, where the rotate filter cannot run on hardware frames |
-| **Still** | `convert -auto-orient` rotates the pixels, then `exiftool -all:all` copies the source `Orientation` back on top — the image ends up rotated twice | `normalize_orientation: true` keeps `Orientation` out of the copy and pins the output to 1 |
+| **Still** | `magick -auto-orient` rotates the pixels, then `exiftool -all:all` copies the source `Orientation` back on top — the image ends up rotated twice | `normalize_orientation: true` keeps `Orientation` out of the copy and pins the output to 1 |
 
 The gate therefore compares **display** sizes, not stored sizes.
+
+## Worker lanes
+
+There is one worker lane per entry in `behavior.enabled_types`, each running
+`behavior.concurrency` tasks, and a job is only claimable by the lane for its own asset
+type. Without the split a single clip with `timeout_s: 7200` holds the only worker for two
+hours while every one-second image job queues behind it.
+
+The lane is recorded in the job store's `asset_type` column, derived from the webhook
+payload at enqueue time. Rows written before that column existed carry `NULL` and stay
+claimable from *every* lane, so an upgrade never strands a job the previous version queued.
 
 ## Hardware selection
 

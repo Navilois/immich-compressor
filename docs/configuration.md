@@ -71,10 +71,11 @@ Everything that decides whether and how an asset gets touched. The three that ma
 | `max_attempts` | integer | `3` | Failures retry with exponential backoff up to this many attempts, then land in `failed`. (>= 1) |
 | `poll_interval_seconds` | number | `5.0` | How often a worker looks for a due job. (> 0) |
 | `quality` | `balanced` \| `higher` \| `smaller` | `balanced` | Mapped per encoder to the right CRF / `-global_quality` / `-cq` number. `balanced` reproduces exactly what this project shipped in 1.0.0. Ignored when `presets:` is written by hand. |
-| `min_size_bytes` | integer | `20971520` | Assets smaller than this are skipped as `too_small`. (>= 0) |
+| `min_savings_bytes` | integer | `1048576` | How many bytes a job has to actually save to be worth a new asset — a database row, thumbnails, an embedding, faces, OCR and a timeline entry, all permanent. It doubles as the pre-download filter, and that half needs no tuning: a file cannot save more bytes than it has, so an asset below this is skipped as `too_small` before it is ever downloaded. (>= 0) |
 | `max_ratio` | number | `0.6` | Reject the result unless it is at most this fraction of the original. Footage that is *already* HEVC often fails here rather than shrinking — that is the gate working, not a defect. (> 0, <= 1.0) |
 | `enabled_types` | list of `IMAGE` \| `VIDEO` \| `AUDIO` \| `OTHER` | `[VIDEO]` | `VIDEO` and `IMAGE` have built-in presets. Any other type needs an explicit entry under `presets:`. |
 | `skip_if_named_people` | boolean | `true` | Never touch an asset with manually named faces: the replacement is a new asset, and its faces are re-detected from scratch. |
+| `metadata_verify` | `strict` \| `warn` | `strict` | What a post-encode metadata difference costs. Stills lose **all** metadata on re-encode and get it back from an `exiftool` copy, so this gate is what proves the copy worked. `strict` fails the job and never touches the original; `warn` only logs, and is refused at startup together with `delete_mode: permanent` because a warning cannot undo a force-deleted original. |
 | `post_upload_settle_s` | number | `30.0` | How long to wait for Immich's metadata extraction on the freshly uploaded asset before writing description, rating and GPS. Extraction overwrites those fields, so writing too early silently loses them. (>= 0) |
 | `duration_tolerance_s` | number | `0.5` | Sanity gate: how far the output's duration may drift. (>= 0) |
 | `require_same_resolution` | boolean | `true` | Sanity gate: compare *display* size, so a rotated clip is not rejected for keeping or baking in its rotation — only for losing it. |
@@ -109,19 +110,37 @@ presets:
       -c:a aac -b:a 128k
       {output}
     suffix: .mp4
+  image-jpeg:
+    match:
+      type: IMAGE
+      extensions: [.jpg, .jpeg, .jpe, .jfif]
+    cmd: magick {input} -auto-orient -quality 82 -interlace Plane {output}
+    suffix: .jpg
+    exiftool_copy: true
+    normalize_orientation: true
+    max_ratio: 0.9
+    require_date_time_original: false
+    min_source_quality: 86
 ```
 
 | Option | Type | Default | Notes |
 |---|---|---|---|
 | `name` | string | — |  |
 | `match_type` | `IMAGE` \| `VIDEO` \| `AUDIO` \| `OTHER` | — |  |
+| `extensions` | list of string | `[]` | File extensions this preset accepts, e.g. `[.jpg, .jpeg]`. Empty means any, which is what the video presets want. For stills it is an **allowlist and not optional**: Immich files RAW, PNG, GIF, TIFF, WebP and HEIC under type `IMAGE` exactly like JPEG, and ImageMagick reads DNG/CR2/CR3/NEF/ARW through libraw — without the list a raw file would be developed into an 8-bit JPEG, pass every sanity check, and have its original deleted. Anything not on the list is skipped as `unsupported_format`. |
 | `cmd` | string | — |  |
 | `suffix` | string | — |  |
 | `exiftool_copy` | boolean | `false` |  |
 | `normalize_orientation` | boolean | `false` |  |
 | `timeout_s` | number | `3600.0` | (> 0) |
+| `max_ratio` | number | — | Overrides `behavior.max_ratio` for this preset. `null` uses the behavior value. |
+| `min_savings_bytes` | integer | — | Overrides `behavior.min_savings_bytes` for this preset. `null` uses the behavior value. |
+| `require_date_time_original` | boolean | — | Overrides `behavior.require_date_time_original` for this preset. Off for stills in the built-in catalog: a replacement's timeline position comes from the `fileCreatedAt` sent at upload and the explicit `dateTimeOriginal` write afterwards, not from the file. |
+| `min_source_quality` | integer | — | Skip a still whose source JPEG quality is below this. Quantisation error is cumulative, so re-encoding an already-compressed image buys a second generation of artefacts and usually a *larger* file — measured 158 368 -> 190 488 bytes for a q60 source through the q82 preset. `null` disables the check. |
 
 `{input}` and `{output}` are both required. Commands run **without a shell** — they are `shlex.split` at load time and rejected outright if a token is a shell control operator (`|`, `&&`, `;`), a redirection (`>`, `2>&1`) or a command substitution (`` ` ``, `$(`). A `|` *inside* a token is fine, because that is ffmpeg's format-alternation syntax and not a pipe.
 
 `exiftool_copy` is required for stills, which otherwise lose all metadata on re-encode. `normalize_orientation` additionally keeps the source `Orientation` out of that copy and pins the output to 1 — correct only when the command normalises the pixels itself with `-auto-orient`, and validated at startup.
+
+Presets are matched in order, and the first one whose `type` **and** `match.extensions` accept the file wins. A type with a preset but no matching extension is skipped as `unsupported_format`, which is a different thing from `no_preset` and reads differently in a report.
 

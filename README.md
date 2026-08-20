@@ -86,7 +86,7 @@ docker compose up -d
 docker compose logs -f immich-compressor
 ```
 
-Upload a video over 20 MiB, wait five minutes, and:
+Upload a video or a photo over 1 MiB, wait five minutes, and:
 
 ```bash
 docker compose exec immich-compressor immich-compressor report

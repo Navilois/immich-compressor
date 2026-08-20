@@ -64,10 +64,10 @@
           "title": "Quality",
           "type": "string"
         },
-        "min_size_bytes": {
-          "default": 20971520,
+        "min_savings_bytes": {
+          "default": 1048576,
           "minimum": 0,
-          "title": "Min Size Bytes",
+          "title": "Min Savings Bytes",
           "type": "integer"
         },
         "max_ratio": {
@@ -94,6 +94,15 @@
           "default": true,
           "title": "Skip If Named People",
           "type": "boolean"
+        },
+        "metadata_verify": {
+          "default": "strict",
+          "enum": [
+            "strict",
+            "warn"
+          ],
+          "title": "Metadata Verify",
+          "type": "string"
         },
         "post_upload_settle_s": {
           "default": 30.0,
@@ -216,6 +225,13 @@
           "title": "Match Type",
           "type": "string"
         },
+        "extensions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Extensions",
+          "type": "array"
+        },
         "cmd": {
           "title": "Cmd",
           "type": "string"
@@ -239,6 +255,59 @@
           "exclusiveMinimum": 0,
           "title": "Timeout S",
           "type": "number"
+        },
+        "max_ratio": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Ratio"
+        },
+        "min_savings_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Savings Bytes"
+        },
+        "require_date_time_original": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Require Date Time Original"
+        },
+        "min_source_quality": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Source Quality"
         }
       },
       "required": [

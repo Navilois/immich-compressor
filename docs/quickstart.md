@@ -74,7 +74,7 @@ is deleted: the shipped configuration is a dry run.
 
 ## 5. Watch a dry run
 
-Upload a video larger than 20 MiB, wait five minutes (`initial_delay_seconds` lets Immich
+Upload a video or a photo larger than 1 MiB, wait five minutes (`initial_delay_seconds` lets Immich
 finish its own thumbnail and machine-learning jobs first), then:
 
 ```bash

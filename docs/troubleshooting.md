@@ -25,12 +25,30 @@ real one-frame encode. `hardware` explains every encoder decision.
 | Skip reason | What it means |
 |---|---|
 | `dry_run` | The shipped default. Set `BEHAVIOR__DRY_RUN=false` when you are ready — see [safety.md](safety.md). |
-| `too_small` | `min_size_bytes` is 20 MiB. |
-| `no_gain` | The encode did not reach `max_ratio` (0.6). Common for footage that is already HEVC. Tune it offline with `immich-compressor encode`, or accept it. |
+| `too_small` | The asset is smaller than `min_savings_bytes` (1 MiB), so it cannot possibly save that much. Rejected before the download. |
+| `no_gain` | The encode did not reach `max_ratio`, or saved fewer than `min_savings_bytes`. Common for footage that is already HEVC. Tune it offline with `immich-compressor encode`, or accept it. |
 | `already_compressed` | The `compressor` marker is on the asset. That is the loop guard doing its job. |
 | `named_people` | The asset has manually named faces. Deliberate — see [safety.md](safety.md#what-it-never-touches). |
 | `wrong_type` | Not in `behavior.enabled_types`, or the workflow's type filter does not match. |
+| `unsupported_format` | The type is covered but no preset accepts this extension. The `IMAGE` preset is a JPEG allowlist: RAW, HEIC, PNG, GIF, TIFF and WebP are out by design — see [safety.md](safety.md#why-only-jpeg-stills). |
+| `source_quality` | The still is already at or below the preset's `min_source_quality`. Re-encoding it would add a second generation of artefacts and usually *enlarge* the file — measured 158 368 -> 190 488 bytes for a q60 source through the q82 preset. |
+| `embedded_media` | A motion photo: a JPEG with a video glued on behind the end-of-image marker. Re-encoding would silently drop the video — see [safety.md](safety.md#why-motion-photos-are-skipped). |
 | `external_library`, `live_photo`, `edited`, `locked`, `trashed` | Never touched, by design. |
+
+## Stills fail with `metadata carry-over incomplete`
+
+The [metadata gate](safety.md#the-metadata-gate) found a tag the `exiftool` copy did not
+carry. **The original was not touched** — the job is in `failed` and the asset is still
+whole. Get the exact list of tags without involving the server:
+
+```bash
+docker compose exec immich-compressor immich-compressor encode /path/photo.jpg --type IMAGE
+```
+
+The `metadata_differences` array names every tag that moved. If it is a MakerNotes quirk
+specific to your camera, `behavior.metadata_verify: warn` downgrades the gate to a log line
+— but only while `delete_mode` is `trash`, because a warning cannot undo a force-deleted
+original. The startup validation enforces that pairing.
 
 ## Tuning a preset
 
@@ -39,10 +57,14 @@ Immich:
 
 ```bash
 docker compose exec immich-compressor immich-compressor encode --type VIDEO /path/clip.mp4
+docker compose exec immich-compressor immich-compressor encode --type IMAGE /path/photo.jpg
 ```
 
 It prints the ratio, the sanity verdict, and the display size and rotation of both input and
 output — which is what you need when the gate rejects something and you want to know why.
+For stills it additionally prints `source_quality`, `embedded_media` and
+`metadata_differences`, so every still-specific decision the pipeline would make is visible
+before it makes it.
 
 ## GPU problems
 

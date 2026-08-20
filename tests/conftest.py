@@ -57,7 +57,7 @@ def settings(tmp_path: Path, video_preset: Preset) -> Settings:
             "dry_run": False,
             "trash_original": False,
             "initial_delay_seconds": 0,
-            "min_size_bytes": 1024,
+            "min_savings_bytes": 1024,
             "max_ratio": 0.6,
             "enabled_types": ["VIDEO"],
             "skip_if_named_people": True,

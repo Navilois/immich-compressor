@@ -122,10 +122,26 @@ class BehaviorSettings(BaseModel):
     # "balanced" reproduces exactly what this project shipped before the catalog existed.
     quality: QualityLevel = "balanced"
 
-    min_size_bytes: int = Field(default=20 * 1024 * 1024, ge=0)
+    # How many bytes a job has to actually save to be worth an asset lifecycle — a new
+    # database row, thumbnails, a smart-search embedding, face detection, OCR and a
+    # timeline entry, all of it permanent. Replaces the old `min_size_bytes`, which
+    # guessed from the input size instead of measuring the outcome.
+    #
+    # It doubles as the pre-download filter, and that part needs no tuning at all: a file
+    # cannot save more bytes than it has, so rejecting `fileSizeInByte < min_savings_bytes`
+    # before the download is provably free of false negatives.
+    min_savings_bytes: int = Field(default=1024 * 1024, ge=0)
     max_ratio: float = Field(default=0.6, gt=0, le=1.0)
     enabled_types: list[AssetType] = Field(default_factory=lambda: ["VIDEO"])
     skip_if_named_people: bool = True
+
+    # What happens when the post-encode metadata diff finds a tag the copy did not carry.
+    #   "strict" — the job fails, the original is never touched.
+    #   "warn"   — the difference is logged and the job continues.
+    # "warn" exists for the first days on unknown camera material, where an unlisted
+    # MakerNotes quirk would otherwise block every image. It is only defensible while a
+    # delete can still be undone — see `_validate_delete_mode`.
+    metadata_verify: Literal["strict", "warn"] = "strict"
 
     # How long to wait for Immich's metadata-extraction job on a freshly uploaded asset
     # before writing description/rating/GPS. Extraction overwrites those fields, so
@@ -165,6 +181,16 @@ class BehaviorSettings(BaseModel):
                 "behavior.delete_mode: 'permanent' is incompatible with dry_run: true — "
                 "a dry run must not delete anything"
             )
+        if self.metadata_verify != "strict":
+            # The cost of the two failure directions is not symmetric. A gate that fires
+            # wrongly costs a failed job and leaves the original alone; a gate that stays
+            # silent wrongly costs the metadata *and* the original, with no rollback but a
+            # Postgres backup. Warning about a loss that can no longer be undone is not a
+            # learning phase, it is a log entry.
+            raise ConfigError(
+                "behavior.metadata_verify: 'warn' is incompatible with "
+                "delete_mode: 'permanent' — a warning cannot undo a force-deleted original"
+            )
         return self
 
 
@@ -191,16 +217,39 @@ class Preset(BaseModel):
 
     name: str
     match_type: AssetType = Field(alias="type")
+    # File extensions this preset accepts, e.g. ``[".jpg", ".jpeg"]``. Empty means "any",
+    # which is what the video presets want.
+    #
+    # An allowlist, deliberately, because Immich files *everything* under type IMAGE:
+    # JPEG, HEIC, PNG, GIF, WebP, TIFF — and RAW. ImageMagick in this image reads
+    # DNG/CR2/CR3/NEF/ARW through libraw, so without this list a RAW would be developed
+    # into an 8-bit JPEG, pass every sanity check, and have its original deleted.
+    extensions: list[str] = Field(default_factory=list)
     cmd: str
     suffix: str
     # Copy EXIF/XMP from the source onto the output with exiftool after encoding.
     # Required for stills; ffmpeg's -map_metadata already handles containers.
     exiftool_copy: bool = False
     # Keep the source's EXIF Orientation out of that copy and pin the output to 1.
-    # Only correct when the command normalises the pixels itself (`convert -auto-orient`),
+    # Only correct when the command normalises the pixels itself (`magick -auto-orient`),
     # otherwise the image ends up rotated twice.
     normalize_orientation: bool = False
     timeout_s: float = Field(default=3600.0, gt=0)
+
+    # Per-preset overrides of the sanity gate. ``None`` means "use the behavior value".
+    #
+    # These exist because video and stills have opposite economics. A video encode costs
+    # minutes, so demanding a strong size ratio is right. A still costs about a second,
+    # and then the ratio is the wrong axis entirely: ratio 0.75 on a 12 MB photo saves
+    # 3 MB, ratio 0.60 on a 371 KB photo saves 147 KB. For stills `max_ratio` is therefore
+    # only a "something went badly wrong" net, and `min_savings_bytes` does the real work.
+    max_ratio: float | None = Field(default=None, gt=0, le=1.0)
+    min_savings_bytes: int | None = Field(default=None, ge=0)
+    require_date_time_original: bool | None = None
+    # Skip a still whose source JPEG quality is at or below this value. Re-encoding an
+    # already heavily compressed image buys a second generation of quantisation error and
+    # usually a *larger* file. ``None`` disables the check.
+    min_source_quality: int | None = Field(default=None, ge=1, le=100)
 
     @model_validator(mode="after")
     def _validate(self) -> Self:
@@ -226,6 +275,12 @@ class Preset(BaseModel):
                 )
         if not self.suffix.startswith("."):
             raise ConfigError(f"preset {self.name!r}: suffix must start with a dot")
+        normalised: list[str] = []
+        for extension in self.extensions:
+            if not extension.startswith("."):
+                raise ConfigError(f"preset {self.name!r}: extension {extension!r} must start with a dot")
+            normalised.append(extension.lower())
+        object.__setattr__(self, "extensions", normalised)
         if self.normalize_orientation:
             if not self.exiftool_copy:
                 raise ConfigError(
@@ -238,6 +293,25 @@ class Preset(BaseModel):
                     "normalise the pixels itself — add -auto-orient"
                 )
         return self
+
+    def accepts(self, filename: str) -> bool:
+        """Whether this preset handles ``filename``. An empty ``extensions`` accepts all."""
+        if not self.extensions:
+            return True
+        return Path(filename).suffix.lower() in self.extensions
+
+    def effective_max_ratio(self, behavior: BehaviorSettings) -> float:
+        return self.max_ratio if self.max_ratio is not None else behavior.max_ratio
+
+    def effective_min_savings_bytes(self, behavior: BehaviorSettings) -> int:
+        if self.min_savings_bytes is not None:
+            return self.min_savings_bytes
+        return behavior.min_savings_bytes
+
+    def effective_require_date_time_original(self, behavior: BehaviorSettings) -> bool:
+        if self.require_date_time_original is not None:
+            return self.require_date_time_original
+        return behavior.require_date_time_original
 
     @property
     def hardware_encoder(self) -> str | None:
@@ -340,13 +414,48 @@ class Settings(BaseSettings):
         # detected hardware", and `load_settings` fills it in before anyone sees it.
         if self.presets:
             for asset_type in self.behavior.enabled_types:
-                if not any(preset.match_type == asset_type for preset in self.presets):
+                if not self.type_is_covered(asset_type):
                     raise ConfigError(f"enabled_types contains {asset_type} but no preset matches it")
         return self
 
-    def preset_for(self, asset_type: str) -> Preset | None:
-        """First preset whose ``type`` matches, or ``None``."""
-        return next((preset for preset in self.presets if preset.match_type == asset_type), None)
+    def preset_for(self, asset_type: str, filename: str | None = None) -> Preset | None:
+        """First preset whose type — and, when given, file extension — matches.
+
+        ``filename`` is optional so callers that only ask "is this type covered at all?"
+        (the startup validation, the ``encode`` CLI command) keep working unchanged.
+        """
+        for preset in self.presets:
+            if preset.match_type != asset_type:
+                continue
+            if filename is not None and not preset.accepts(filename):
+                continue
+            return preset
+        return None
+
+    def type_is_covered(self, asset_type: str) -> bool:
+        """Whether any preset handles ``asset_type``, regardless of extension."""
+        return any(preset.match_type == asset_type for preset in self.presets)
+
+
+# Keys an earlier release accepted under a different name. Caught by hand because
+# `extra="forbid"` answers a rename with "Extra inputs are not permitted", which tells
+# nobody what to write instead — and a config that fails to load stops the service.
+_RENAMED_KEYS: dict[tuple[str, str], str] = {
+    ("behavior", "min_size_bytes"): (
+        "behavior.min_size_bytes was replaced by behavior.min_savings_bytes. The old key "
+        "guessed from the input size; the new one is how many bytes a job has to actually "
+        "save. The default is 1048576 (1 MiB) — carrying the old 20971520 across would "
+        "skip almost everything. See docs/upgrading.md"
+    ),
+}
+
+
+def _forbid_renamed_keys(raw: dict[str, Any]) -> None:
+    """Fail with the rename spelled out rather than with a generic "extra input"."""
+    for (section, key), message in _RENAMED_KEYS.items():
+        block = raw.get(section)
+        if isinstance(block, dict) and key in block:
+            raise ConfigError(message)
 
 
 def _forbid_secrets_in_file(raw: dict[str, Any]) -> None:
@@ -377,8 +486,11 @@ def _normalise_presets(raw: dict[str, Any]) -> None:
 
     for item in items:
         match = item.pop("match", None)
-        if isinstance(match, dict) and "type" in match:
-            item.setdefault("type", match["type"])
+        if isinstance(match, dict):
+            if "type" in match:
+                item.setdefault("type", match["type"])
+            if "extensions" in match:
+                item.setdefault("extensions", match["extensions"])
         if "type" not in item:
             raise ConfigError(f"preset {item.get('name')!r}: missing match.type")
     raw["presets"] = items
@@ -410,6 +522,7 @@ def load_settings(
         raw = loaded
 
     _forbid_secrets_in_file(raw)
+    _forbid_renamed_keys(raw)
     _normalise_presets(raw)
 
     token = _yaml_values.set(raw)

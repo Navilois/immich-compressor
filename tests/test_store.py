@@ -153,3 +153,51 @@ async def test_unknown_column_is_rejected(tmp_path: Path) -> None:
             assert "nonsense" in str(exc)
         else:  # pragma: no cover
             raise AssertionError("expected ValueError")
+
+
+# ------------------------------------------------------------------- worker lanes
+
+VIDEO_PAYLOAD = {
+    "type": "AssetV1",
+    "trigger": "AssetMetadataExtraction",
+    "data": {"asset": {"id": "v", "type": "VIDEO"}},
+}
+IMAGE_PAYLOAD = {
+    "type": "AssetV1",
+    "trigger": "AssetMetadataExtraction",
+    "data": {"asset": {"id": "i", "type": "IMAGE"}},
+}
+
+
+async def test_asset_type_is_derived_from_the_payload(tmp_path: Path) -> None:
+    async with JobStore(tmp_path / "s.db") as store:
+        await store.enqueue("video-1", VIDEO_PAYLOAD, delay_seconds=0)
+        job = await store.get("video-1")
+        assert job is not None and job.asset_type == "VIDEO"
+
+
+async def test_a_lane_only_claims_its_own_type(tmp_path: Path) -> None:
+    """Without this a single two-hour clip holds the queue and every image waits behind it."""
+    async with JobStore(tmp_path / "s.db") as store:
+        await store.enqueue("video-1", VIDEO_PAYLOAD, delay_seconds=0)
+        await store.enqueue("image-1", IMAGE_PAYLOAD, delay_seconds=0)
+
+        image_job = await store.claim_next(types=("IMAGE",))
+        assert image_job is not None and image_job.source_asset_id == "image-1"
+
+        # `running` stays resumable so a crash mid-job can be replayed, so finish it before
+        # asking again. The image lane is then empty even though a video job is still due.
+        await store.update("image-1", state=JobState.DONE)
+        assert await store.claim_next(types=("IMAGE",)) is None
+
+        video_job = await store.claim_next(types=("VIDEO",))
+        assert video_job is not None and video_job.source_asset_id == "video-1"
+
+
+async def test_rows_without_a_type_stay_claimable(tmp_path: Path) -> None:
+    """Jobs queued by the previous version carry NULL and must not be stranded."""
+    async with JobStore(tmp_path / "s.db") as store:
+        await store.enqueue("legacy", {"type": "AssetV1", "data": {}}, delay_seconds=0)
+        assert (await store.get("legacy")).asset_type is None  # type: ignore[union-attr]
+        claimed = await store.claim_next(types=("IMAGE",))
+        assert claimed is not None and claimed.source_asset_id == "legacy"

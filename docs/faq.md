@@ -75,9 +75,38 @@ With `delete_mode: trash` the checksum is still known to the server, so it does 
 
 ## Can it compress photos too?
 
-Yes — `enabled_types: [VIDEO, IMAGE]` plus the type filter in the workflow. Think about
-whether you want to. A JPEG re-encode is generationally lossy in a way an H.264 → HEVC video
-re-encode largely is not, and photos are small. Most people should leave it off.
+Yes, and `setup` enables it: `enabled_types: [VIDEO, IMAGE]` plus `IMAGE` in the workflow's
+type filter. **JPEG only** — everything else Immich files under `IMAGE` is skipped as
+`unsupported_format`, and that allowlist is what stops a raw file from being developed into
+an 8-bit JPEG and losing its original. See
+[safety.md](safety.md#why-only-jpeg-stills) for the reason per format.
+
+A JPEG re-encode *is* generationally lossy in a way an H.264 → HEVC video re-encode largely
+is not, so three things guard it beyond the normal sanity gate:
+
+- `min_source_quality` leaves an already-compressed source alone. Re-encoding a q60 JPEG at
+  q82 was measured at 158 368 -> 190 488 bytes: a second generation of artefacts *and* a
+  bigger file.
+- `min_savings_bytes` throws away results that are technically smaller but not worth a
+  permanent new asset. Photos are small, and ratio is the wrong axis on a cheap encode.
+- The [metadata gate](safety.md#the-metadata-gate) compares every EXIF/GPS/XMP/IPTC tag
+  before and after, and fails the job rather than the metadata.
+
+To leave stills alone, drop `IMAGE` from `behavior.enabled_types` and from the workflow's
+type filter.
+
+## Why does it skip so many of my photos?
+
+Probably one of three deliberate refusals, all visible in `report`:
+
+| Skip reason | Meaning |
+|---|---|
+| `unsupported_format` | Not a JPEG. RAW, HEIC, PNG, GIF, TIFF and WebP are out by design. |
+| `source_quality` | Already at or below the preset's quality target — a re-encode would only add artefacts. |
+| `embedded_media` | A motion photo, whose video would be silently dropped by a re-encode. |
+
+`immich-compressor encode <file> --type IMAGE` reproduces the decision for a single file
+locally, without touching the server.
 
 ## Does it work with Immich 2.x?
 
@@ -95,6 +124,11 @@ pipeline then picks up from the live asset rather than the stale webhook payload
 `behavior.concurrency`, capped at 4, and derived from the container's CPU budget when you do
 not set it. It is pinned to 1 whenever a GPU preset is in use: an iGPU has one
 fixed-function encode block and Immich's own transcoding already competes for it.
+
+Note that it counts *per lane*, and there is one lane per entry in `enabled_types`. With
+`[VIDEO, IMAGE]` and `concurrency: 1` that is up to two encodes at once. The split is
+deliberate: without it a single clip with `timeout_s: 7200` holds the only worker for two
+hours while every one-second image job queues up behind it.
 
 ## What happens if it crashes mid-job?
 

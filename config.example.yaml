@@ -46,18 +46,38 @@ behavior:
   retention_days: 7          # how long a replaced original survives; 0 = remove at once
   initial_delay_seconds: 300 # let Immich finish thumbnails/ML/OCR before touching an asset
 
-  min_size_bytes: 20971520   # 20 MiB — below this the effort is not worth it
+  # How many bytes a job has to actually save. Replaces the old `min_size_bytes`, which
+  # guessed from the input size; this measures the outcome. It doubles as the free
+  # pre-download filter: a file cannot save more bytes than it has, so an asset smaller
+  # than this is rejected before the download, with no heuristic involved.
+  min_savings_bytes: 1048576 # 1 MiB
   max_ratio: 0.6             # reject the result unless it is <= 60 % of the original
-  enabled_types: [VIDEO]     # add IMAGE to compress stills too
+  enabled_types: [VIDEO, IMAGE]  # drop IMAGE to leave stills alone
   skip_if_named_people: true # never risk losing manually named faces
+
+  # What happens when the post-encode metadata diff finds a tag the copy did not carry.
+  # Stills lose ALL metadata on re-encode and get it back from an exiftool copy, so this
+  # is the gate that proves the copy worked.
+  #   strict — the job fails and the original is never touched (required with
+  #            delete_mode: permanent, which the startup validation enforces)
+  #   warn   — logged only; for the first days on unfamiliar camera material, and only
+  #            defensible while delete_mode is 'trash' and the delete can be undone
+  metadata_verify: strict
 
 log_level: INFO
 
 # presets:
-#   Leave this out and the service builds the preset for you from the detected hardware.
+#   Leave this out and the service builds the presets for you from the detected hardware —
+#   an HEVC recipe for video and the ImageMagick JPEG recipe for stills.
 #   Write it and it wins over everything: detection is skipped entirely, and `hardware.mode`
 #   and `behavior.quality` no longer apply. That is what makes an upgrade from a
 #   hand-written 1.0.0 config a no-op.
 #
-#   `immich-compressor hardware` prints the exact command it would use, ready to paste.
-#   The commented GPU presets that used to live here are in docs/hardware.md now.
+#   `immich-compressor hardware` prints the exact commands it would use, ready to paste.
+#   The commented GPU presets that used to live here are in docs/hardware.md now, together
+#   with the stills preset and the reason for every flag in it.
+#
+#   The stills preset carries a format allowlist (`match.extensions`), and it is not
+#   optional: Immich files RAW, PNG, GIF, TIFF and WebP under type IMAGE exactly like
+#   JPEG, and ImageMagick reads DNG/CR2/CR3/NEF/ARW through libraw. Without the list a RAW
+#   would be developed into an 8-bit JPEG, pass every sanity check, and lose its original.

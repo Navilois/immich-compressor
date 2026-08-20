@@ -232,6 +232,15 @@ class SkipReason(StrEnum):
     TRASHED = "trashed"
     NO_PRESET = "no_preset"
     DRY_RUN = "dry_run"
+    # The asset type is enabled, but no preset accepts this file extension. Distinct from
+    # NO_PRESET, which means no preset covers the type at all.
+    UNSUPPORTED_FORMAT = "unsupported_format"
+    # A still that carries a second payload the encoder would silently drop — a Samsung or
+    # Google motion photo, whose video hangs behind the JPEG's end-of-image marker.
+    EMBEDDED_MEDIA = "embedded_media"
+    # The source is already compressed at or below the preset's target quality, so a
+    # re-encode would cost a generation of quantisation error for no gain.
+    SOURCE_QUALITY = "source_quality"
 
 
 TERMINAL_STATES: frozenset[JobState] = frozenset({JobState.DONE, JobState.SKIPPED, JobState.FAILED})
@@ -245,6 +254,8 @@ class Job(BaseModel):
     source_asset_id: str
     state: JobState = JobState.QUEUED
     skip_reason: SkipReason | None = None
+    # Which worker lane owns this job. NULL on rows written before the column existed.
+    asset_type: str | None = None
     new_asset_id: str | None = None
     # Base64 SHA-1 of the file we uploaded, kept so the sweeper can still verify the
     # replacement hours later, long after the local output file is gone.

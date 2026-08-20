@@ -123,8 +123,8 @@ makes anything already recorded permanently immune, in *any* state including `sk
 Assets it has never seen have no such protection — and that is the whole library until you
 have worked through it.
 
-- With `dry_run: false`, one click starts compressing every asset over `min_size_bytes`,
-  one at a time, until the disk runs out.
+- With `dry_run: false`, one click starts compressing every asset that could save
+  `min_savings_bytes`, one at a time, until the disk runs out.
 - With `dry_run: true`, the same click records them all as `skipped: dry_run`. They are
   immune from then on, so clearing the dry run later will never pick them up. Recoverable
   with `requeue --reason dry_run --apply` — but only if you notice.
