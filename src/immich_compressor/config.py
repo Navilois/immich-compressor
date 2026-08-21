@@ -180,6 +180,9 @@ class BehaviorSettings(BaseModel):
     # Sanity gate tolerances.
     duration_tolerance_s: float = Field(default=0.5, ge=0)
     require_same_resolution: bool = True
+    # Compared against the source: the gate fails a re-encode that *lost* the capture date,
+    # not one whose source never had it. A clip with no `creation_time` — a screen
+    # recording, a messenger video, a drone export — is judged on everything else.
     require_date_time_original: bool = True
 
     work_dir: Path = Path("/var/tmp/immich-compressor")  # noqa: S108 - configurable, not a fixed tmp path
@@ -605,6 +608,20 @@ def resolve_hardware(settings: Settings) -> Settings:
     for candidate in report.rejected:
         logger.info("  not using %s: %s", candidate.where(), candidate.reason)
     return resolved
+
+
+def workflow_file_pattern(marker: str) -> str:
+    """The ``assetFileFilter`` regex that keeps a compressed upload from re-triggering.
+
+    A negative lookahead, because ``assetFileFilter`` has no ``inverse`` option — verified
+    on v3.1.0, where without it the compressed upload fires the workflow again.
+
+    Built in one place because the marker lives in three that nobody ever sees together:
+    ``behavior.compressed_marker`` here, the workflow inside Immich, and the filename the
+    encoder writes. Only two of them are in this repository's reach.
+    """
+    escaped = marker.replace(".", "\\.")
+    return f"^(?!.*{escaped}\\.).*$"
 
 
 def warn_about_permanent_deletion(behavior: BehaviorSettings) -> None:

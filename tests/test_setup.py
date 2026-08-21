@@ -185,6 +185,29 @@ def test_workflow_creation_prefers_a_session_token() -> None:
 
 
 @respx.mock
+def test_workflow_creation_prefers_a_throwaway_key_over_a_session_token() -> None:
+    """A session token carries the user's *full* access; a key scoped to `workflow.create`
+    carries one permission. When both are offered the narrower one wins."""
+    captured: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.headers)
+        return httpx.Response(201, json={"id": "wf-2", "steps": []})
+
+    respx.post(f"{BASE}/workflows").mock(side_effect=handler)
+    ok, _ = create_workflow(
+        BASE,
+        workflow_json(webhook_url="http://x", token="t"),
+        api_key="service-key",
+        session_token="sess",
+        workflow_key="throwaway",
+    )
+    assert ok is True
+    assert captured[0]["x-api-key"] == "throwaway"
+    assert "authorization" not in captured[0]
+
+
+@respx.mock
 def test_a_forbidden_workflow_create_says_which_permission_is_missing() -> None:
     respx.post(f"{BASE}/workflows").mock(return_value=httpx.Response(403))
     ok, detail = create_workflow(
@@ -385,6 +408,23 @@ def test_the_workflow_json_is_never_world_readable(tmp_path: Path, capsys) -> No
     assert "delete immich-workflow.json" in out
 
 
+@respx.mock
+def test_the_throwaway_workflow_key_is_never_written_anywhere(tmp_path: Path, capsys) -> None:
+    """It exists for exactly one request. Writing it down would turn a deliberately
+    short-lived credential into a second long-lived one sitting next to the first."""
+    _mock_server()
+
+    assert run_setup(_options(tmp_path, workflow_key="throwaway-workflow-key")) == 0
+
+    written = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert written, "setup must have written something for this test to mean anything"
+    for path in written:
+        assert "throwaway-workflow-key" not in path.read_text(encoding="utf-8"), path
+    # And the user is told to get rid of it, because setup cannot: deleting a key needs a
+    # permission this one deliberately does not have.
+    assert "delete that API key in Immich now" in capsys.readouterr().out
+
+
 def test_the_workflow_json_is_gitignored() -> None:
     """git status must not offer to stage the file the shared webhook token lives in."""
     root = Path(__file__).resolve().parent.parent
@@ -578,8 +618,10 @@ def test_every_flag_env_example_documents_is_one_compose_passes_through() -> Non
     that the compose file passed on to nobody, so a deployment that went live through `.env`
     silently stayed in dry run.
     """
+    # The `BEHAVIOR__` flags and TZ: the names `.env.example` shows commented out because
+    # leaving them unset is meaningful, which is exactly what a bare pass-through means.
     documented = set(
-        re.findall(r"^# (BEHAVIOR__\w+)=", (REPO / ".env.example").read_text(encoding="utf-8"), re.M)
+        re.findall(r"^# (BEHAVIOR__\w+|TZ)=", (REPO / ".env.example").read_text(encoding="utf-8"), re.M)
     )
     service = yaml.safe_load((REPO / "docker-compose.yaml").read_text(encoding="utf-8"))["services"]
     environment = service["immich-compressor"]["environment"]
@@ -588,5 +630,115 @@ def test_every_flag_env_example_documents_is_one_compose_passes_through() -> Non
     # compose file supplies itself, which is a different thing.
     passed = {e for e in environment if "=" not in e}
 
-    assert documented, "the flags are commented examples in .env.example; keep them there"
+    assert documented, "these are commented examples in .env.example; keep them there"
     assert documented == passed
+
+
+def test_quickstart_hands_the_api_key_to_the_container() -> None:
+    """`setup` tells you to export IMMICH_API_KEY. The script has to pass it on.
+
+    Without `-e IMMICH_API_KEY` the advice points straight back into the dead end the
+    reader is already standing in: the variable is set on the host, and the container
+    that prints the message cannot see it. Reproduced against 1.1.1.
+    """
+    script = (REPO / "scripts" / "quickstart.sh").read_text(encoding="utf-8")
+    setup_source = (REPO / "src" / "immich_compressor" / "setup_cmd.py").read_text(encoding="utf-8")
+
+    assert "IMMICH_API_KEY in the environment" in setup_source, "the message this test guards"
+    assert re.search(r"^\s*-e IMMICH_API_KEY\b", script, re.M)
+
+
+def test_quickstart_does_not_repeat_what_setup_already_printed() -> None:
+    """One closing block, not two. `set -e` means the script only reaches its own tail
+    after a successful setup, and `run_setup` has already printed the same three commands
+    by then — a second copy reads like something went wrong."""
+    script = (REPO / "scripts" / "quickstart.sh").read_text(encoding="utf-8")
+
+    assert "==> Next" not in script
+    assert "docker compose up -d" not in script
+
+
+@respx.mock
+def test_the_generated_env_offers_the_sizing_knobs(tmp_path: Path) -> None:
+    """`.env.example` documents COMPRESSOR_CPUS and COMPRESSOR_MEMORY, and nobody who takes
+    the documented route ever opens it — `setup` writes them a real `.env`, and a template
+    stops being read the moment a real file exists."""
+    _mock_server()
+    assert run_setup(_options(tmp_path)) == 0
+
+    body = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert re.search(r"^# COMPRESSOR_CPUS=\d+$", body, re.M)
+    assert re.search(r"^# COMPRESSOR_MEMORY=\S+$", body, re.M)
+    # Inert: commented out, so the shipped defaults still stand.
+    assert not re.search(r"^COMPRESSOR_CPUS=", body, re.M)
+    # And the question the two mechanisms raise is answered where they are offered.
+    assert "docker-compose.override.yaml beat COMPRESSOR_CPUS" in body
+
+
+def test_a_value_already_set_is_not_offered_again(tmp_path: Path) -> None:
+    """Somebody who uncommented the line must not find a commented copy underneath it."""
+    body = render_env({"COMPRESSOR_CPUS": "6"}, suggested={"COMPRESSOR_CPUS": "2", "COMPRESSOR_MEMORY": "2g"})
+    assert "COMPRESSOR_CPUS=6" in body
+    assert "# COMPRESSOR_CPUS=" not in body
+    assert "# COMPRESSOR_MEMORY=2g" in body
+
+
+@respx.mock
+def test_a_granted_asset_delete_is_pointed_out(tmp_path: Path, capsys) -> None:
+    """The quickstart says to leave it out for the first run, because without it the
+    service physically cannot remove an original. Granted anyway it printed an `ok` in the
+    same shape as every other permission, and the guarantee went away unannounced."""
+    _mock_server()
+    assert run_setup(_options(tmp_path)) == 0
+
+    out = capsys.readouterr().out
+    assert "asset.delete is granted" in out
+    assert "from stage 3 on" in out
+
+
+@respx.mock
+def test_the_container_gets_the_hosts_timezone_when_the_host_has_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Immich's compose file hands its containers TZ; this one had neither TZ nor
+    /etc/localtime, so the two logged two hours apart — while troubleshooting.md asks
+    people to correlate them line by line."""
+    _mock_server()
+    monkeypatch.setenv("TZ", "Europe/Vienna")
+
+    assert run_setup(_options(tmp_path)) == 0
+    assert "TZ=Europe/Vienna" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+@respx.mock
+def test_a_host_without_a_timezone_is_offered_the_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_server()
+    monkeypatch.delenv("TZ", raising=False)
+
+    assert run_setup(_options(tmp_path)) == 0
+
+    body = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert re.search(r"^# TZ=", body, re.M)
+    assert "Copy the value from" in body or "copy the value from" in body
+
+
+def test_a_backup_of_env_is_ignored_too() -> None:
+    """The entry was the bare name. Everything beside it was committable: `.env.bak` from a
+    `setup --force`, `.env.local`, `.env.prod` — each carrying the same API key and the
+    same webhook token as the original. It happened during the audit.
+
+    Read out of the file rather than measured with `git check-ignore`: the test containers
+    are `python:3.x-slim`, which carries no git binary, and a test that skips itself where
+    it cannot run is exactly how the encoder tests went unnoticed for a whole release.
+    """
+    lines = [
+        stripped
+        for line in (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+    ]
+
+    assert ".env*" in lines, "the glob: .env.bak and .env.local carry the same secrets as .env"
+    assert ".env" not in lines, "the bare entry is the narrow one the glob replaced"
+    assert "!.env.example" in lines, "the template stays tracked, or a fresh clone has none"

@@ -72,7 +72,7 @@ and an `exifInfo` object.
 | Delete | `DELETE /assets` `{ids, force}` | `force: false` → trash |
 | Restore | `POST /trash/restore/assets` `{ids}` | |
 | Detail | `GET /assets/{id}` | For the people check, the checksum and the live field values |
-| Backfill | `POST /search/large-assets` `{minFileSize, type, size, page, withExif}` | Optional, CLI only |
+| Backfill | `POST /search/large-assets` `{minFileSize, type, size, page, withExif}` | Optional, CLI only. **`type` and `size` are ignored** — see [15](#15-post-searchlarge-assets-ignores-type-and-size) |
 
 ## API key permissions
 
@@ -231,3 +231,21 @@ Never diagnose from the Immich side alone. Related: if a workflow stops firing, 
 `immich-server` — execution was observed going quiet after a workflow run threw
 `NoResultError`, triggered by an asset being hard-deleted while its workflow was executing.
 A restart cleared it.
+
+### 15. `POST /search/large-assets` ignores `type` and `size`
+
+Measured on v3.1.0, on a library of 48 958 photos and 4 717 videos:
+
+| Request | Answer |
+|---|---|
+| `{minFileSize: 1048576, type: "VIDEO", size: 5}` | 250 items, all `.mp4` |
+| `{minFileSize: 1048576, type: "IMAGE", size: 5}` | the **same** 250 items, all `.mp4` |
+
+Both fields are accepted and neither is applied. The consequence is worse than it looks:
+without a client-side check, `backfill --type IMAGE` does not merely return nothing useful,
+it queues *videos* — so the stills backfill is unreachable, and anybody who believes they
+are testing 50 photos re-encodes 50 videos. Harmless while `dry_run` is on; not harmless
+from [stage 3](safety.md#stage-3--move-originals-to-the-trash).
+
+`backfill` therefore filters on `item["type"]` itself and says how many foreign-type
+results it discarded, rather than reporting an empty run that looks like an empty library.

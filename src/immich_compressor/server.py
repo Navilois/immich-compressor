@@ -25,15 +25,28 @@ from pydantic import BaseModel
 
 from . import __version__
 from .api import ImmichClient
-from .config import Settings, load_settings, warn_about_permanent_deletion
+from .config import Settings, load_settings, warn_about_permanent_deletion, workflow_file_pattern
 from .encoder import probe_hardware_encoder
 from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from .metrics import render as render_metrics
 from .models import JobState, RejectReason, WebhookPayload
 from .pipeline import SurgeDetector, WebhookRejected, Worker, check_ingest_guards
-from .store import JobStore
+from .store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 logger = logging.getLogger(__name__)
+
+
+def _token_fingerprint(value: str) -> str:
+    """Enough of a token to recognise, not enough to use.
+
+    Six of 64 hex characters is exactly what separates the two ways this goes wrong in
+    practice — a paste that was cut short, and a token left over from an earlier
+    installation — and it leaves the remaining 58 untouched. The log already carries asset
+    ids and file paths; this is not the line that changes its sensitivity.
+    """
+    if not value:
+        return "no token at all"
+    return f"{len(value)} characters starting {value[:6]}"
 
 
 class EnqueueResponse(BaseModel):
@@ -93,6 +106,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             connect_timeout_s=resolved.immich.connect_timeout_s,
         )
         warn_about_permanent_deletion(resolved.behavior)
+        # The marker couples three things nobody ever sees side by side: this setting, the
+        # filename the encoder writes, and the workflow's `assetFileFilter` regex — which
+        # lives inside Immich, out of reach of any validation here. Printing the expected
+        # pattern once at startup is what makes the comparison possible at all.
+        logger.info(
+            "compressed marker %r: the workflow's assetFileFilter pattern must be %s",
+            resolved.behavior.compressed_marker,
+            workflow_file_pattern(resolved.behavior.compressed_marker),
+        )
         await _warn_about_unusable_hardware(resolved)
         worker = Worker(resolved, client, store)
         app.state.settings = resolved
@@ -135,22 +157,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.error("rejected %s %s with 422: %s", request.method, request.url.path, exc.errors())
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
 
-    async def verify_token(request: Request) -> None:
-        """Constant-time comparison of the workflow's single configurable header."""
+    async def _verify_token(request: Request, *, count: bool) -> None:
+        """Constant-time comparison of the workflow's single configurable header.
+
+        ``count`` is on for the webhook routes only. A token mismatch there is the one
+        failure in this architecture that leaves no other trace anywhere: Immich discards
+        the response and logs the workflow as executed successfully, no job row is written,
+        and every surface a user would consult — `check`, `report`, `/healthz` — looks
+        exactly like a healthy installation with nothing to do yet. The counters are what
+        turn that into a sentence somebody can read.
+        """
         expected = resolved.webhook.token.get_secret_value()
         presented = request.headers.get(resolved.webhook.header_name, "")
+        store: JobStore | None = getattr(request.app.state, "store", None)
         if not presented or not hmac.compare_digest(presented, expected):
+            if count and store is not None:
+                await store.bump_counter(WEBHOOKS_REJECTED)
             logger.warning(
-                "rejected webhook from %s: bad or missing shared secret",
+                "rejected webhook from %s: bad or missing shared secret. Immich sent %s in "
+                "%s, this service expects %s — the workflow's headerValue and WEBHOOK__TOKEN "
+                "must be equal (docs/workflow-setup.md)",
                 request.client.host if request.client else "unknown",
+                _token_fingerprint(presented),
+                resolved.webhook.header_name,
+                _token_fingerprint(expected),
             )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
+        if count and store is not None:
+            await store.bump_counter(WEBHOOKS_RECEIVED)
+
+    async def verify_token(request: Request) -> None:
+        """The shared secret on the maintenance routes, which are not webhooks."""
+        await _verify_token(request, count=False)
+
+    async def verify_webhook_token(request: Request) -> None:
+        await _verify_token(request, count=True)
 
     @app.post(
         "/webhook",
         response_model=EnqueueResponse,
         status_code=status.HTTP_202_ACCEPTED,
-        dependencies=[Depends(verify_token)],
+        dependencies=[Depends(verify_webhook_token)],
     )
     async def webhook(request: Request, payload: WebhookPayload) -> EnqueueResponse:
         store: JobStore = request.app.state.store
@@ -223,7 +270,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/webhook",
         response_model=EnqueueResponse,
         status_code=status.HTTP_202_ACCEPTED,
-        dependencies=[Depends(verify_token)],
+        dependencies=[Depends(verify_webhook_token)],
     )
     async def webhook_put(request: Request, payload: WebhookPayload) -> EnqueueResponse:
         return await webhook(request, payload)
@@ -258,6 +305,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = await store.stats()
         latched = await store.pause_state()
         body["paused"] = {"since": latched.since.isoformat(), "reason": latched.reason} if latched else None
+        # First thing to read when nothing is happening: "0 received, 7 rejected" is a
+        # different problem from "0 received, 0 rejected", and neither is visible anywhere
+        # else. Persisted, so these survive a restart.
+        counters = await store.counters()
+        body["webhooks"] = {
+            "received": counters[WEBHOOKS_RECEIVED],
+            "rejected": counters[WEBHOOKS_REJECTED],
+        }
         body["session"] = {
             "processed": worker.pipeline.stats.processed,
             "skipped": worker.pipeline.stats.skipped,
@@ -291,6 +346,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stats = worker.pipeline.stats
         body = render_metrics(
             store_stats=await store.stats(),
+            counters=await store.counters(),
             session={
                 "processed": stats.processed,
                 "skipped": stats.skipped,

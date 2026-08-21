@@ -10,6 +10,8 @@ import pytest
 from immich_compressor.config import BehaviorSettings, ConfigError, Preset
 from immich_compressor.encoder import (
     EncodeError,
+    EncodeResult,
+    MediaProbe,
     _trailer_bytes,
     check_sanity,
     compressed_filename,
@@ -851,3 +853,81 @@ async def test_sanity_rejects_a_result_below_min_savings(tmp_path: Path) -> None
     )
     assert not sanity.ok
     assert any("min_savings_bytes" in failure for failure in sanity.failures)
+
+
+# ------------------------------------------------------------------- the capture date
+
+
+def _probe_of(**overrides: object) -> MediaProbe:
+    """A probe of an ordinary 1080p clip, with the one field under test swapped."""
+    fields: dict[str, object] = {
+        "width": 1920,
+        "height": 1080,
+        "duration_s": 10.0,
+        "video_streams": 1,
+        "audio_streams": 1,
+        "has_date_time_original": True,
+    }
+    return MediaProbe(**{**fields, **overrides})  # type: ignore[arg-type]
+
+
+def _result_of(output_probe: MediaProbe) -> EncodeResult:
+    """A result that clears every other gate: a real 0.2 ratio on a 10 MB source."""
+    return EncodeResult(
+        output_path=Path("/nonexistent/out.mp4"),
+        orig_bytes=10_000_000,
+        new_bytes=2_000_000,
+        probe=output_probe,
+        checksum="c2hh",
+    )
+
+
+async def test_the_capture_date_gate_fires_when_the_encode_loses_the_date(
+    behavior: BehaviorSettings, h265_preset: Preset
+) -> None:
+    """The loss the gate exists for: the source had a capture date, the output does not."""
+    sanity = await check_sanity(
+        source=Path("/nonexistent/in.mp4"),
+        result=_result_of(_probe_of(has_date_time_original=False)),
+        source_probe=_probe_of(has_date_time_original=True),
+        behavior=behavior,
+        preset=h265_preset,
+        is_video=True,
+    )
+    assert not sanity.ok
+    assert any("lost the capture date" in failure for failure in sanity.failures)
+
+
+async def test_a_source_without_a_capture_date_is_judged_on_everything_else(
+    behavior: BehaviorSettings, h265_preset: Preset
+) -> None:
+    """A clip that never had a `creation_time` could not pass this gate at any quality.
+
+    That is every screen recording, messenger video, drone export and cut file in a
+    library — and the failure pointed at the *output*, so the search for the cause started
+    in the encoder. An output cannot lose what the input never carried.
+    """
+    sanity = await check_sanity(
+        source=Path("/nonexistent/screen-recording.mp4"),
+        result=_result_of(_probe_of(has_date_time_original=False)),
+        source_probe=_probe_of(has_date_time_original=False),
+        behavior=behavior,
+        preset=h265_preset,
+        is_video=True,
+    )
+    assert sanity.ok, sanity.reason()
+
+
+async def test_the_capture_date_gate_still_answers_to_its_setting(
+    behavior: BehaviorSettings, h265_preset: Preset
+) -> None:
+    """`require_date_time_original: false` turns the check off, source or no source."""
+    sanity = await check_sanity(
+        source=Path("/nonexistent/in.mp4"),
+        result=_result_of(_probe_of(has_date_time_original=False)),
+        source_probe=_probe_of(has_date_time_original=True),
+        behavior=behavior.model_copy(update={"require_date_time_original": False}),
+        preset=h265_preset,
+        is_video=True,
+    )
+    assert sanity.ok, sanity.reason()

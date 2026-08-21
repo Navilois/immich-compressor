@@ -5,8 +5,8 @@
 #   cd immich-compressor
 #   ./scripts/quickstart.sh
 #
-# Deliberately NOT a `curl | bash` installer. Read it first — it is 60 lines and it runs
-# on your photo library's machine.
+# Deliberately NOT a `curl | bash` installer. Read it first — it is short, and it runs on
+# your photo library's machine.
 #
 # What it does:
 #   1. pulls ghcr.io/navilois/immich-compressor:1
@@ -14,7 +14,7 @@
 #      so it can reach the server by name, with this directory mounted so the generated
 #      config.yaml and .env land here, and with /dev/dri passed through when the host has
 #      it so hardware detection tests the real GPU
-#   3. prints the three commands that start the service
+#   3. leaves the rest to `setup`, which ends with the commands that start the service
 #
 # Set NETWORK if your Immich stack does not use the default network name:
 #
@@ -77,21 +77,18 @@ fi
 
 echo "==> Running setup"
 # --network comes before "$@" so anything the caller passes still wins.
+# `-e NAME` with no value passes the variable through only when the host actually has it
+# set, so an unset key still reaches setup's own prompt. IMMICH_API_KEY is the variable
+# setup's own error message tells you to export, and without this line that advice sent
+# you straight back into the dead end you were already standing in. TZ puts the container's
+# log timestamps on the same clock as Immich's, which is what makes the two comparable.
 docker run --rm "${tty_args[@]}" "${gpu_args[@]}" "${net_args[@]}" \
   --user "$(id -u):$(id -g)" \
+  -e IMMICH_API_KEY \
+  -e TZ \
   -v "$PROJECT_DIR:/work" \
   -w /work \
   "$IMAGE" setup --network "$NETWORK" "$@"
 
-cat <<'NEXT'
-
-==> Next
-
-  docker compose up -d
-  docker compose logs -f immich-compressor
-  docker compose exec immich-compressor immich-compressor report
-
-The service starts in dry-run mode: it reports what it *would* compress and changes
-nothing at all. docs/safety.md walks through going live in four stages, and
-docs/workflow-setup.md covers the Immich side if setup could not create the workflow.
-NEXT
+# Nothing is printed after this on purpose: `setup` ends with its own numbered "Next"
+# block, and a second copy of the same three commands read like something had gone wrong.

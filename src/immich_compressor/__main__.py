@@ -1,4 +1,9 @@
-"""CLI: ``serve``, ``check``, ``encode``, ``report``, ``reprocess``, ``requeue``, ``backfill``."""
+"""The command line: one function per subcommand, and the parser that wires them up.
+
+The user-facing description is :data:`_DESCRIPTION` rather than this docstring. A module
+docstring is written for whoever opens the file; it went out through ``--help`` verbatim
+once, RST backticks and all, listing seven of the twelve commands.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,16 +39,21 @@ from .setup_cmd import (
     SetupOptions,
     run_setup,
 )
-from .store import JobStore
+from .store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 logger = logging.getLogger("immich_compressor")
 
 
 def _configure_logging(level: str) -> None:
+    resolved = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=resolved,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    # `basicConfig` configures the root logger once and is a no-op on every later call,
+    # level included. `serve` calls this twice on purpose — see `cmd_serve` — so the level
+    # is set here rather than left to whichever call happened to come first.
+    logging.getLogger().setLevel(resolved)
 
 
 def _load(args: argparse.Namespace, *, require_secrets: bool = True, autodetect: bool = True) -> Settings:
@@ -61,6 +72,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     from .server import create_app
 
+    # Logging first, settings second. Loading the settings is what runs hardware
+    # detection, and detection logs the encoder it picked along with the reason every
+    # other candidate was rejected — the explanation docs/quickstart.md points at. With no
+    # handler configured yet those lines went out through `logging.lastResort`, which
+    # drops everything below WARNING, so the whole explanation was discarded on every
+    # single start and the log opened on a preset probe with no "why" anywhere near it.
+    #
+    # LOG_LEVEL is read straight from the environment because the settings that would
+    # carry it are precisely what has not been loaded yet.
+    _configure_logging(os.environ.get("LOG_LEVEL", "INFO"))
     settings = _load(args)
     _configure_logging(settings.log_level)
     logger.info(
@@ -81,6 +102,40 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _webhook_summary(counters: dict[str, int]) -> list[str]:
+    """The line that separates "nothing has happened yet" from "nothing can happen".
+
+    A shared secret that does not match leaves no other trace anywhere. Immich discards the
+    401 and logs the workflow as executed successfully, no job row is written, and every
+    other line of `check` and `report` reads exactly like a healthy installation with an
+    empty queue. Without this the only evidence is one WARNING in the container log, which
+    only somebody already running `logs -f` will ever see.
+    """
+    received = counters.get(WEBHOOKS_RECEIVED, 0)
+    rejected = counters.get(WEBHOOKS_REJECTED, 0)
+    lines = [f"webhooks: {received} received, {rejected} rejected (bad or missing token)"]
+    if rejected and not received:
+        lines.append(
+            "  not one webhook has been accepted: the workflow's `headerValue` and "
+            "WEBHOOK__TOKEN disagree — see docs/workflow-setup.md"
+        )
+    elif rejected:
+        lines.append("  some were refused; the container log names the token that arrived")
+    return lines
+
+
+async def _webhook_lines(settings: Settings) -> list[str]:
+    """Read the counters, but never create the database just to report on it.
+
+    `check` is meant to be usable before anything has run, and on a host where the state
+    directory may not exist or may not be writable.
+    """
+    if not settings.database_path.is_file():
+        return []
+    async with JobStore(settings.database_path) as store:
+        return _webhook_summary(await store.counters())
+
+
 async def _check(settings: Settings) -> int:
     async with ImmichClient(
         settings.immich.base_url,
@@ -91,6 +146,8 @@ async def _check(settings: Settings) -> int:
     print(f"Immich reachable, version {version}")
     print(f"presets: {', '.join(f'{p.name}({p.match_type})' for p in settings.presets) or 'none'}")
     print(f"dry_run={settings.behavior.dry_run} trash_original={settings.behavior.trash_original}")
+    for line in await _webhook_lines(settings):
+        print(line)
     return 0
 
 
@@ -142,6 +199,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             base_url=args.url,
             api_key=args.api_key or "",
             session_token=args.session_token,
+            workflow_key=args.workflow_key,
             network=args.network,
             webhook_url=args.webhook_url,
             directory=Path(args.directory),
@@ -257,8 +315,13 @@ async def _report(settings: Settings, as_json: bool) -> int:
         stats = await store.stats()
         jobs = await store.list_jobs(limit=1000)
         latched = await store.pause_state()
+        counters = await store.counters()
     if as_json:
         stats["paused"] = {"since": latched.since.isoformat(), "reason": latched.reason} if latched else None
+        stats["webhooks"] = {
+            "received": counters[WEBHOOKS_RECEIVED],
+            "rejected": counters[WEBHOOKS_REJECTED],
+        }
         print(json.dumps(stats, indent=2))
         return 0
     print("=== immich-compressor report ===")
@@ -268,6 +331,10 @@ async def _report(settings: Settings, as_json: bool) -> int:
     if latched is not None:
         print(f"PAUSED since {latched.since.isoformat()}: {latched.reason}")
         print("  nothing is queued, processed or deleted — `immich-compressor resume --apply`")
+    # Above the job counts, because "0 received, 7 rejected" is the explanation for every
+    # zero underneath it.
+    for line in _webhook_summary(counters):
+        print(line)
     print(f"jobs total: {stats['total']}")
     for state, count in sorted(stats["by_state"].items()):
         print(f"  {state:16s} {count}")
@@ -277,7 +344,10 @@ async def _report(settings: Settings, as_json: bool) -> int:
             print(f"  {reason:20s} {count}")
     saved_mb = stats["saved_bytes"] / (1024 * 1024)
     print(f"compressed assets: {stats['compressed_assets']}")
-    print(f"saved: {saved_mb:.1f} MiB (average ratio {stats['average_ratio']})")
+    # `average_ratio` is None until something has been compressed, and Python's None is not
+    # a word to show a user — least of all in the first command the quickstart runs.
+    ratio = stats["average_ratio"]
+    print(f"saved: {saved_mb:.1f} MiB (average ratio {ratio if ratio is not None else '—'})")
     failed = [job for job in jobs if job.state == JobState.FAILED]
     if failed:
         print(f"failed jobs ({len(failed)}):")
@@ -292,12 +362,66 @@ def cmd_report(args: argparse.Namespace) -> int:
     return asyncio.run(_report(settings, args.json))
 
 
+async def _jobs(settings: Settings, status: str | None, limit: int, as_json: bool) -> int:
+    """What `GET /jobs` answers, without needing a published port or an HTTP client.
+
+    The documented route to `last_error` was `curl 'localhost:8080/jobs?status=failed'`,
+    which runs nowhere in a default install: no port is published, and the image ships
+    neither curl nor wget. `docker compose exec` is how every other command is reached, so
+    this one goes there too.
+    """
+    state: JobState | None = None
+    if status is not None:
+        # The parser already restricts `--status` to the known states; this is the same
+        # check for anything that calls the function directly, which must not see a
+        # ValueError come out of a reporting command.
+        try:
+            state = JobState(status)
+        except ValueError:
+            known = ", ".join(member.value for member in JobState)
+            print(f"unknown status {status!r} — one of: {known}", file=sys.stderr)
+            return 2
+    async with JobStore(settings.database_path) as store:
+        # Clamped like `GET /jobs` does it. SQLite reads a negative LIMIT as "no limit",
+        # so `--limit -1` would quietly dump the whole table.
+        found = await store.list_jobs(state=state, limit=min(max(limit, 1), 1000))
+
+    if as_json:
+        print(json.dumps([job.model_dump(mode="json", exclude={"payload"}) for job in found], indent=2))
+        return 0
+    if not found:
+        print(f"no jobs in state {status}" if status else "no jobs")
+        return 0
+    for job in found:
+        print(f"{job.source_asset_id}  {job.state.value:<15s} {job.updated_at.isoformat(timespec='seconds')}")
+        if job.skip_reason is not None:
+            print(f"    skipped: {job.skip_reason.value}")
+        if job.last_error:
+            print(f"    error: {job.last_error}")
+    print(f"\n{len(found)} job(s)" + (f" in state {status}" if status else ""))
+    return 0
+
+
+def cmd_jobs(args: argparse.Namespace) -> int:
+    settings = _load(args)
+    _configure_logging("WARNING")
+    return asyncio.run(_jobs(settings, args.status, args.limit, args.json))
+
+
 async def _reprocess(settings: Settings, asset_id: str) -> int:
     async with JobStore(settings.database_path) as store:
         if await store.reset(asset_id):
             print(f"{asset_id} re-queued")
             return 0
+    # The name reads like "process this asset"; it means "re-queue a job I already have".
+    # Somebody reaching for it on an asset the webhook never delivered needs the other
+    # command, and this is the moment they need to hear about it.
     print(f"{asset_id} is not in the store", file=sys.stderr)
+    print(
+        "  no webhook ever arrived for it. `backfill` is the way in for assets that are "
+        "already in the library",
+        file=sys.stderr,
+    )
     return 1
 
 
@@ -357,9 +481,18 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 
 async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool) -> int:
-    """Queue existing large assets, as if a webhook had arrived for each."""
+    """Queue existing large assets, as if a webhook had arrived for each.
+
+    The type filter is applied here rather than trusted to the server. Measured against a
+    live v3.1.0: ``POST /search/large-assets`` ignores the ``type`` field in the request
+    body — ``IMAGE`` and ``VIDEO`` answer with the identical set of videos — and ignores
+    ``size`` as well. Without a client-side check the stills backfill is not merely broken
+    but unreachable, and anybody who thinks they are testing 50 photos re-encodes 50
+    videos instead. Harmless in stage 1; not harmless from stage 3 on.
+    """
     queued = 0
     seen = 0
+    foreign = 0
     async with (
         ImmichClient(
             settings.immich.base_url,
@@ -373,9 +506,12 @@ async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool
             asset_type=asset_type,
             size=min(limit, 200),
         ):
-            seen += 1
-            if seen > limit:
+            if item.get("type") != asset_type:
+                foreign += 1
+                continue
+            if seen >= limit:
                 break
+            seen += 1
             asset_id = item.get("id")
             if not asset_id:
                 continue
@@ -390,6 +526,13 @@ async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool
             if await store.enqueue(asset_id, payload, delay_seconds=0):
                 queued += 1
     print(f"scanned {seen} assets, queued {queued}" + ("" if apply else " (dry run — pass --apply)"))
+    # Said out loud, because silence here looks like an empty library rather than a filter
+    # the server declined to apply.
+    if foreign:
+        print(
+            f"  ignored {foreign} result(s) that were not {asset_type}: this Immich answers "
+            "/search/large-assets without applying the type filter"
+        )
     return 0
 
 
@@ -452,8 +595,17 @@ def cmd_restore(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------------------- parser
 
 
+# What a user reads at the top of `--help`. Kept short: the subcommand list underneath is
+# generated and complete, so this only has to say what the thing is and where to start.
+_DESCRIPTION = (
+    "Out-of-band recompression for Immich, driven by a workflow webhook. "
+    "Start with `setup`, then `check` and `hardware`; `report` and `jobs` tell you what "
+    "happened, and `restore` and `resume` are what you reach for when something went wrong."
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="immich-compressor", description=__doc__)
+    parser = argparse.ArgumentParser(prog="immich-compressor", description=_DESCRIPTION)
     parser.add_argument("--version", action="version", version=f"immich-compressor {__version__}")
     parser.add_argument("-c", "--config", help="path to config.yaml (default: $COMPRESSOR_CONFIG)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -470,6 +622,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--api-key", help="Immich API key (or set IMMICH_API_KEY)")
     setup_parser.add_argument(
         "--session-token", help="browser session token, used only to create the workflow"
+    )
+    setup_parser.add_argument(
+        "--workflow-key",
+        help="throwaway API key with only workflow.create; used once, never stored",
     )
     setup_parser.add_argument(
         "--network", default=DEFAULT_NETWORK, help="docker network your Immich stack uses"
@@ -498,9 +654,17 @@ def build_parser() -> argparse.ArgumentParser:
     encode_parser.add_argument("--type", default="VIDEO", choices=["VIDEO", "IMAGE", "AUDIO", "OTHER"])
     encode_parser.set_defaults(func=cmd_encode)
 
-    report_parser = sub.add_parser("report", help="print job statistics")
+    report_parser = sub.add_parser(
+        "report", help="job statistics, and how many webhooks arrived or were refused"
+    )
     report_parser.add_argument("--json", action="store_true")
     report_parser.set_defaults(func=cmd_report)
+
+    jobs_parser = sub.add_parser("jobs", help="list jobs, with the error of any that failed")
+    jobs_parser.add_argument("--status", choices=[state.value for state in JobState], help="only this state")
+    jobs_parser.add_argument("--limit", type=int, default=100)
+    jobs_parser.add_argument("--json", action="store_true")
+    jobs_parser.set_defaults(func=cmd_jobs)
 
     reprocess_parser = sub.add_parser("reprocess", help="re-queue one asset")
     reprocess_parser.add_argument("asset_id")

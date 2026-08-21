@@ -50,10 +50,25 @@ CREATE TABLE IF NOT EXISTS service_state (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Monotonic counters for things that happen without leaving a job row. Persisted rather
+-- than held in memory because the commands that report them — `report`, `check` — run in
+-- a different process from `serve`: an in-memory counter would read zero for both of them
+-- no matter what the server saw.
+CREATE TABLE IF NOT EXISTS counters (
+    name       TEXT PRIMARY KEY,
+    value      INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
 """
 
 # The single `service_state` key the surge breaker owns.
 _PAUSE_KEY = "paused"
+
+# Counter names. A webhook that fails the token check writes nothing else anywhere, which
+# is what made a mismatched shared secret look exactly like an idle installation.
+WEBHOOKS_RECEIVED = "webhooks_received"
+WEBHOOKS_REJECTED = "webhooks_rejected"
 
 # Indexes over columns from `_ADDED_COLUMNS`. They have to run *after* the migration:
 # on a database created before that column existed, `CREATE INDEX` would fail here.
@@ -370,6 +385,29 @@ class JobStore:
             "saved_bytes": max(orig - new, 0),
             "average_ratio": round(new / orig, 4) if orig else None,
         }
+
+    # ----------------------------------------------------------------- counters
+
+    async def bump_counter(self, name: str, delta: int = 1) -> None:
+        """Add ``delta`` to a counter, creating it at that value if it is new."""
+        await self._conn.execute(
+            "INSERT INTO counters (name, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET value = value + excluded.value, "
+            "updated_at = excluded.updated_at",
+            (name, delta, _iso(_now())),
+        )
+        await self._conn.commit()
+
+    async def counters(self) -> dict[str, int]:
+        """Every counter, with the known names present at zero.
+
+        Zero-filled on purpose: "0 received, 7 rejected" is the whole diagnosis, and it
+        cannot be read off a row that does not exist yet.
+        """
+        values = {WEBHOOKS_RECEIVED: 0, WEBHOOKS_REJECTED: 0}
+        async with self._conn.execute("SELECT name, value FROM counters") as cursor:
+            values.update({row["name"]: int(row["value"]) for row in await cursor.fetchall()})
+        return values
 
     # ------------------------------------------------------------- the pause latch
 

@@ -95,10 +95,14 @@ Before anything is *uploaded*, the encoded file has to pass every one of these:
 - an HDR transfer function was not lost, so a 10-bit HDR source can never be silently
   flattened to washed-out SDR;
 - the duration is within 0.5 s of the source's, and the audio stream count is unchanged;
-- the output carries a capture date. Off for stills by preset, because a replacement's
-  timeline position comes from the `fileCreatedAt` sent at upload and the explicit
-  `dateTimeOriginal` write in step 8, not from the file — requiring the tag there would
-  reject scans and EXIF-stripped exports after a full download and encode, for no gain.
+- the output still carries the capture date **the source had**. Measured against the
+  source, not against nothing: a clip that never had a `creation_time` — a screen
+  recording, a messenger video, a drone export, anything that was cut — could otherwise not
+  pass at any quality, and the failure named the output while the cause was in the input.
+  Off for stills by preset on top of that, because a replacement's timeline position comes
+  from the `fileCreatedAt` sent at upload and the explicit `dateTimeOriginal` write in step
+  8, not from the file — requiring the tag there would reject scans and EXIF-stripped
+  exports after a full download and encode, for no gain.
 
 A failure here marks the *original* so the same CPU is not burned on it again, and records
 the asset as `skipped: no_gain`. Nothing is uploaded and nothing is deleted.

@@ -33,8 +33,10 @@ services:
 
     # ---- Resources ------------------------------------------------------------------
     # Sized so one encode cannot starve Immich itself. Rule of thumb: leave at least half
-    # the host's cores to Immich, and match the CPU preset's `-threads` to what you give
-    # the container here.
+    # the host's cores to Immich. `cpus:` alone is enough — the container reads its own
+    # cgroup limit and pins the encoder's thread count to it, so there is no second number
+    # to keep in sync. These also beat COMPRESSOR_CPUS / COMPRESSOR_MEMORY in .env,
+    # because compose merges this file on top of docker-compose.yaml.
     #
     # cpus: 2
     # mem_limit: 2g

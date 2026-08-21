@@ -100,6 +100,7 @@ def _block(name: str, help_text: str, kind: str, lines: list[str]) -> list[str]:
 def render(
     *,
     store_stats: dict[str, Any],
+    counters: dict[str, int],
     session: dict[str, Any],
     encode_seconds: Histogram,
     config: dict[str, Any],
@@ -161,6 +162,21 @@ def render(
         "gauge",
         [_metric("saved_bytes", store_stats.get("saved_bytes", 0))],
     )
+
+    # Webhook counters, from the database rather than from this process: a mismatched
+    # shared secret writes nothing else anywhere, so `rate(webhooks_rejected_total[5m]) > 0`
+    # is the only alert that can catch it. These survive a restart, unlike the session
+    # counters below — Prometheus copes with either.
+    for name, help_text in (
+        ("webhooks_received_total", "Webhooks that passed the shared-secret check."),
+        (
+            "webhooks_rejected_total",
+            "Webhooks refused for a bad or missing shared secret. Anything above zero "
+            "means the workflow's headerValue and WEBHOOK__TOKEN disagree.",
+        ),
+    ):
+        source_key = name.removesuffix("_total")
+        lines += _block(name, help_text, "counter", [_metric(name, counters.get(source_key, 0))])
 
     # Session counters: reset on restart, which is what a counter is allowed to do.
     for name, help_text in (

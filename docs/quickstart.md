@@ -61,10 +61,16 @@ Drop the two GPU flags on a machine without `/dev/dri`.
 
 ## 3. Create the workflow
 
-If setup could not create it, do it in the UI: **Utilities → Workflows → New**, or POST the
-`immich-workflow.json` it wrote — then delete that file, which holds the shared webhook
-token in clear text. [workflow-setup.md](workflow-setup.md) has the full JSON and the
-gotchas.
+If setup could not create it, there are three ways in — cheapest first:
+
+```bash
+# a second API key with only workflow.create, used once and then deleted in Immich
+./scripts/quickstart.sh --workflow-key <that key>
+```
+
+Or do it in the UI (**Utilities → Workflows → New**), or POST the `immich-workflow.json`
+setup wrote — then delete that file, which holds the shared webhook token in clear text.
+[workflow-setup.md](workflow-setup.md) has the full JSON and the gotchas.
 
 ## 4. Start it
 
@@ -73,8 +79,9 @@ docker compose up -d
 docker compose logs -f immich-compressor
 ```
 
-The first log line tells you which encoder it chose and why. Nothing is uploaded and nothing
-is deleted: the shipped configuration is a dry run.
+The first lines tell you which encoder it chose and why every other candidate was rejected,
+and print the `assetFileFilter` pattern your workflow has to carry. Nothing is uploaded and
+nothing is deleted: the shipped configuration is a dry run.
 
 ## 5. Watch a dry run
 
@@ -88,12 +95,13 @@ docker compose exec immich-compressor immich-compressor report
 ```
 === immich-compressor report ===
 database: /var/lib/immich-compressor/state.db
+webhooks: 1 received, 0 rejected (bad or missing token)
 jobs total: 1
   skipped          1
 skip reasons:
   dry_run              1
 compressed assets: 0
-saved: 0.0 MiB (average ratio None)
+saved: 0.0 MiB (average ratio —)
 ```
 
 That is the whole point of stage 1: it saw the asset, decided it would compress it, and did

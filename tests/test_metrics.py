@@ -30,6 +30,7 @@ SESSION = {"processed": 2, "skipped": 3, "failed": 1, "deleted": 2, "bytes_saved
 def _render(**overrides: Any) -> str:
     body: dict[str, Any] = {
         "store_stats": STORE_STATS,
+        "counters": {"webhooks_received": 12, "webhooks_rejected": 3},
         "session": SESSION,
         "encode_seconds": Histogram(),
         "config": {"dry_run": False, "trash_original": True, "delete_mode": "trash"},
@@ -106,6 +107,7 @@ def test_a_label_value_could_not_break_the_format() -> None:
     """Nothing user-controlled reaches a label today; the escaping is belt and braces."""
     body = render(
         store_stats={"by_state": {'we"ird\\state': 1}, "by_skip_reason": {}},
+        counters={},
         session=SESSION,
         encode_seconds=Histogram(),
         config={},
@@ -120,6 +122,7 @@ def test_a_label_value_could_not_break_the_format() -> None:
 def test_an_empty_store_still_renders_every_family() -> None:
     body = render(
         store_stats={},
+        counters={},
         session={},
         encode_seconds=Histogram(),
         config={},
@@ -127,6 +130,8 @@ def test_an_empty_store_still_renders_every_family() -> None:
     )
     assert "immich_compressor_jobs_total 0" in body
     assert 'immich_compressor_encode_duration_seconds_bucket{le="+Inf"} 0' in body
+    assert "immich_compressor_webhooks_received_total 0" in body
+    assert "immich_compressor_webhooks_rejected_total 0" in body
 
 
 def test_the_endpoint_serves_it(settings: Settings) -> None:

@@ -5,7 +5,7 @@
 
 # Configuration reference
 
-Generated from the settings model of immich-compressor 1.1.1.
+Generated from the settings model of immich-compressor 1.2.0.
 
 `config.yaml` is optional. Every value below has a default, and the encoder is detected rather than configured, so the shortest working file is an empty one.
 
@@ -82,7 +82,7 @@ Everything that decides whether and how an asset gets touched. The three that ma
 | `post_upload_settle_s` | number | `30.0` | How long to wait for Immich's metadata extraction on the freshly uploaded asset before writing description, rating and GPS. Extraction overwrites those fields, so writing too early silently loses them. (>= 0) |
 | `duration_tolerance_s` | number | `0.5` | Sanity gate: how far the output's duration may drift. (>= 0) |
 | `require_same_resolution` | boolean | `true` | Sanity gate: compare *display* size, so a rotated clip is not rejected for keeping or baking in its rotation — only for losing it. |
-| `require_date_time_original` | boolean | `true` | Sanity gate: refuse an output with no capture date, which would land at the wrong place in the timeline. |
+| `require_date_time_original` | boolean | `true` | Sanity gate: refuse an output that *lost* the capture date its source had, which would land at the wrong place in the timeline. A source that never carried one — a screen recording, a messenger clip, a drone export — is judged on the other gates. |
 | `work_dir` | string | `/var/tmp/immich-compressor` | Scratch space for the download and the encode. Needs room for both copies of the largest asset you process — mount a volume, not the container's writable layer. |
 | `free_space_factor` | number | `3.0` | Refuse to start a job unless this multiple of the source size is free in `work_dir`. (>= 1.0) |
 | `compressed_marker` | string | `.cmp` | Goes into the replacement's filename **and** into the workflow's regex filter. Changing it means changing the workflow too. |

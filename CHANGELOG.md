@@ -5,6 +5,92 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-21
+
+Everything here comes from one first-install audit against a live Immich v3.1.0 and a
+259 GB library. The pipeline itself came through it unchanged — encoder detection, the
+sanity gate, the metadata chain, the verification chain and all four stages ran on the
+first try. What cost the tester most of an hour was everything around them, and that is
+what this release is.
+
+### Added
+
+- **Webhook counters.** `webhooks_received` and `webhooks_rejected`, in the first line of
+  `report`, in `check`, in `/stats` and in `/metrics`. A shared secret that does not match
+  was the one failure in this architecture that left no trace anywhere: Immich discards
+  the 401 and logs the workflow as *"executed successfully"*, no job row is written, and
+  `check`, `report` and `/healthz` all read exactly like a healthy installation with
+  nothing to do. `0 received, 7 rejected` now says it outright, and names the cause. The
+  counters live in the database, because `report` runs in a different process from `serve`
+  and because restarting the container must not erase the evidence.
+- **`immich-compressor jobs`** (`--status`, `--limit`, `--json`). `last_error` had one
+  documented route, `curl 'localhost:8080/jobs?status=failed'`, and it works nowhere in a
+  default install: no port is published, and the image contains neither curl nor wget.
+- **`setup --workflow-key`.** A second API key carrying `workflow.create` and nothing
+  else, used for the single `POST /workflows` and never written to any file. Keeping that
+  permission out of the long-lived service key is right; it did not follow that the only
+  ways left were a full-access browser session token or a 64-character secret typed into a
+  web form by hand.
+- **`TZ`** is passed to the container by `docker-compose.yaml`, by `quickstart.sh`, and
+  written into the `.env` `setup` generates. Immich sets it for its own containers, so
+  without this the two services timestamped their logs hours apart — while
+  troubleshooting.md asks you to read them side by side.
+- **The startup block names the `assetFileFilter` pattern** your workflow has to carry. The
+  marker couples three things nobody ever sees together, one of which lives inside Immich
+  where nothing here can check it.
+- `setup` writes `COMPRESSOR_CPUS` and `COMPRESSOR_MEMORY` into the generated `.env`,
+  commented out, with this machine's own numbers — and says which mechanism wins when the
+  compose override sets them too.
+
+### Changed
+
+- **The capture-date gate is measured against the source.** A video without a
+  `creation_time` could not pass the sanity gate at any quality, which ruled out every
+  screen recording, messenger clip, drone export and cut file in a library. The gate exists
+  to catch a capture date the *encode* lost, and an output cannot lose what the input never
+  had. Sources that carry one are checked exactly as before.
+- The rejection warning for a bad shared secret names the length and first characters of
+  the token that arrived alongside the one expected — what separates a paste cut short from
+  a token left over from an earlier install.
+- `--help` has a description written for a terminal. It was the module docstring, printed
+  verbatim with RST backticks, listing seven of twelve commands.
+- `report` prints `average ratio —` rather than Python's `None`, and `reprocess` on an
+  unknown asset names `backfill` as the way in.
+- `setup` points out a granted `asset.delete`. The quickstart says to leave it out for the
+  first run; granted anyway it printed an `ok` shaped like every other permission, and that
+  guarantee disappeared unannounced.
+
+### Fixed
+
+- **`backfill --type IMAGE` queued videos.** `POST /search/large-assets` accepts `type` and
+  ignores it — measured: `IMAGE` and `VIDEO` answer with the identical 250 items, all of
+  them videos, and `size: 5` answers with 250. The stills backfill was therefore
+  unreachable, and anybody who thought they were testing 50 photos re-encoded 50 videos.
+  Now filtered client-side, with the discarded results counted out loud.
+- **`quickstart.sh` did not forward `IMMICH_API_KEY`.** `setup` refuses without a key and
+  tells you to set that exact variable; the script never passed it in, so following the
+  advice returned you to the dead end you were already in.
+- **The encoder decision was logged before logging existed.** `serve` loaded the settings
+  first, and loading them is what runs hardware detection — whose explanation went out
+  through `logging.lastResort`, which drops everything below WARNING. Every start threw
+  away the lines docs/quickstart.md points at.
+- **`.gitignore` covered `.env` and nothing beside it.** `.env.bak` from a `setup --force`,
+  `.env.local`, `.env.prod` and any backup taken before an edit were committable, each
+  carrying the same API key and webhook token. Now `.env*` with `!.env.example`.
+- `hardware` left `THREADS` out of its container calibration command, so `calibrate.sh`
+  fell back to 2 and the sweep measured against half the threads the encoder really gets.
+- `quickstart.sh` printed a second copy of the three commands `setup` had just printed, so
+  a successful install ended looking like an error.
+- The compose override template still advised matching the CPU preset's `-threads` to the
+  container's `cpus`. The container reads its own cgroup limit; the advice contradicted two
+  other files and stood in the one everybody edits.
+
+### Known
+
+- `docker pull ghcr.io/navilois/immich-compressor` answers `unauthorized` while the package
+  is private, which makes the documented quickstart unusable for anybody outside the
+  repository. Unchanged here, and resolved by publication rather than by code.
+
 ## [1.1.1] - 2026-08-21
 
 ### Added
@@ -264,7 +350,8 @@ First working release, developed and verified against a live Immich v3.1.0 insta
 - Test suite: unit tests with mocked HTTP plus a `live`-marked end-to-end suite against a
   full Immich v3.1.0 stack (`docker-compose.test.yaml`).
 
-[Unreleased]: https://github.com/Navilois/immich-compressor/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/Navilois/immich-compressor/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Navilois/immich-compressor/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/Navilois/immich-compressor/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Navilois/immich-compressor/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Navilois/immich-compressor/releases/tag/v1.0.0

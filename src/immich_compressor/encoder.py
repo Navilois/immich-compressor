@@ -680,8 +680,18 @@ async def check_sanity(
     # the file. `upload_asset` sends `fileCreatedAt` from the source asset, and step 8
     # writes `dateTimeOriginal` explicitly over the API afterwards. For video the tag is
     # the real safety net, which is why the default stays on there.
-    if preset.effective_require_date_time_original(behavior) and not out.has_date_time_original:
-        failures.append("output has no capture date — would land wrong in the timeline")
+    #
+    # Measured against the source, not against nothing. A video that never had a
+    # `creation_time` could not pass this gate at any quality — which is everything that
+    # did not come straight out of a camera app: screen recordings, messenger clips, drone
+    # exports, anything that was cut. The gate exists to catch a capture date the encode
+    # *lost*, and an output cannot lose what the input never carried.
+    if (
+        preset.effective_require_date_time_original(behavior)
+        and source_probe.has_date_time_original
+        and not out.has_date_time_original
+    ):
+        failures.append("output lost the capture date the source had — would land wrong in the timeline")
 
     if failures:
         logger.info("sanity gate rejected %s: %s", source.name, "; ".join(failures))

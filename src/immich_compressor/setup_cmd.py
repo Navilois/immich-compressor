@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from .config import Settings
+from .config import Settings, workflow_file_pattern
 from .hardware import HardwareReport, apply_to_settings
 
 DEFAULT_BASE_URL = "http://immich-server:2283/api"
@@ -112,7 +112,6 @@ def workflow_json(*, webhook_url: str, token: str, marker: str = ".cmp") -> dict
     has no ``inverse`` option — without it the compressed upload re-triggers the workflow,
     which was confirmed to happen.
     """
-    escaped = marker.replace(".", "\\.")
     return {
         "name": "immich-compressor",
         "description": "Recompress large assets out of band",
@@ -127,7 +126,7 @@ def workflow_json(*, webhook_url: str, token: str, marker: str = ".cmp") -> dict
             {
                 "method": "immich-plugin-core#assetFileFilter",
                 "config": {
-                    "pattern": f"^(?!.*{escaped}\\.).*$",
+                    "pattern": workflow_file_pattern(marker),
                     "matchType": "regex",
                     "usePath": False,
                 },
@@ -232,15 +231,33 @@ def check_permissions(client: httpx.Client, *, include_delete: bool) -> list[Per
 
 
 def create_workflow(
-    base_url: str, body: dict[str, Any], *, api_key: str, session_token: str | None
+    base_url: str,
+    body: dict[str, Any],
+    *,
+    api_key: str,
+    session_token: str | None,
+    workflow_key: str | None = None,
 ) -> tuple[bool, str]:
-    """Create the workflow, preferring a session token when one was supplied.
+    """Create the workflow with the narrowest credential that was offered.
 
     ``workflow.create`` is not one of the compressor's own permissions, and granting it to
-    a long-lived key would widen the key well past what the service needs. A session token
-    is the narrower option, so it wins when it is offered.
+    the long-lived service key would widen that key well past what the service needs. That
+    reasoning is right; what did not follow from it is that the permission may not be used
+    at all. There are three ways in, ranked here by how much each can do if it leaks:
+
+    1. ``--workflow-key``: a second API key carrying ``workflow.create`` and nothing else,
+       created for this one call and deleted straight afterwards. The narrowest of the
+       three, and the only one that needs neither the browser's developer tools nor a
+       64-character secret typed into a web form.
+    2. ``--session-token``: a browser session, which carries the user's *full* access.
+    3. the service key, which only works if somebody widened it — and should not have.
     """
-    headers = {"Authorization": f"Bearer {session_token}"} if session_token else {"x-api-key": api_key}
+    if workflow_key:
+        headers = {"x-api-key": workflow_key}
+    elif session_token:
+        headers = {"Authorization": f"Bearer {session_token}"}
+    else:
+        headers = {"x-api-key": api_key}
     try:
         with httpx.Client(base_url=base_url.rstrip("/"), timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             response = client.post("/workflows", json=body, headers=headers)
@@ -335,14 +352,49 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def render_env(values: dict[str, str]) -> str:
+def render_env(values: dict[str, str], *, suggested: dict[str, str] | None = None) -> str:
+    """Render the file. ``suggested`` becomes commented-out lines with a real value in them.
+
+    `.env.example` documents `COMPRESSOR_CPUS` and `COMPRESSOR_MEMORY`, and nobody who
+    takes the documented route ever reads it: `setup` writes a real `.env`, and a template
+    stops being opened the moment a real file exists. The knobs therefore go in here as
+    well — inert, but carrying the numbers this machine actually has.
+    """
     lines = [
         "# Written by `immich-compressor setup`. Contains secrets — never commit it.",
         "# docker compose reads this file automatically from the project directory.",
         "",
     ]
     lines.extend(f"{key}={value}" for key, value in values.items())
+    offered = {key: value for key, value in (suggested or {}).items() if key not in values}
+    if offered:
+        lines += [
+            "",
+            "# Optional, commented out so the shipped defaults stand. The values are what",
+            "# this machine suggests.",
+            "#",
+            "# `cpus:` and `mem_limit:` in docker-compose.override.yaml beat COMPRESSOR_CPUS",
+            "# and COMPRESSOR_MEMORY here — compose merges the override on top of the base",
+            "# file, and a value set there wins over one substituted from this one.",
+            "#",
+            "# TZ is the clock this container's log timestamps with. Copy the value from",
+            "# your Immich .env, or the two logs cannot be read side by side.",
+        ]
+        lines.extend(f"# {key}={value}" for key, value in offered.items())
     return "\n".join(lines) + "\n"
+
+
+def optional_settings(report: HardwareReport) -> dict[str, str]:
+    """The knobs worth putting in front of somebody, with real numbers rather than defaults.
+
+    Half the host's cores, which is the rule of thumb everywhere else in the project:
+    Immich's own thumbnailing, machine learning and transcoding want the other half.
+    """
+    return {
+        "COMPRESSOR_CPUS": str(max(1, report.facts.cpu.host_cores // 2)),
+        "COMPRESSOR_MEMORY": "2g",
+        "TZ": "UTC",
+    }
 
 
 def write_secret_file(path: Path, body: str) -> None:
@@ -405,6 +457,9 @@ class SetupOptions:
     base_url: str = DEFAULT_BASE_URL
     api_key: str = ""
     session_token: str | None = None
+    # A throwaway key holding `workflow.create` and nothing else. Used for exactly one
+    # request and never written anywhere.
+    workflow_key: str | None = None
     network: str = DEFAULT_NETWORK
     webhook_url: str = DEFAULT_WEBHOOK_URL
     directory: Path = Path()
@@ -434,6 +489,13 @@ def _print_permissions(results: list[PermissionResult]) -> list[PermissionResult
         print("\n  Add these in Immich under Account Settings -> API Keys -> edit the key:")
         for result in missing:
             print(f"    {result.probe.permission}   ({result.detail})")
+    # The quickstart tells people to leave asset.delete out on purpose: without it the
+    # service physically cannot remove an original, which is a guarantee worth having for
+    # a first run. Granting it anyway looked identical to every other `ok` above, so the
+    # guarantee went away without anybody being told.
+    if any(result.probe.permission == "asset.delete" and result.granted for result in results):
+        print("\n  Note: asset.delete is granted. This configuration never uses it —")
+        print("  trash_original is off — but the key can remove assets from stage 3 on.")
     return missing
 
 
@@ -509,6 +571,14 @@ def run_setup(options: SetupOptions) -> int:
     values["IMMICH_BASE_URL"] = base_url
     values["IMMICH_NETWORK"] = network
 
+    # Immich's compose file hands its container TZ and /etc/localtime; this one had
+    # neither, so the two services timestamped their logs two hours apart while
+    # troubleshooting.md asks people to correlate them line by line. `quickstart.sh` passes
+    # TZ through, so it lands here when the host exported it; otherwise it is offered as a
+    # commented line to fill in from Immich's own .env.
+    if host_tz := os.environ.get("TZ", "").strip():
+        values["TZ"] = host_tz
+
     # The GPU wiring, so a plain `docker compose up -d` keeps doing the right thing.
     selected = report.selected
     node = next((n for n in report.facts.render_nodes if selected and n.path == selected.device), None)
@@ -523,7 +593,7 @@ def run_setup(options: SetupOptions) -> int:
             print(f"wrote {directory / COMPOSE_OVERRIDE} — put deployment-specific settings here")
         values["COMPOSE_FILE"] = compose_file_value(directory, overlay)
 
-    write_secret_file(env_path, render_env(values))
+    write_secret_file(env_path, render_env(values, suggested=optional_settings(report)))
     print(f"wrote {env_path} (mode 0600)")
     if kept:
         print(f"      kept the existing {', '.join(kept)} (pass --force to replace)")
@@ -541,9 +611,18 @@ def run_setup(options: SetupOptions) -> int:
         created, detail = False, "skipped on request"
     else:
         created, detail = create_workflow(
-            base_url, body, api_key=api_key, session_token=options.session_token
+            base_url,
+            body,
+            api_key=api_key,
+            session_token=options.session_token,
+            workflow_key=options.workflow_key,
         )
     print(f"\nWorkflow    {detail}")
+    if created and options.workflow_key:
+        # It is never written to .env, to config.yaml or to immich-workflow.json — but it
+        # still exists in Immich, and it has no second use.
+        print("            delete that API key in Immich now: it was needed for one call,")
+        print("            and nothing here has stored it.")
     if not created:
         workflow_path = directory / "immich-workflow.json"
         write_secret_file(workflow_path, json.dumps(body, indent=2) + "\n")
@@ -557,7 +636,11 @@ def run_setup(options: SetupOptions) -> int:
         print("            $SESSION_TOKEN is a browser session token, not the API key:")
         print("            workflow.create is not one of the permissions this service needs,")
         print("            and adding it would widen the key past its job.")
+        print("            Or make a second API key with only workflow.create and re-run:")
+        print("              immich-compressor setup --workflow-key <that key>")
+        print("            then delete it again — it is used for this one request.")
         print("            The UI route is Utilities -> Workflows -> New.")
+        print("            docs/workflow-setup.md has the full JSON and the gotchas.")
         print(f"            Then delete {workflow_path.name}: it carries COMPRESSOR_TOKEN")
         print("            in clear text and has no further use.")
 

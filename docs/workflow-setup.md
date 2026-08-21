@@ -59,6 +59,23 @@ this service asks for — granting them to a long-lived key would widen it well 
 
 Or do it in the UI: **Utilities → Workflows → New**.
 
+### Or let setup do it, with a key made for the purpose
+
+The narrowest route, and the one that needs neither the developer tools nor a 64-character
+secret typed into a web form. In Immich, **Account Settings → API Keys → New**, grant
+`workflow.create` and nothing else, then:
+
+```bash
+docker compose exec immich-compressor immich-compressor setup --workflow-key <that key>
+```
+
+Setup uses it for the single `POST /workflows` and never writes it anywhere — not to
+`.env`, not to `config.yaml`, not to `immich-workflow.json`. **Delete the key afterwards.**
+Setup cannot do that for you: deleting an API key needs a permission this one does not
+have, and asking for it would defeat the point.
+
+A session token has the user's *full* access, so this key wins when both are given.
+
 Either way, delete `immich-workflow.json` once the workflow exists. It has no further use,
 and the running service reads its token from `.env`.
 
@@ -86,8 +103,16 @@ Immich reports as success — see below.
 
 > **Immich ignores the webhook's response status.** A 401 (wrong `headerValue`), a 422
 > (payload the service could not parse) or a 500 is still logged as *"Workflow … executed
-> successfully"*. Never diagnose from the Immich side alone; the compressor logs every
-> rejection at WARNING or ERROR.
+> successfully"*. Never diagnose from the Immich side alone. Ask the compressor instead —
+> the first line of `report` counts what arrived:
+>
+> ```
+> webhooks: 0 received, 7 rejected (bad or missing token)
+> ```
+>
+> Nothing but a mismatched secret produces that. The WARNING line for each rejection names
+> the length and first characters of the token Immich sent next to the one expected, which
+> is what tells a paste that was cut short from a token left over from an earlier install.
 
 > **If a workflow stops firing, restart `immich-server`.** Creating or editing a workflow
 > normally takes effect immediately (verified), but execution was observed going quiet after
