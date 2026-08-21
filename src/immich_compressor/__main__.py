@@ -178,6 +178,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             base_url=args.url,
             api_key=args.api_key or "",
             session_token=args.session_token,
+            workflow_key=args.workflow_key,
             network=args.network,
             webhook_url=args.webhook_url,
             directory=Path(args.directory),
@@ -534,6 +535,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--api-key", help="Immich API key (or set IMMICH_API_KEY)")
     setup_parser.add_argument(
         "--session-token", help="browser session token, used only to create the workflow"
+    )
+    setup_parser.add_argument(
+        "--workflow-key",
+        help="throwaway API key with only workflow.create; used once, never stored",
     )
     setup_parser.add_argument(
         "--network", default=DEFAULT_NETWORK, help="docker network your Immich stack uses"

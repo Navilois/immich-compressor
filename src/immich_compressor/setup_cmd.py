@@ -232,15 +232,33 @@ def check_permissions(client: httpx.Client, *, include_delete: bool) -> list[Per
 
 
 def create_workflow(
-    base_url: str, body: dict[str, Any], *, api_key: str, session_token: str | None
+    base_url: str,
+    body: dict[str, Any],
+    *,
+    api_key: str,
+    session_token: str | None,
+    workflow_key: str | None = None,
 ) -> tuple[bool, str]:
-    """Create the workflow, preferring a session token when one was supplied.
+    """Create the workflow with the narrowest credential that was offered.
 
     ``workflow.create`` is not one of the compressor's own permissions, and granting it to
-    a long-lived key would widen the key well past what the service needs. A session token
-    is the narrower option, so it wins when it is offered.
+    the long-lived service key would widen that key well past what the service needs. That
+    reasoning is right; what did not follow from it is that the permission may not be used
+    at all. There are three ways in, ranked here by how much each can do if it leaks:
+
+    1. ``--workflow-key``: a second API key carrying ``workflow.create`` and nothing else,
+       created for this one call and deleted straight afterwards. The narrowest of the
+       three, and the only one that needs neither the browser's developer tools nor a
+       64-character secret typed into a web form.
+    2. ``--session-token``: a browser session, which carries the user's *full* access.
+    3. the service key, which only works if somebody widened it — and should not have.
     """
-    headers = {"Authorization": f"Bearer {session_token}"} if session_token else {"x-api-key": api_key}
+    if workflow_key:
+        headers = {"x-api-key": workflow_key}
+    elif session_token:
+        headers = {"Authorization": f"Bearer {session_token}"}
+    else:
+        headers = {"x-api-key": api_key}
     try:
         with httpx.Client(base_url=base_url.rstrip("/"), timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             response = client.post("/workflows", json=body, headers=headers)
@@ -405,6 +423,9 @@ class SetupOptions:
     base_url: str = DEFAULT_BASE_URL
     api_key: str = ""
     session_token: str | None = None
+    # A throwaway key holding `workflow.create` and nothing else. Used for exactly one
+    # request and never written anywhere.
+    workflow_key: str | None = None
     network: str = DEFAULT_NETWORK
     webhook_url: str = DEFAULT_WEBHOOK_URL
     directory: Path = Path()
@@ -541,9 +562,18 @@ def run_setup(options: SetupOptions) -> int:
         created, detail = False, "skipped on request"
     else:
         created, detail = create_workflow(
-            base_url, body, api_key=api_key, session_token=options.session_token
+            base_url,
+            body,
+            api_key=api_key,
+            session_token=options.session_token,
+            workflow_key=options.workflow_key,
         )
     print(f"\nWorkflow    {detail}")
+    if created and options.workflow_key:
+        # It is never written to .env, to config.yaml or to immich-workflow.json — but it
+        # still exists in Immich, and it has no second use.
+        print("            delete that API key in Immich now: it was needed for one call,")
+        print("            and nothing here has stored it.")
     if not created:
         workflow_path = directory / "immich-workflow.json"
         write_secret_file(workflow_path, json.dumps(body, indent=2) + "\n")
@@ -557,6 +587,9 @@ def run_setup(options: SetupOptions) -> int:
         print("            $SESSION_TOKEN is a browser session token, not the API key:")
         print("            workflow.create is not one of the permissions this service needs,")
         print("            and adding it would widen the key past its job.")
+        print("            Or make a second API key with only workflow.create and re-run:")
+        print("              immich-compressor setup --workflow-key <that key>")
+        print("            then delete it again — it is used for this one request.")
         print("            The UI route is Utilities -> Workflows -> New.")
         print("            docs/workflow-setup.md has the full JSON and the gotchas.")
         print(f"            Then delete {workflow_path.name}: it carries COMPRESSOR_TOKEN")

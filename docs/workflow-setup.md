@@ -59,6 +59,23 @@ this service asks for — granting them to a long-lived key would widen it well 
 
 Or do it in the UI: **Utilities → Workflows → New**.
 
+### Or let setup do it, with a key made for the purpose
+
+The narrowest route, and the one that needs neither the developer tools nor a 64-character
+secret typed into a web form. In Immich, **Account Settings → API Keys → New**, grant
+`workflow.create` and nothing else, then:
+
+```bash
+docker compose exec immich-compressor immich-compressor setup --workflow-key <that key>
+```
+
+Setup uses it for the single `POST /workflows` and never writes it anywhere — not to
+`.env`, not to `config.yaml`, not to `immich-workflow.json`. **Delete the key afterwards.**
+Setup cannot do that for you: deleting an API key needs a permission this one does not
+have, and asking for it would defeat the point.
+
+A session token has the user's *full* access, so this key wins when both are given.
+
 Either way, delete `immich-workflow.json` once the workflow exists. It has no further use,
 and the running service reads its token from `.env`.
 

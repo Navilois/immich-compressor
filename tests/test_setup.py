@@ -185,6 +185,29 @@ def test_workflow_creation_prefers_a_session_token() -> None:
 
 
 @respx.mock
+def test_workflow_creation_prefers_a_throwaway_key_over_a_session_token() -> None:
+    """A session token carries the user's *full* access; a key scoped to `workflow.create`
+    carries one permission. When both are offered the narrower one wins."""
+    captured: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.headers)
+        return httpx.Response(201, json={"id": "wf-2", "steps": []})
+
+    respx.post(f"{BASE}/workflows").mock(side_effect=handler)
+    ok, _ = create_workflow(
+        BASE,
+        workflow_json(webhook_url="http://x", token="t"),
+        api_key="service-key",
+        session_token="sess",
+        workflow_key="throwaway",
+    )
+    assert ok is True
+    assert captured[0]["x-api-key"] == "throwaway"
+    assert "authorization" not in captured[0]
+
+
+@respx.mock
 def test_a_forbidden_workflow_create_says_which_permission_is_missing() -> None:
     respx.post(f"{BASE}/workflows").mock(return_value=httpx.Response(403))
     ok, detail = create_workflow(
@@ -383,6 +406,23 @@ def test_the_workflow_json_is_never_world_readable(tmp_path: Path, capsys) -> No
     out = capsys.readouterr().out
     assert "mode 0600" in out
     assert "delete immich-workflow.json" in out
+
+
+@respx.mock
+def test_the_throwaway_workflow_key_is_never_written_anywhere(tmp_path: Path, capsys) -> None:
+    """It exists for exactly one request. Writing it down would turn a deliberately
+    short-lived credential into a second long-lived one sitting next to the first."""
+    _mock_server()
+
+    assert run_setup(_options(tmp_path, workflow_key="throwaway-workflow-key")) == 0
+
+    written = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert written, "setup must have written something for this test to mean anything"
+    for path in written:
+        assert "throwaway-workflow-key" not in path.read_text(encoding="utf-8"), path
+    # And the user is told to get rid of it, because setup cannot: deleting a key needs a
+    # permission this one deliberately does not have.
+    assert "delete that API key in Immich now" in capsys.readouterr().out
 
 
 def test_the_workflow_json_is_gitignored() -> None:
