@@ -121,6 +121,14 @@ testpaths = ["tests"]
 markers = [
     "live: end-to-end tests that require a running Immich test instance (deselect with -m 'not live')",
 ]
-
-[tool.pytest_asyncio]
+# pytest-asyncio registers both loop scopes as pytest ini options, so this is the only
+# table that can hold them — a [tool.pytest_asyncio] table is read by nobody, which is
+# where the fixture scope sat while resolving to None. "function" is the isolation the
+# suite is written for: a fresh event loop per test, for tests and async fixtures alike.
+# Neither line moves anything today (all three async fixtures are function-scoped, and
+# "function" is already the plugin's default for tests), but an unset fixture scope
+# silently follows each fixture's own caching scope, and pytest-asyncio warns that it
+# intends to change that default. Pinning both keeps an upgrade from re-scoping a suite
+# whose tests delete assets and must not share state.
 asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
