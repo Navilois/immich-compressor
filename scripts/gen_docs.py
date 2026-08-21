@@ -129,6 +129,16 @@ NOTES: dict[str, str] = {
         "`null` turns the gate off, and is rejected at startup together with "
         "`delete_mode: permanent`."
     ),
+    "behavior.surge_threshold": (
+        "**The surge breaker.** More than this many *new* assets queued from webhooks inside "
+        "`surge_window_seconds` latches the service paused: workers stop claiming, the trash "
+        "sweeper stops finalising deletes, and further webhooks are refused until "
+        "`immich-compressor resume --apply`. The latch is stored in the database, so "
+        "restarting the container does not clear it. Counted for webhook-driven work only, so "
+        "`backfill` and `reprocess` never trip it — but a genuine bulk upload can, and pausing "
+        "is the intended answer for a service that deletes originals. `null` switches it off."
+    ),
+    "behavior.surge_window_seconds": "The window `surge_threshold` is counted over.",
     "behavior.retention_days": (
         "How long a replaced original survives before it is removed. `0` removes it "
         "inline, the moment the verification chain passes."

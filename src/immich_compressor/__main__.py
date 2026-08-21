@@ -256,11 +256,18 @@ async def _report(settings: Settings, as_json: bool) -> int:
     async with JobStore(settings.database_path) as store:
         stats = await store.stats()
         jobs = await store.list_jobs(limit=1000)
+        latched = await store.pause_state()
     if as_json:
+        stats["paused"] = {"since": latched.since.isoformat(), "reason": latched.reason} if latched else None
         print(json.dumps(stats, indent=2))
         return 0
     print("=== immich-compressor report ===")
     print(f"database: {settings.database_path}")
+    # First line after the header when it applies: every number below is frozen until
+    # somebody resumes, and reading them without knowing that is misleading.
+    if latched is not None:
+        print(f"PAUSED since {latched.since.isoformat()}: {latched.reason}")
+        print("  nothing is queued, processed or deleted — `immich-compressor resume --apply`")
     print(f"jobs total: {stats['total']}")
     for state, count in sorted(stats["by_state"].items()):
         print(f"  {state:16s} {count}")
@@ -323,6 +330,30 @@ def cmd_requeue(args: argparse.Namespace) -> int:
     settings = _load(args)
     _configure_logging(settings.log_level)
     return asyncio.run(_requeue(settings, SkipReason(args.reason), args.apply))
+
+
+async def _resume(settings: Settings, apply: bool) -> int:
+    """Report the surge breaker's latch, and clear it when told to."""
+    async with JobStore(settings.database_path) as store:
+        latched = await store.pause_state()
+        if latched is None:
+            print("the service is not paused")
+            return 0
+        print(f"PAUSED since {latched.since.isoformat()}")
+        print(f"  reason: {latched.reason}")
+        if not apply:
+            print("\nNothing is queued, processed or deleted while this stands.")
+            print("Check `immich-compressor report` for what is waiting, then pass --apply.")
+            return 0
+        await store.resume()
+    print("\nresumed — workers pick up where they left off on the next poll")
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    settings = _load(args)
+    _configure_logging("WARNING")
+    return asyncio.run(_resume(settings, args.apply))
 
 
 async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool) -> int:
@@ -483,6 +514,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     requeue_parser.add_argument("--apply", action="store_true", help="actually re-queue (default: dry)")
     requeue_parser.set_defaults(func=cmd_requeue)
+
+    resume_parser = sub.add_parser("resume", help="show or clear the surge breaker's pause")
+    resume_parser.add_argument("--apply", action="store_true", help="actually resume (default: report)")
+    resume_parser.set_defaults(func=cmd_resume)
 
     backfill_parser = sub.add_parser("backfill", help="queue existing large assets")
     backfill_parser.add_argument("--type", default="VIDEO", choices=["VIDEO", "IMAGE"])

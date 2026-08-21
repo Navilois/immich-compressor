@@ -49,6 +49,18 @@ behavior:
   # library. `null` turns the gate off and is refused together with delete_mode: permanent.
   max_asset_age_hours: 24
 
+  # The surge breaker: a backstop behind the gate above, for the bulk influx nobody
+  # predicted. More than surge_threshold NEW assets queued from webhooks inside
+  # surge_window_seconds latches the service paused — workers stop claiming, the sweeper
+  # stops deleting, further webhooks are refused — until `immich-compressor resume --apply`.
+  # The latch lives in the database, so restarting the container does not clear it.
+  # Counted for webhook work only, so backfill and reprocess never trip it. A large phone
+  # backup can: 200 photos in ten minutes is a surge by this definition, and pausing is the
+  # right answer for something that deletes originals. Raise it if that is your normal, or
+  # set `null` to switch it off.
+  surge_threshold: 200
+  surge_window_seconds: 600
+
   # balanced | higher | smaller. Mapped per encoder to the right CRF / -global_quality /
   # -cq number. `balanced` is what this project shipped in 1.0.0.
   quality: balanced

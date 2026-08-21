@@ -36,6 +36,25 @@
           "default": 24.0,
           "title": "Max Asset Age Hours"
         },
+        "surge_threshold": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 200,
+          "title": "Surge Threshold"
+        },
+        "surge_window_seconds": {
+          "default": 600.0,
+          "exclusiveMinimum": 0,
+          "title": "Surge Window Seconds",
+          "type": "number"
+        },
         "retention_days": {
           "default": 7,
           "minimum": 0,

@@ -9,10 +9,12 @@ curl localhost:8080/metrics            # the same, in Prometheus text format
 curl 'localhost:8080/jobs?status=failed'
 curl localhost:8080/jobs/<assetId>
 curl -X POST -H "X-Compressor-Token: $COMPRESSOR_TOKEN" localhost:8080/reprocess/<assetId>
+curl -X POST -H "X-Compressor-Token: $COMPRESSOR_TOKEN" localhost:8080/resume
 ```
 
 No port is published by default. `/stats`, `/metrics` and `/jobs` are unauthenticated; only
-`/webhook` and `/reprocess` require the shared secret. Publish deliberately, and never on
+`/webhook`, `/reprocess` and `/resume` require the shared secret — `/resume` re-arms a
+service that deletes originals, so it is not an anonymous action. Publish deliberately, and never on
 `0.0.0.0`:
 
 ```yaml
@@ -79,6 +81,7 @@ docker compose exec immich-compressor immich-compressor <command>
 | `reprocess <assetId>` | re-queue one asset |
 | `requeue --reason <r> [--apply]` | re-queue everything skipped for one reason. Dry until `--apply` |
 | `backfill --type VIDEO --limit N [--apply]` | queue existing large assets. Dry until `--apply` |
+| `resume [--apply]` | show why the surge breaker paused the service, and clear it. Reports until `--apply` |
 | `restore <assetId>… \| --all-pending` | pull originals back out of the trash |
 | `--version` | |
 
@@ -153,6 +156,40 @@ Three properties are worth knowing:
 So the button is no longer a hazard, and the answer to *"can I re-run metadata extraction?"*
 is yes. It is still not a way to reach the backlog — every one of those assets is refused,
 by design. `backfill` is the way to reach the backlog.
+
+### The surge breaker
+
+The freshness gate answers a known question. The breaker is the backstop for the one nobody
+asked: a trigger this project has not seen, a re-uploaded library, a workflow pointed at the
+wrong endpoint. More than `surge_threshold` **new** assets queued from webhooks inside
+`surge_window_seconds` latches the whole service paused.
+
+```
+ERROR SURGE BREAKER TRIPPED: 201 assets queued from webhooks within 600s, over
+      surge_threshold 200. Nothing further is queued, processed or deleted until
+      `immich-compressor resume --apply`.
+```
+
+While it stands: workers claim nothing, the trash sweeper finalises nothing, and further
+webhooks are refused as `paused`. Jobs already in the queue keep their state and wait. The
+latch lives in the database, not in memory — restarting the container is the first thing an
+operator reaches for, and it must not be the thing that clears a pause.
+
+```bash
+docker compose exec immich-compressor immich-compressor resume
+```
+
+That prints why it paused and changes nothing. Add `--apply` to clear it, or `POST /resume`
+with the webhook token. Workers pick up where they left off on the next poll.
+
+**It has a real false-positive rate, and that is the accepted trade-off.** Two hundred photos
+from a phone backup in ten minutes is a surge by this definition, even though it is entirely
+legitimate. The breaker only pauses — nothing is lost, and one command resumes — so erring
+towards a stop is the right way round for a service that deletes originals. If that is your
+normal traffic, raise `surge_threshold`; `null` switches it off.
+
+Assets whose webhook was refused while paused are not recorded anywhere, so they stay
+reachable by `backfill` once you have resumed.
 
 ## Re-queueing after a change
 

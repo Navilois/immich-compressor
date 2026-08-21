@@ -18,6 +18,7 @@ import json
 import logging
 import tempfile
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -128,6 +129,48 @@ class PipelineStats:
     # Wall-clock time of the encoder command, for /metrics. Observed around the encode
     # itself, not around the whole job, so a slow download does not read as a slow encoder.
     encode_seconds: Histogram = field(default_factory=Histogram)
+
+
+class SurgeDetector:
+    """Rolling count of assets newly queued from webhooks, for the surge breaker.
+
+    Deliberately in memory. The window is minutes wide, so losing it to a restart costs
+    nothing — a surge still in progress simply re-trips within the next window. What must
+    survive a restart is the *latch*, and that lives in the job store: restarting the
+    container is the first thing an operator reaches for, and it must not be the thing that
+    clears a pause.
+
+    Only assets that were actually inserted count. A re-trigger for something already
+    recorded is a no-op in the store and must not be one here either, or the breaker would
+    fire on a replay that queues no work at all.
+    """
+
+    def __init__(self, threshold: int | None, window_seconds: float) -> None:
+        self._threshold = threshold
+        self._window = timedelta(seconds=window_seconds)
+        self._seen: deque[datetime] = deque()
+
+    def record(self, *, now: datetime | None = None) -> int | None:
+        """Note one newly queued asset. Returns the count when this trips the breaker.
+
+        Returns ``None`` while the rate is acceptable, and on every call after the trip —
+        the caller latches on the first one, so reporting it twice would only produce a
+        second log line about a pause that is already in force.
+        """
+        if self._threshold is None:
+            return None
+        moment = now or datetime.now(UTC)
+        self._seen.append(moment)
+        cutoff = moment - self._window
+        while self._seen and self._seen[0] < cutoff:
+            self._seen.popleft()
+        if len(self._seen) <= self._threshold:
+            return None
+        tripped = len(self._seen)
+        # Drop the window so the next webhook starts counting afresh. Without this every
+        # further webhook would re-report a trip for as long as the window is saturated.
+        self._seen.clear()
+        return tripped
 
 
 def check_guards(asset: WebhookAsset, settings: Settings) -> None:
@@ -728,6 +771,11 @@ class Worker:
         interval = self._settings.behavior.poll_interval_seconds
         while not self._stop.is_set():
             try:
+                # Checked before the claim, not after: a paused service must not move a job
+                # into `running` and then abandon it there.
+                if await self._store.pause_state() is not None:
+                    await asyncio.sleep(interval)
+                    continue
                 job = await self._store.claim_next(types=types)
                 if job is None:
                     await asyncio.sleep(interval)
@@ -745,11 +793,18 @@ class Worker:
 
         Jobs configured with ``retention_days: 0`` never reach this loop — the pipeline
         finalises them inline, so the 60 s interval costs them nothing.
+
+        Nothing is finalised while the surge breaker is latched. Jobs simply stay in
+        ``pending_delete`` until somebody resumes, which is the recoverable direction.
         """
         while not self._stop.is_set():
             try:
                 await asyncio.sleep(60.0)
                 if not self._settings.behavior.trash_original:
+                    continue
+                # The whole point of the breaker: a surge must not keep deleting originals
+                # while nobody has confirmed that the surge was intended.
+                if await self._store.pause_state() is not None:
                     continue
                 for job in await self._store.due_deletions():
                     await self._trash_one(job)

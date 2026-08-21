@@ -239,6 +239,38 @@ def test_a_zero_length_freshness_window_is_rejected(tmp_path: Path, monkeypatch:
         load_settings(_write(tmp_path, _with_behavior(max_asset_age_hours=0)))
 
 
+def test_the_surge_breaker_is_on_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    settings = load_settings(_write(tmp_path, _MINIMAL))
+    assert settings.behavior.surge_threshold == 200
+    assert settings.behavior.surge_window_seconds == 600.0
+
+
+def test_the_surge_breaker_may_be_disabled_even_with_permanent_deletes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deliberately unlike `max_asset_age_hours`, which *is* refused there.
+
+    The freshness gate is the precise fix for the bulk trigger and is mandatory. The breaker
+    is a backstop with a real false-positive rate — a large phone backup is a surge by its
+    definition — so turning it off stays a supported choice.
+    """
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _with_behavior(dry_run=False, trash_original=True, delete_mode="permanent", surge_threshold="null")
+    settings = load_settings(_write(tmp_path, body))
+    assert settings.behavior.surge_threshold is None
+
+
+def test_a_zero_surge_threshold_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """0 would pause on the first webhook ever received."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    with pytest.raises(ConfigError):
+        load_settings(_write(tmp_path, _with_behavior(surge_threshold=0)))
+
+
 def test_delete_mode_defaults_to_the_recoverable_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")

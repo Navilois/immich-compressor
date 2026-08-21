@@ -17,7 +17,7 @@ from typing import Any, Self
 
 import aiosqlite
 
-from .models import TERMINAL_STATES, Job, JobState, SkipReason
+from .models import TERMINAL_STATES, Job, JobState, PauseState, SkipReason
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state_runafter ON jobs (state, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_delete_after   ON jobs (delete_after);
+
+-- Service-wide state that has to outlive the process. One row today, the surge breaker's
+-- latch; a table rather than a column so the next such flag does not need a migration.
+CREATE TABLE IF NOT EXISTS service_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
+
+# The single `service_state` key the surge breaker owns.
+_PAUSE_KEY = "paused"
 
 # Indexes over columns from `_ADDED_COLUMNS`. They have to run *after* the migration:
 # on a database created before that column existed, `CREATE INDEX` would fail here.
@@ -359,6 +370,43 @@ class JobStore:
             "saved_bytes": max(orig - new, 0),
             "average_ratio": round(new / orig, 4) if orig else None,
         }
+
+    # ------------------------------------------------------------- the pause latch
+
+    async def pause(self, reason: str) -> bool:
+        """Latch the service paused. Returns ``False`` when it already was.
+
+        Deliberately not idempotent-silent: the first trip is the one worth logging, and a
+        second surge inside an existing pause must not overwrite the original reason.
+        """
+        now = _now()
+        state = PauseState(reason=reason, since=now)
+        cursor = await self._conn.execute(
+            "INSERT INTO service_state (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING",
+            (_PAUSE_KEY, state.model_dump_json(), _iso(now)),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def resume(self) -> bool:
+        """Clear the latch. Returns ``False`` when the service was not paused."""
+        cursor = await self._conn.execute("DELETE FROM service_state WHERE key = ?", (_PAUSE_KEY,))
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def pause_state(self) -> PauseState | None:
+        """The latch, or ``None`` when the service is running."""
+        async with self._conn.execute(
+            "SELECT value FROM service_state WHERE key = ?", (_PAUSE_KEY,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            return PauseState.model_validate_json(row["value"])
+        except ValueError:  # pragma: no cover - only a hand-edited database gets here
+            logger.warning("service_state.%s is unreadable; treating the service as paused", _PAUSE_KEY)
+            return PauseState(reason="unreadable latch in the database", since=_now())
 
     async def terminal_count(self) -> int:
         placeholders = ", ".join("?" for _ in TERMINAL_STATES)

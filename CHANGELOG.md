@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A surge breaker** (`behavior.surge_threshold` / `surge_window_seconds`, 200 per 10 min).
+  Backstop behind the gate below, for a bulk influx it does not model — an unfamiliar
+  trigger, a re-uploaded library, a misdirected workflow. More than the threshold in new
+  webhook-queued assets inside the window latches the service paused: workers claim nothing,
+  the sweeper finalises no deletes, further webhooks are refused. The latch is stored in the
+  database, because restarting the container is the first thing an operator reaches for and
+  it must not be the thing that clears a pause. Cleared with `immich-compressor resume
+  --apply` or a token-protected `POST /resume`, and visible in `report`, `/healthz` and
+  `/stats`. A large phone backup will trip it; the breaker only pauses, and that is the right
+  way round for a service that deletes originals.
 - **A bulk-trigger gate** (`behavior.max_asset_age_hours`, 24 h by default). Immich's
   `AssetMetadataExtraction` trigger is a maintenance operation: one click on
   **Administration → Jobs → Extract Metadata** re-fires the workflow for every asset in the

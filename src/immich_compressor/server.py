@@ -3,6 +3,10 @@
 The webhook endpoint does the absolute minimum: verify the shared secret, persist the
 job, answer ``202``. Immich runs the ``webhook`` action synchronously inside the
 ``WorkflowAssetTrigger`` job, so anything slower would block or time out the server.
+
+Two ingest guards sit in front of the store: the freshness gate that refuses a bulk
+metadata-extraction re-trigger, and the surge breaker that latches the whole service paused
+when far more work arrives than anybody asked for.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from .encoder import probe_hardware_encoder
 from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from .metrics import render as render_metrics
 from .models import JobState, RejectReason, WebhookPayload
-from .pipeline import WebhookRejected, Worker, check_ingest_guards
+from .pipeline import SurgeDetector, WebhookRejected, Worker, check_ingest_guards
 from .store import JobStore
 
 logger = logging.getLogger(__name__)
@@ -46,6 +50,9 @@ class HealthResponse(BaseModel):
     trash_original: bool
     immich_reachable: bool
     immich_version: str | None = None
+    # True while the surge breaker is latched: nothing is queued, processed or deleted.
+    paused: bool = False
+    paused_reason: str | None = None
 
 
 async def _warn_about_unusable_hardware(settings: Settings) -> None:
@@ -92,6 +99,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.store = store
         app.state.client = client
         app.state.worker = worker
+        app.state.surge = SurgeDetector(
+            resolved.behavior.surge_threshold, resolved.behavior.surge_window_seconds
+        )
+        if (latched := await store.pause_state()) is not None:
+            logger.warning(
+                "starting PAUSED since %s: %s — clear it with `immich-compressor resume --apply`",
+                latched.since.isoformat(),
+                latched.reason,
+            )
         await worker.start()
         try:
             yield
@@ -158,6 +174,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             return EnqueueResponse(accepted=False, asset_id=asset.id, duplicate=False, reason=rejected.reason)
 
+        # A latched breaker refuses rather than queues. Accepting would grow a queue nobody
+        # has approved, and every row written would be one `backfill` can never reach again.
+        if (latched := await store.pause_state()) is not None:
+            logger.warning(
+                "refused %s asset=%s: service is paused since %s (%s)",
+                payload.trigger,
+                asset.id,
+                latched.since.isoformat(),
+                latched.reason,
+            )
+            return EnqueueResponse(
+                accepted=False, asset_id=asset.id, duplicate=False, reason=RejectReason.PAUSED
+            )
+
         inserted = await store.enqueue(
             asset.id,
             payload.model_dump(mode="json", by_alias=True),
@@ -170,6 +200,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             asset.type,
             "queued" if inserted else "already known (no-op)",
         )
+
+        # Only newly queued assets count towards the surge: a replay of something already
+        # recorded queues no work, so it must not push the breaker either.
+        if inserted and (tripped := request.app.state.surge.record()) is not None:
+            reason = (
+                f"{tripped} assets queued from webhooks within "
+                f"{settings.behavior.surge_window_seconds:g}s, over surge_threshold "
+                f"{settings.behavior.surge_threshold}"
+            )
+            if await store.pause(reason):
+                logger.error(
+                    "SURGE BREAKER TRIPPED: %s. Nothing further is queued, processed or "
+                    "deleted until `immich-compressor resume --apply`.",
+                    reason,
+                )
+
         return EnqueueResponse(accepted=True, asset_id=asset.id, duplicate=not inserted)
 
     # Immich's webhook action can be configured to use PUT as well.
@@ -193,12 +239,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reachable = True
         except Exception as exc:  # noqa: BLE001 - health must report, not raise
             logger.debug("health check could not reach Immich: %s", exc)
+        latched = await request.app.state.store.pause_state()
         return HealthResponse(
-            status="ok",
+            status="paused" if latched else "ok",
             dry_run=settings.behavior.dry_run,
             trash_original=settings.behavior.trash_original,
             immich_reachable=reachable,
             immich_version=version,
+            paused=latched is not None,
+            paused_reason=latched.reason if latched else None,
         )
 
     @app.get("/stats")
@@ -207,6 +256,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         worker: Worker = request.app.state.worker
         settings: Settings = request.app.state.settings
         body = await store.stats()
+        latched = await store.pause_state()
+        body["paused"] = {"since": latched.since.isoformat(), "reason": latched.reason} if latched else None
         body["session"] = {
             "processed": worker.pipeline.stats.processed,
             "skipped": worker.pipeline.stats.skipped,
@@ -295,6 +346,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not await store.reset(asset_id):
             raise HTTPException(status_code=404, detail="unknown asset")
         return {"requeued": True, "asset_id": asset_id}
+
+    @app.post("/resume", dependencies=[Depends(verify_token)])
+    async def resume(request: Request) -> dict[str, Any]:
+        """Clear the surge breaker. Token-protected: it re-arms a service that deletes.
+
+        Nothing else is touched — jobs queued before the pause keep their state and are
+        picked up again on the next poll.
+        """
+        store: JobStore = request.app.state.store
+        latched = await store.pause_state()
+        if latched is None:
+            return {"resumed": False, "detail": "the service was not paused"}
+        await store.resume()
+        logger.warning("resumed by request; the pause since %s is cleared", latched.since.isoformat())
+        return {"resumed": True, "was_paused_since": latched.since.isoformat(), "reason": latched.reason}
 
     @app.head("/healthz")
     async def healthz_head() -> Response:
