@@ -194,8 +194,9 @@ NOTES: dict[str, str] = {
         "or baking in its rotation — only for losing it."
     ),
     "behavior.require_date_time_original": (
-        "Sanity gate: refuse an output with no capture date, which would land at the wrong "
-        "place in the timeline."
+        "Sanity gate: refuse an output that *lost* the capture date its source had, which "
+        "would land at the wrong place in the timeline. A source that never carried one — a "
+        "screen recording, a messenger clip, a drone export — is judged on the other gates."
     ),
     "behavior.free_space_factor": (
         "Refuse to start a job unless this multiple of the source size is free in `work_dir`."
