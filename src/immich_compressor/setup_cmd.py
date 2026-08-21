@@ -346,9 +346,18 @@ def render_env(values: dict[str, str]) -> str:
 
 
 def write_secret_file(path: Path, body: str) -> None:
-    """Write with mode 0600 from the start, so the secret is never briefly world-readable."""
-    path.write_text(body, encoding="utf-8")
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    """Write with mode 0600 from the start, so the secret is never briefly world-readable.
+
+    `O_CREAT` applies its mode to a new file only, and umask can narrow it further, so the
+    explicit chmod stays. It just has to run while the file is still empty: rewriting a
+    0644 `.env` left by an older version would otherwise put the new secret in a
+    world-readable file for as long as the write takes.
+    """
+    mode = stat.S_IRUSR | stat.S_IWUSR
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        path.chmod(mode)
+        handle.write(body)
 
 
 def compose_file_value(directory: Path, overlay: str) -> str:
@@ -537,8 +546,8 @@ def run_setup(options: SetupOptions) -> int:
     print(f"\nWorkflow    {detail}")
     if not created:
         workflow_path = directory / "immich-workflow.json"
-        workflow_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-        print(f"            wrote {workflow_path} — create it yourself with:")
+        write_secret_file(workflow_path, json.dumps(body, indent=2) + "\n")
+        print(f"            wrote {workflow_path} (mode 0600) — create it yourself with:")
         print(f"""
   curl -X POST '{base_url.rstrip("/")}/workflows' \\
     -H "Authorization: Bearer $SESSION_TOKEN" \\
@@ -549,6 +558,8 @@ def run_setup(options: SetupOptions) -> int:
         print("            workflow.create is not one of the permissions this service needs,")
         print("            and adding it would widen the key past its job.")
         print("            The UI route is Utilities -> Workflows -> New.")
+        print(f"            Then delete {workflow_path.name}: it carries COMPRESSOR_TOKEN")
+        print("            in clear text and has no further use.")
 
     # ---- 5. what to do next ------------------------------------------------------
     print("\nNext")

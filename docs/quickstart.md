@@ -62,8 +62,9 @@ Drop the two GPU flags on a machine without `/dev/dri`.
 ## 3. Create the workflow
 
 If setup could not create it, do it in the UI: **Utilities → Workflows → New**, or POST the
-`immich-workflow.json` it wrote. [workflow-setup.md](workflow-setup.md) has the full JSON
-and the gotchas.
+`immich-workflow.json` it wrote — then delete that file, which holds the shared webhook
+token in clear text. [workflow-setup.md](workflow-setup.md) has the full JSON and the
+gotchas.
 
 ## 4. Start it
 

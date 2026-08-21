@@ -212,6 +212,33 @@ def test_a_secret_file_is_never_world_readable(tmp_path: Path) -> None:
     assert mode == 0o600
 
 
+def test_a_secret_file_is_tightened_before_the_secret_goes_into_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chmod after write leaves the new secret world-readable for the length of the write.
+
+    Only reachable when the file already exists — a 0644 `.env` from a version that wrote
+    it with plain `write_text` — so the spy watches what the file holds at chmod time.
+    """
+    path = tmp_path / ".env"
+    path.write_text("IMMICH_API_KEY=stale\n", encoding="utf-8")
+    path.chmod(0o644)
+
+    held_at_chmod: list[str] = []
+    real_chmod = Path.chmod
+
+    def spy(self: Path, mode: int) -> None:
+        held_at_chmod.append(self.read_text(encoding="utf-8"))
+        real_chmod(self, mode)
+
+    monkeypatch.setattr(Path, "chmod", spy)
+    write_secret_file(path, "IMMICH_API_KEY=fresh\n")
+
+    assert held_at_chmod == [""], "the mode was set after the secret was already on disk"
+    assert path.read_text(encoding="utf-8") == "IMMICH_API_KEY=fresh\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_the_generated_config_loads_and_carries_no_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -344,6 +371,29 @@ def test_the_workflow_json_carries_the_token_that_landed_in_env(tmp_path: Path) 
     run_setup(_options(tmp_path))
     body = json.loads((tmp_path / "immich-workflow.json").read_text())
     assert body["steps"][2]["config"]["headerValue"] == read_env_file(tmp_path / ".env")["COMPRESSOR_TOKEN"]
+
+
+@respx.mock
+def test_the_workflow_json_is_never_world_readable(tmp_path: Path, capsys) -> None:
+    """It carries COMPRESSOR_TOKEN in clear text, so it gets the same mode as .env."""
+    _mock_server()
+    respx.post(f"{BASE}/workflows").mock(return_value=httpx.Response(403))
+    run_setup(_options(tmp_path))
+    assert stat.S_IMODE((tmp_path / "immich-workflow.json").stat().st_mode) == 0o600
+    out = capsys.readouterr().out
+    assert "mode 0600" in out
+    assert "delete immich-workflow.json" in out
+
+
+def test_the_workflow_json_is_gitignored() -> None:
+    """git status must not offer to stage the file the shared webhook token lives in."""
+    root = Path(__file__).resolve().parent.parent
+    ignored = {
+        line.strip()
+        for line in (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    assert "immich-workflow.json" in ignored
 
 
 # ------------------------------------------------------------------- the compose file
