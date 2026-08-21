@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import stat
-import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -728,22 +727,18 @@ def test_a_host_without_a_timezone_is_offered_the_line(
 def test_a_backup_of_env_is_ignored_too() -> None:
     """The entry was the bare name. Everything beside it was committable: `.env.bak` from a
     `setup --force`, `.env.local`, `.env.prod` — each carrying the same API key and the
-    same webhook token as the original. It happened during the audit."""
-    ignored = subprocess.run(
-        ["git", "check-ignore", ".env", ".env.bak-153238", ".env.local"],  # noqa: S607
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert ignored.stdout.split() == [".env", ".env.bak-153238", ".env.local"]
+    same webhook token as the original. It happened during the audit.
 
-    # ...and the template stays tracked, or a fresh clone has no example to copy.
-    tracked = subprocess.run(
-        ["git", "check-ignore", ".env.example"],  # noqa: S607
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert tracked.returncode == 1, ".env.example must not be ignored"
+    Read out of the file rather than measured with `git check-ignore`: the test containers
+    are `python:3.x-slim`, which carries no git binary, and a test that skips itself where
+    it cannot run is exactly how the encoder tests went unnoticed for a whole release.
+    """
+    lines = [
+        stripped
+        for line in (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+    ]
+
+    assert ".env*" in lines, "the glob: .env.bak and .env.local carry the same secrets as .env"
+    assert ".env" not in lines, "the bare entry is the narrow one the glob replaced"
+    assert "!.env.example" in lines, "the template stays tracked, or a fresh clone has none"
