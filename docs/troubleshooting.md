@@ -132,11 +132,12 @@ deleted while this persists, which is the intended outcome.
 ## Jobs in `failed`
 
 ```bash
-docker compose exec immich-compressor immich-compressor report
-curl 'localhost:8080/jobs?status=failed'
+docker compose exec immich-compressor immich-compressor jobs --status failed
 ```
 
-`last_error` carries the reason. After fixing the cause:
+`last_error` carries the reason. The same rows come out of `GET /jobs?status=failed`, if
+you have published a port and have an HTTP client on the host — the image has none. After
+fixing the cause:
 
 ```bash
 docker compose exec immich-compressor immich-compressor reprocess <assetId>

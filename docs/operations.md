@@ -2,11 +2,15 @@
 
 ## Endpoints
 
+These need a **published port and an HTTP client on the host** — the image contains
+neither `curl` nor `wget`, so `docker compose exec … curl` is not a route. Everything the
+read-only endpoints answer is also a CLI command, which needs neither:
+
 ```bash
 curl localhost:8080/healthz            # liveness, and whether Immich is reachable
 curl localhost:8080/stats              # state counts, skip reasons, bytes saved
 curl localhost:8080/metrics            # the same, in Prometheus text format
-curl 'localhost:8080/jobs?status=failed'
+curl 'localhost:8080/jobs?status=failed'          # or: immich-compressor jobs --status failed
 curl localhost:8080/jobs/<assetId>
 curl -X POST -H "X-Compressor-Token: $COMPRESSOR_TOKEN" localhost:8080/reprocess/<assetId>
 curl -X POST -H "X-Compressor-Token: $COMPRESSOR_TOKEN" localhost:8080/resume
@@ -86,6 +90,7 @@ docker compose exec immich-compressor immich-compressor <command>
 | `check` | config, connectivity to Immich, and a real one-frame encode through the chosen encoder |
 | `encode <file> [--type]` | run the preset against a local file and print ratio, sanity verdict, rotation and display size. Never talks to Immich — this is how you tune a preset |
 | `report [--json]` | job statistics, and how many webhooks arrived or were refused |
+| `jobs [--status S] [--limit N] [--json]` | list jobs and, for the failed ones, `last_error` |
 | `reprocess <assetId>` | re-queue one asset |
 | `requeue --reason <r> [--apply]` | re-queue everything skipped for one reason. Dry until `--apply` |
 | `backfill --type VIDEO --limit N [--apply]` | queue existing large assets. Dry until `--apply` |

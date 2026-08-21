@@ -13,7 +13,7 @@ import httpx
 import pytest
 import respx
 
-from immich_compressor.__main__ import _backfill, _report
+from immich_compressor.__main__ import _backfill, _jobs, _report
 from immich_compressor.config import Settings
 from immich_compressor.store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
@@ -121,3 +121,53 @@ async def test_report_json_carries_the_counters_too(
     assert await _report(settings, as_json=True) == 0
 
     assert json.loads(capsys.readouterr().out)["webhooks"] == {"received": 2, "rejected": 1}
+
+
+async def test_jobs_prints_the_error_of_a_failed_job(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`last_error` had exactly one documented route — `curl localhost:8080/jobs` — and
+    that route is open nowhere in a default install: no port is published, and the image
+    ships neither curl nor wget."""
+    async with JobStore(settings.database_path) as store:
+        await store.enqueue("a1", {}, delay_seconds=0)
+        await store.enqueue("a2", {}, delay_seconds=0)
+        await store.mark_failed("a1", "checksum mismatch on the replacement")
+
+    assert await _jobs(settings, status="failed", limit=100, as_json=False) == 0
+
+    out = capsys.readouterr().out
+    assert "a1" in out
+    assert "checksum mismatch on the replacement" in out
+    assert "a2" not in out, "--status failed must not list a queued job"
+    assert "1 job(s) in state failed" in out
+
+
+async def test_jobs_says_so_when_there_are_none(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert await _jobs(settings, status="failed", limit=100, as_json=False) == 0
+    assert "no jobs in state failed" in capsys.readouterr().out
+
+
+async def test_jobs_json_leaves_out_the_payload(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The payload is the whole webhook body — noise here, and it carries file paths."""
+    async with JobStore(settings.database_path) as store:
+        await store.enqueue(
+            "a1", {"data": {"asset": {"originalPath": "/photos/secret.jpg"}}}, delay_seconds=0
+        )
+
+    assert await _jobs(settings, status=None, limit=100, as_json=True) == 0
+
+    rows = json.loads(capsys.readouterr().out)
+    assert [row["source_asset_id"] for row in rows] == ["a1"]
+    assert "payload" not in rows[0]
+
+
+async def test_jobs_refuses_a_status_it_does_not_know(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert await _jobs(settings, status="nonsense", limit=100, as_json=False) == 2
+    assert "one of: queued" in capsys.readouterr().err

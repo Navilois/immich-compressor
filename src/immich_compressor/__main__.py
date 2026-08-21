@@ -338,6 +338,50 @@ def cmd_report(args: argparse.Namespace) -> int:
     return asyncio.run(_report(settings, args.json))
 
 
+async def _jobs(settings: Settings, status: str | None, limit: int, as_json: bool) -> int:
+    """What `GET /jobs` answers, without needing a published port or an HTTP client.
+
+    The documented route to `last_error` was `curl 'localhost:8080/jobs?status=failed'`,
+    which runs nowhere in a default install: no port is published, and the image ships
+    neither curl nor wget. `docker compose exec` is how every other command is reached, so
+    this one goes there too.
+    """
+    state: JobState | None = None
+    if status is not None:
+        # The parser already restricts `--status` to the known states; this is the same
+        # check for anything that calls the function directly, which must not see a
+        # ValueError come out of a reporting command.
+        try:
+            state = JobState(status)
+        except ValueError:
+            known = ", ".join(member.value for member in JobState)
+            print(f"unknown status {status!r} — one of: {known}", file=sys.stderr)
+            return 2
+    async with JobStore(settings.database_path) as store:
+        found = await store.list_jobs(state=state, limit=limit)
+
+    if as_json:
+        print(json.dumps([job.model_dump(mode="json", exclude={"payload"}) for job in found], indent=2))
+        return 0
+    if not found:
+        print(f"no jobs in state {status}" if status else "no jobs")
+        return 0
+    for job in found:
+        print(f"{job.source_asset_id}  {job.state.value:<15s} {job.updated_at.isoformat(timespec='seconds')}")
+        if job.skip_reason is not None:
+            print(f"    skipped: {job.skip_reason.value}")
+        if job.last_error:
+            print(f"    error: {job.last_error}")
+    print(f"\n{len(found)} job(s)" + (f" in state {status}" if status else ""))
+    return 0
+
+
+def cmd_jobs(args: argparse.Namespace) -> int:
+    settings = _load(args)
+    _configure_logging("WARNING")
+    return asyncio.run(_jobs(settings, args.status, args.limit, args.json))
+
+
 async def _reprocess(settings: Settings, asset_id: str) -> int:
     async with JobStore(settings.database_path) as store:
         if await store.reset(asset_id):
@@ -570,6 +614,12 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser = sub.add_parser("report", help="print job statistics")
     report_parser.add_argument("--json", action="store_true")
     report_parser.set_defaults(func=cmd_report)
+
+    jobs_parser = sub.add_parser("jobs", help="list jobs, with the error of any that failed")
+    jobs_parser.add_argument("--status", choices=[state.value for state in JobState], help="only this state")
+    jobs_parser.add_argument("--limit", type=int, default=100)
+    jobs_parser.add_argument("--json", action="store_true")
+    jobs_parser.set_defaults(func=cmd_jobs)
 
     reprocess_parser = sub.add_parser("reprocess", help="re-queue one asset")
     reprocess_parser.add_argument("asset_id")
