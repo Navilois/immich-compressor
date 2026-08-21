@@ -20,8 +20,8 @@ jobs:
     name: Lint and format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install
@@ -37,7 +37,7 @@ jobs:
     name: English only
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: German stopword guard
         run: ./scripts/check-language.sh
 
@@ -49,8 +49,8 @@ jobs:
       matrix:
         python-version: ['3.12', '3.13']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
@@ -70,8 +70,8 @@ jobs:
     name: Generated docs are current
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install
@@ -97,7 +97,7 @@ jobs:
       COMPRESSOR_TOKEN: placeholder
       RENDER_GID: '993'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The test stack's services declare `env_file: testinstance/.env`, which is the
       # gitignored real one. Creating it from the template is the documented first step
       # anyway, so validating this way checks the instructions too.
@@ -116,12 +116,12 @@ jobs:
     name: Image builds
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       # Single arch here — the multi-arch build costs several minutes of emulation and
       # belongs in the release workflow, not on every pull request.
       - name: Build linux/amd64
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
