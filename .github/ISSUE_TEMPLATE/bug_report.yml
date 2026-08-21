@@ -1,0 +1,81 @@
+name: Bug report
+description: Something does not work the way the documentation says it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: `immich-compressor check` and `immich-compressor hardware` answer
+        most questions on their own, and [docs/troubleshooting.md](https://github.com/Navilois/immich-compressor/blob/main/docs/troubleshooting.md)
+        covers the common ones. **Redact your API key** if it appears anywhere below.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: immich-compressor version
+      description: '`docker compose exec immich-compressor immich-compressor --version`'
+      placeholder: '1.1.0'
+    validations:
+      required: true
+
+  - type: input
+    id: immich-version
+    attributes:
+      label: Immich version
+      placeholder: 'v3.1.0'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Which stage are you running?
+      options:
+        - Stage 1 — dry run (the default)
+        - Stage 2 — compressing, originals kept
+        - Stage 3 — originals moved to the trash
+        - Stage 4 — permanent delete
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: '`docker compose logs --tail 200 immich-compressor`. Rendered as a code block.'
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware report
+      description: '`immich-compressor hardware --json` — needed for anything encoder-related.'
+      render: json
+
+  - type: textarea
+    id: config
+    attributes:
+      label: config.yaml
+      description: Without secrets — there should not be any in it.
+      render: yaml

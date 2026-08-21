@@ -170,9 +170,7 @@ class ImmichClient:
             if asset.exif_info.date_time_original is not None:
                 return True
             if asyncio.get_running_loop().time() >= deadline:
-                logger.warning(
-                    "metadata extraction for %s did not settle within %.0fs", asset_id, timeout_s
-                )
+                logger.warning("metadata extraction for %s did not settle within %.0fs", asset_id, timeout_s)
                 return False
             await asyncio.sleep(interval_s)
 
@@ -194,9 +192,7 @@ class ImmichClient:
 
     async def put_metadata(self, asset_id: str, items: list[MetadataItem]) -> list[MetadataItem]:
         body = {"items": [{"key": item.key, "value": item.value} for item in items]}
-        response = await self._request(
-            "PUT", f"/assets/{asset_id}/metadata", json=body, expected=(200, 201)
-        )
+        response = await self._request("PUT", f"/assets/{asset_id}/metadata", json=body, expected=(200, 201))
         return [MetadataItem.model_validate(item) for item in response.json()]
 
     async def download_original(self, asset_id: str, destination: Path) -> int:
@@ -334,9 +330,7 @@ class ImmichClient:
         """Rollback helper — pull assets back out of the trash."""
         if not asset_ids:
             return
-        await self._request(
-            "POST", "/trash/restore/assets", json={"ids": asset_ids}, expected=(200, 204)
-        )
+        await self._request("POST", "/trash/restore/assets", json={"ids": asset_ids}, expected=(200, 204))
 
     async def search_large_assets(
         self,

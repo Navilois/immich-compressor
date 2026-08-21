@@ -65,12 +65,8 @@ def test_null_exif_info_is_accepted(video_payload_raw: dict[str, Any]) -> None:
     assert asset.exif_info.tags == []
 
 
-@pytest.mark.parametrize(
-    "field", ["originalFileName", "isFavorite", "isExternal", "isEdited", "isOffline"]
-)
-def test_explicit_nulls_fall_back_to_defaults(
-    video_payload_raw: dict[str, Any], field: str
-) -> None:
+@pytest.mark.parametrize("field", ["originalFileName", "isFavorite", "isExternal", "isEdited", "isOffline"])
+def test_explicit_nulls_fall_back_to_defaults(video_payload_raw: dict[str, Any], field: str) -> None:
     video_payload_raw["data"]["asset"][field] = None
     WebhookPayload.model_validate(video_payload_raw)  # must not raise
 

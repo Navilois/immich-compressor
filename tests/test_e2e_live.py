@@ -67,16 +67,41 @@ async def _make_fat_clip(path: Path) -> Path:
     nonce = uuid.uuid4().hex
     code, _, stderr = await run_command(
         [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "lavfi", "-i", "testsrc2=size=640x480:rate=25:duration=6",
-            "-f", "lavfi", "-i", f"sine=frequency={400 + secrets.randbelow(200)}:duration=6",
-            "-f", "lavfi", "-i",
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x480:rate=25:duration=6",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency={400 + secrets.randbelow(200)}:duration=6",
+            "-f",
+            "lavfi",
+            "-i",
             "nullsrc=size=64x64:rate=25:duration=6,geq=random(1)*255:128:128,format=yuv420p",
-            "-filter_complex", "[0:v][2:v]overlay=x=0:y=0[v]",
-            "-map", "[v]", "-map", "1:a",
-            "-c:v", "mpeg4", "-b:v", "9000k", "-c:a", "aac", "-b:a", "192k", "-shortest",
-            "-metadata", "creation_time=2024-06-15T12:30:00Z",
-            "-metadata", f"comment={nonce}",
+            "-filter_complex",
+            "[0:v][2:v]overlay=x=0:y=0[v]",
+            "-map",
+            "[v]",
+            "-map",
+            "1:a",
+            "-c:v",
+            "mpeg4",
+            "-b:v",
+            "9000k",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            "-metadata",
+            "creation_time=2024-06-15T12:30:00Z",
+            "-metadata",
+            f"comment={nonce}",
             str(path),
         ],
         timeout_s=300,
@@ -89,7 +114,11 @@ async def _make_fat_clip(path: Path) -> Path:
     # have nothing to do with this service.
     code, _, stderr = await run_command(
         [
-            "exiftool", "-quiet", "-overwrite_original", "-api", "QuickTimeUTC=1",
+            "exiftool",
+            "-quiet",
+            "-overwrite_original",
+            "-api",
+            "QuickTimeUTC=1",
             "-Keys:GPSCoordinates=48.2082, 16.3738",
             str(path),
         ],
@@ -207,8 +236,8 @@ async def test_live_end_to_end(tmp_path: Path, api: ImmichClient, raw: httpx.Asy
         exif = new_detail["exifInfo"]
 
         assert new_detail["originalFileName"].endswith(".cmp.mp4")
-        assert new_detail["isFavorite"] is True                       # via PUT /assets/copy
-        assert exif["description"] == "e2e description"              # via PUT /assets/{id}
+        assert new_detail["isFavorite"] is True  # via PUT /assets/copy
+        assert exif["description"] == "e2e description"  # via PUT /assets/{id}
         assert exif["rating"] == 4
         assert exif["latitude"] == pytest.approx(48.2082, abs=1e-3)
         assert exif["longitude"] == pytest.approx(16.3738, abs=1e-3)
@@ -217,7 +246,7 @@ async def test_live_end_to_end(tmp_path: Path, api: ImmichClient, raw: httpx.Asy
         assert new_detail["localDateTime"] == detail["localDateTime"]
 
         new_tags = {tag["value"] for tag in new_detail.get("tags", [])}
-        assert {f"{MARKER}-tag-a", f"{MARKER}-tag-b"} <= new_tags    # via PUT /tags/assets
+        assert {f"{MARKER}-tag-a", f"{MARKER}-tag-b"} <= new_tags  # via PUT /tags/assets
 
         # Marker on both assets -> a second webhook is a no-op.
         marker_new = await api.has_metadata_key(new_id, "compressor")

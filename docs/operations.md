@@ -1,0 +1,185 @@
+# Operating
+
+## Endpoints
+
+```bash
+curl localhost:8080/healthz            # liveness, and whether Immich is reachable
+curl localhost:8080/stats              # state counts, skip reasons, bytes saved
+curl localhost:8080/metrics            # the same, in Prometheus text format
+curl 'localhost:8080/jobs?status=failed'
+curl localhost:8080/jobs/<assetId>
+curl -X POST -H "X-Compressor-Token: $COMPRESSOR_TOKEN" localhost:8080/reprocess/<assetId>
+```
+
+No port is published by default. `/stats`, `/metrics` and `/jobs` are unauthenticated; only
+`/webhook` and `/reprocess` require the shared secret. Publish deliberately, and never on
+`0.0.0.0`:
+
+```yaml
+# docker-compose.override.yaml
+services:
+  immich-compressor:
+    ports:
+      - '127.0.0.1:8080:8080'
+```
+
+## `/metrics`
+
+Prometheus text exposition format, hand-rolled, no extra dependency. Every family carries
+`HELP` and `TYPE`, and is emitted even when empty so a dashboard query never disappears:
+
+```
+immich_compressor_build_info{version="1.1.0"} 1
+immich_compressor_jobs{state="done"} 2
+immich_compressor_jobs{state="failed"} 1
+immich_compressor_jobs_skipped{reason="no_gain"} 1
+immich_compressor_jobs_total 5
+immich_compressor_compressed_assets 2
+immich_compressor_original_bytes 50710662
+immich_compressor_compressed_bytes 26686614
+immich_compressor_saved_bytes 24024048
+immich_compressor_session_processed_total 2
+immich_compressor_session_deleted_total 2
+immich_compressor_session_bytes_saved_total 24024048
+immich_compressor_encode_duration_seconds_bucket{le="60"} 3
+immich_compressor_encode_duration_seconds_bucket{le="+Inf"} 4
+immich_compressor_encode_duration_seconds_sum 418
+immich_compressor_encode_duration_seconds_count 4
+immich_compressor_config_dry_run 0
+immich_compressor_config_trash_original 1
+immich_compressor_config_permanent_delete 1
+```
+
+Gauges come from the job store and survive a restart. The `session_*` counters and the
+encode histogram are per process and reset when the container does, which is what
+Prometheus expects of a counter.
+
+The three `config_*` gauges are the ones worth alerting on. `config_dry_run 1` on a
+deployment you thought was live means nothing has been compressed for however long that has
+been true; `config_permanent_delete 1` means originals are being removed with no undo.
+
+Scrape it from inside the docker network — if your Prometheus runs there too, no port needs
+publishing at all.
+
+## CLI
+
+Everything runs inside the container:
+
+```bash
+docker compose exec immich-compressor immich-compressor <command>
+```
+
+| Command | What it does |
+|---|---|
+| `setup` | guided first-run setup; safe to re-run |
+| `hardware [--json]` | which encoder this machine gets, and why every other was rejected |
+| `check` | config, connectivity to Immich, and a real one-frame encode through the chosen encoder |
+| `encode <file> [--type]` | run the preset against a local file and print ratio, sanity verdict, rotation and display size. Never talks to Immich — this is how you tune a preset |
+| `report [--json]` | job statistics |
+| `reprocess <assetId>` | re-queue one asset |
+| `requeue --reason <r> [--apply]` | re-queue everything skipped for one reason. Dry until `--apply` |
+| `backfill --type VIDEO --limit N [--apply]` | queue existing large assets. Dry until `--apply` |
+| `restore <assetId>… \| --all-pending` | pull originals back out of the trash |
+| `--version` | |
+
+## Job states
+
+```
+queued → running → uploaded → linked → pending_delete → done
+```
+
+plus `skipped` (with a reason) and `failed`. Every transition is persisted in SQLite, so a
+crash between upload and linking resumes rather than duplicating work.
+
+Skip reasons: `already_compressed`, `too_small`, `wrong_type`, `unsupported_format`,
+`embedded_media`, `source_quality`, `no_gain`, `duplicate`, `named_people`, `edited`,
+`external_library`, `live_photo`, `locked`, `trashed`, `no_preset`, `dry_run`. The three
+stills-only ones — a format that is not JPEG, a motion photo, and a source already at or
+below the preset's quality target — are explained in
+[troubleshooting.md](troubleshooting.md#everything-is-skipped).
+
+Jobs are claimed by a worker lane, one per entry in `enabled_types`, so a long video job
+never blocks a queue of image jobs.
+
+Failures retry with exponential backoff up to `max_attempts` (3), then land in `failed` and
+show up in `report` and `/stats`.
+
+## Working through the existing library
+
+The webhook only fires for assets moving through Immich's pipeline. The backlog already in
+the library is invisible to it. `backfill` queues a batch whose size you choose:
+
+```bash
+immich-compressor backfill --type VIDEO --limit 50            # look first
+immich-compressor backfill --type VIDEO --limit 50 --apply
+```
+
+### The metadata-extraction trap
+
+`AssetCreate` fires once per asset. `AssetMetadataExtraction` is a maintenance operation
+that can be started at any time from **Administration → Jobs → Extract Metadata**, and every
+run emits the trigger again — for *every asset in the library*, unbounded, with no way to
+stop it from the Immich side other than disabling the workflow. This was traced through the
+v3.1.0 server bundle; see
+[immich-api-notes.md](immich-api-notes.md#12-assetmetadataextraction-fires-in-bulk-not-once-per-upload).
+
+Replays of an asset the service has already seen were always harmless: `ON CONFLICT DO
+NOTHING` makes anything already recorded permanently immune, in *any* state including
+`skipped`. Assets it has never seen had no such protection — and that is the whole library
+until you have worked through it.
+
+`behavior.max_asset_age_hours` is what closes that gap. Every webhook carries `createdAt`,
+the moment Immich created the asset's database row, which dates the **upload** rather than
+the exposure. A genuine upload reaches this service seconds old; a re-trigger carries
+whatever age the asset already had. Anything past the window is refused at ingest:
+
+```
+WARNING refused AssetMetadataExtraction asset=… type=IMAGE (too_old): added to Immich
+        712.4 h ago, past max_asset_age_hours 24 — this is a re-trigger, not a new upload;
+        use `immich-compressor backfill` if it was meant
+```
+
+Three properties are worth knowing:
+
+- **It does not fire on a bulk upload.** Importing a thousand photos from 2009 is a thousand
+  assets whose `createdAt` is today. A rate limit would have refused them; this does not.
+- **A refusal writes no job.** That is deliberate: `backfill` enqueues through the same `ON
+  CONFLICT DO NOTHING`, so a row recorded here — in any state — would put the asset
+  permanently out of `backfill`'s reach. Refused assets stay exactly as reachable as they
+  were.
+- **It cannot be switched off where it matters.** `max_asset_age_hours: null` together with
+  `delete_mode: permanent` is refused at startup.
+
+So the button is no longer a hazard, and the answer to *"can I re-run metadata extraction?"*
+is yes. It is still not a way to reach the backlog — every one of those assets is refused,
+by design. `backfill` is the way to reach the backlog.
+
+## Re-queueing after a change
+
+A changed guard or sanity gate leaves its old verdicts behind: those assets sit in `skipped`
+locally and no webhook will fire for them again.
+
+```bash
+immich-compressor requeue --reason no_gain           # look first
+immich-compressor requeue --reason no_gain --apply
+```
+
+## Backups
+
+The service's own state is a SQLite file in the `compressor-state` volume. Back it up if you
+care about the report history; losing it means assets already processed are re-evaluated,
+and the `compressor` marker on the server stops them anyway.
+
+What actually needs backing up is **Immich**: Postgres plus the upload directory. That is
+the only rollback for `delete_mode: permanent`.
+
+## Logs
+
+```bash
+docker compose logs -f immich-compressor
+```
+
+The first lines after a restart tell you the encoder that was chosen, every candidate that
+was rejected, and a loud warning if `delete_mode: permanent` is on. Rejected webhooks are
+logged at WARNING (bad secret) and ERROR (unparseable payload) — which matters, because
+Immich reports both as success on its side.

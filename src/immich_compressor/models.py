@@ -95,6 +95,13 @@ class WebhookAsset(BaseModel):
     type: str
     original_path: str | None = Field(default=None, alias="originalPath")
     original_file_name: NullableStr = Field(default="asset", alias="originalFileName")
+    # When Immich created the database *row* — that is, when the asset was uploaded.
+    # Deliberately distinct from `fileCreatedAt`, which is the capture date read out of
+    # EXIF: the captured v3.1.0 payload for a photo shot in 2024 and uploaded in 2026
+    # carries createdAt=2026-08-07, fileCreatedAt=2024-06-15. That gap is the only thing
+    # in the payload that separates a fresh upload from a bulk re-trigger of the
+    # `AssetMetadataExtraction` workflow, and `check_ingest_guards` reads it.
+    created_at: datetime | None = Field(default=None, alias="createdAt")
     file_created_at: datetime | None = Field(default=None, alias="fileCreatedAt")
     file_modified_at: datetime | None = Field(default=None, alias="fileModifiedAt")
     local_date_time: datetime | None = Field(default=None, alias="localDateTime")
@@ -243,9 +250,23 @@ class SkipReason(StrEnum):
     SOURCE_QUALITY = "source_quality"
 
 
-TERMINAL_STATES: frozenset[JobState] = frozenset(
-    {JobState.DONE, JobState.SKIPPED, JobState.FAILED}
-)
+class RejectReason(StrEnum):
+    """Why a webhook was refused at ingest, before any job row was written.
+
+    Deliberately not a :class:`SkipReason`. A skip is a verdict recorded *against a job*,
+    which makes the asset permanently immune to a later replay — including a replay from
+    `backfill`, which enqueues through the same `ON CONFLICT DO NOTHING`. A rejection
+    writes nothing at all, so the asset stays eligible for the intentional path.
+    """
+
+    # Older than `behavior.max_asset_age_hours`: this is a re-trigger for an asset that
+    # has been in the library for a while, not the webhook for a new upload.
+    TOO_OLD = "too_old"
+    # The payload carried no `createdAt`, so freshness cannot be established either way.
+    NO_CREATED_AT = "no_created_at"
+
+
+TERMINAL_STATES: frozenset[JobState] = frozenset({JobState.DONE, JobState.SKIPPED, JobState.FAILED})
 
 
 class Job(BaseModel):

@@ -100,9 +100,7 @@ def test_missing_api_key_fails_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         load_settings(_write(tmp_path, _MINIMAL))
 
 
-def test_enabled_type_without_preset_fails_fast(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_enabled_type_without_preset_fails_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
     body = _MINIMAL.replace("enabled_types: [VIDEO]", "enabled_types: [VIDEO, IMAGE]")
@@ -159,9 +157,7 @@ def test_suffix_must_start_with_dot() -> None:
 
 
 def test_argv_renders_without_a_shell() -> None:
-    preset = Preset(
-        name="p", type="VIDEO", cmd="ffmpeg -i {input} -c copy {output}", suffix=".mp4"
-    )
+    preset = Preset(name="p", type="VIDEO", cmd="ffmpeg -i {input} -c copy {output}", suffix=".mp4")
     argv = preset.argv(Path("/tmp/in put.mov"), Path("/tmp/out.mp4"))
     # The space in the filename stays inside a single argv element — it can never be
     # re-split into another argument, let alone another command.
@@ -195,17 +191,55 @@ def test_permanent_delete_mode_loads_when_it_is_coherent(
 ) -> None:
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
-    body = _with_behavior(
-        dry_run=False, trash_original=True, retention_days=0, delete_mode="permanent"
-    )
+    body = _with_behavior(dry_run=False, trash_original=True, retention_days=0, delete_mode="permanent")
     settings = load_settings(_write(tmp_path, body))
     assert settings.behavior.delete_mode == "permanent"
     assert settings.behavior.retention_days == 0
 
 
-def test_delete_mode_defaults_to_the_recoverable_one(
+def test_permanent_delete_mode_cannot_disable_the_bulk_trigger_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """`null` there plus `permanent` here is one Extract Metadata click from an empty library."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _with_behavior(
+        dry_run=False,
+        trash_original=True,
+        delete_mode="permanent",
+        max_asset_age_hours="null",
+    )
+    with pytest.raises(ConfigError, match=r"max_asset_age_hours"):
+        load_settings(_write(tmp_path, body))
+
+
+def test_the_bulk_trigger_gate_is_on_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    settings = load_settings(_write(tmp_path, _MINIMAL))
+    assert settings.behavior.max_asset_age_hours == 24.0
+
+
+def test_the_bulk_trigger_gate_may_be_disabled_when_deletes_are_recoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off is a legitimate choice — as long as an original can still be brought back."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _with_behavior(dry_run=False, trash_original=True, max_asset_age_hours="null")
+    settings = load_settings(_write(tmp_path, body))
+    assert settings.behavior.max_asset_age_hours is None
+
+
+def test_a_zero_length_freshness_window_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """0 would refuse every webhook, which is a stopped service, not a configured one."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    with pytest.raises(ConfigError):
+        load_settings(_write(tmp_path, _with_behavior(max_asset_age_hours=0)))
+
+
+def test_delete_mode_defaults_to_the_recoverable_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
     assert load_settings(_write(tmp_path, _MINIMAL)).behavior.delete_mode == "trash"
@@ -294,18 +328,14 @@ def test_extension_allowlist_decides_the_preset(
     assert settings.type_is_covered("IMAGE") is True
 
 
-def test_empty_extensions_accept_everything(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_empty_extensions_accept_everything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Video presets carry no extension list and must keep matching every container."""
     settings = _load_images(tmp_path, monkeypatch)
     for filename in ("clip.mp4", "clip.mov", "clip.avi", "clip.mkv"):
         assert settings.preset_for("VIDEO", filename) is not None
 
 
-def test_preset_overrides_win_over_behavior(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_preset_overrides_win_over_behavior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _load_images(tmp_path, monkeypatch)
     behavior = settings.behavior
     image = settings.preset_for("IMAGE", "a.jpg")
@@ -320,9 +350,7 @@ def test_preset_overrides_win_over_behavior(
     assert video.effective_min_savings_bytes(behavior) == behavior.min_savings_bytes
 
 
-def test_extension_without_dot_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_extension_without_dot_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
     body = _WITH_IMAGES.replace("extensions: [.jpg, .JPEG]", "extensions: [jpg]")
@@ -362,3 +390,22 @@ def test_warn_mode_is_allowed_with_recoverable_deletion(
         "  metadata_verify: warn\n" + _PRESETS
     )
     assert load_settings(_write(tmp_path, body)).behavior.metadata_verify == "warn"
+
+
+# ------------------------------------------------------------------ renamed settings
+
+
+def test_the_old_min_size_bytes_key_names_its_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 1.1.0 config must not fail with a bare "extra inputs are not permitted".
+
+    `extra="forbid"` is what stops a typo from being silently ignored, but for a key that
+    used to be valid it answers a question nobody asked. The startup error has to name the
+    new key, because a config that will not load stops the service.
+    """
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = "\nbehavior:\n  min_size_bytes: 20971520\n" + _PRESETS
+    with pytest.raises(ConfigError, match="min_savings_bytes"):
+        load_settings(_write(tmp_path, body))

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="immich-compressor — recompress the originals in your Immich library; nothing is deleted before its replacement is verified">
+  <title>immich-compressor</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#131316"/>
+      <stop offset="100%" stop-color="#1d1b2b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#4250af"/>
+      <stop offset="100%" stop-color="#8a6cf0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1280" height="8" fill="url(#accent)"/>
+
+  <g font-family="'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif">
+    <text x="96" y="196" font-size="76" font-weight="700" fill="#f4f4f6">immich-compressor</text>
+    <text x="96" y="256" font-size="32" fill="#b9b8c6">Recompress the originals in your Immich library.</text>
+    <text x="96" y="300" font-size="32" fill="#b9b8c6">Nothing is deleted before its replacement is verified.</text>
+
+    <!-- The size story, shown rather than claimed. -->
+    <g transform="translate(96, 372)">
+      <rect x="0" y="0" width="620" height="44" rx="6" fill="#3a3950"/>
+      <text x="16" y="30" font-size="22" fill="#e8e7ee" font-family="'DejaVu Sans Mono', monospace">original</text>
+      <rect x="0" y="60" width="326" height="44" rx="6" fill="url(#accent)"/>
+      <text x="16" y="90" font-size="22" fill="#ffffff" font-family="'DejaVu Sans Mono', monospace">replacement</text>
+      <text x="640" y="30" font-size="20" fill="#8d8ca0" font-family="'DejaVu Sans Mono', monospace">verified before</text>
+      <text x="640" y="90" font-size="20" fill="#8d8ca0" font-family="'DejaVu Sans Mono', monospace">anything is deleted</text>
+    </g>
+
+    <g transform="translate(96, 520)" font-size="24" fill="#9a99ab" font-family="'DejaVu Sans Mono', monospace">
+      <text x="0" y="0">dry run by default</text>
+      <text x="290" y="0">·</text>
+      <text x="320" y="0">GPU detected for you</text>
+      <text x="640" y="0">·</text>
+      <text x="670" y="0">four-step delete gate</text>
+    </g>
+
+    <text x="96" y="580" font-size="20" fill="#6f6e82" font-family="'DejaVu Sans Mono', monospace">github.com/Navilois/immich-compressor</text>
+  </g>
+</svg>

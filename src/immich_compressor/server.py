@@ -16,14 +16,17 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
+from . import __version__
 from .api import ImmichClient
 from .config import Settings, load_settings, warn_about_permanent_deletion
 from .encoder import probe_hardware_encoder
-from .models import JobState, WebhookPayload
-from .pipeline import Worker
+from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
+from .metrics import render as render_metrics
+from .models import JobState, RejectReason, WebhookPayload
+from .pipeline import WebhookRejected, Worker, check_ingest_guards
 from .store import JobStore
 
 logger = logging.getLogger(__name__)
@@ -33,6 +36,8 @@ class EnqueueResponse(BaseModel):
     accepted: bool
     asset_id: str
     duplicate: bool
+    # Set only when `accepted` is false: why the webhook was refused before it became a job.
+    reason: RejectReason | None = None
 
 
 class HealthResponse(BaseModel):
@@ -97,7 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="immich-compressor",
-        version="1.0.0",
+        version=__version__,
         description="Out-of-band recompression for Immich assets, driven by a workflow webhook.",
         lifespan=lifespan,
     )
@@ -111,9 +116,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         successfully", so a schema mismatch is otherwise completely invisible on both
         sides — which is exactly how the `exifInfo.tags: null` bug hid.
         """
-        logger.error(
-            "rejected %s %s with 422: %s", request.method, request.url.path, exc.errors()
-        )
+        logger.error("rejected %s %s with 422: %s", request.method, request.url.path, exc.errors())
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
 
     async def verify_token(request: Request) -> None:
@@ -121,8 +124,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expected = resolved.webhook.token.get_secret_value()
         presented = request.headers.get(resolved.webhook.header_name, "")
         if not presented or not hmac.compare_digest(presented, expected):
-            logger.warning("rejected webhook from %s: bad or missing shared secret",
-                           request.client.host if request.client else "unknown")
+            logger.warning(
+                "rejected webhook from %s: bad or missing shared secret",
+                request.client.host if request.client else "unknown",
+            )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
     @app.post(
@@ -135,6 +140,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store: JobStore = request.app.state.store
         settings: Settings = request.app.state.settings
         asset = payload.data.asset
+
+        # Before the store, never after: a rejection must not leave a row behind, or
+        # `backfill` could never reach the asset again. Answered 202 like everything else
+        # — Immich logs a non-2xx as "executed successfully" anyway, so the status code is
+        # not a channel we have; the body and the log line are.
+        try:
+            check_ingest_guards(asset, settings.behavior)
+        except WebhookRejected as rejected:
+            logger.warning(
+                "refused %s asset=%s type=%s (%s): %s",
+                payload.trigger,
+                asset.id,
+                asset.type,
+                rejected.reason.value,
+                rejected.detail,
+            )
+            return EnqueueResponse(accepted=False, asset_id=asset.id, duplicate=False, reason=rejected.reason)
+
         inserted = await store.enqueue(
             asset.id,
             payload.model_dump(mode="json", by_alias=True),
@@ -202,6 +225,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "metadata_verify": settings.behavior.metadata_verify,
         }
         return body
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    async def metrics(request: Request) -> PlainTextResponse:
+        """Prometheus exposition. Unauthenticated, like /stats — it carries no asset data.
+
+        No port is published by default, so this is reachable from the docker network the
+        service already shares with Immich, which is where a Prometheus in the same stack
+        lives anyway.
+        """
+        store: JobStore = request.app.state.store
+        worker: Worker = request.app.state.worker
+        settings: Settings = request.app.state.settings
+        stats = worker.pipeline.stats
+        body = render_metrics(
+            store_stats=await store.stats(),
+            session={
+                "processed": stats.processed,
+                "skipped": stats.skipped,
+                "failed": stats.failed,
+                "deleted": stats.deleted,
+                "bytes_saved": stats.bytes_saved,
+            },
+            encode_seconds=stats.encode_seconds,
+            config={
+                "dry_run": settings.behavior.dry_run,
+                "trash_original": settings.behavior.trash_original,
+                "delete_mode": settings.behavior.delete_mode,
+            },
+            version=__version__,
+        )
+        return PlainTextResponse(body, media_type=METRICS_CONTENT_TYPE)
 
     @app.get("/jobs")
     async def jobs(

@@ -1,0 +1,404 @@
+{
+  "$defs": {
+    "BehaviorSettings": {
+      "additionalProperties": false,
+      "description": "Everything that decides whether and how an asset gets touched.",
+      "properties": {
+        "dry_run": {
+          "default": true,
+          "title": "Dry Run",
+          "type": "boolean"
+        },
+        "trash_original": {
+          "default": false,
+          "title": "Trash Original",
+          "type": "boolean"
+        },
+        "delete_mode": {
+          "default": "trash",
+          "enum": [
+            "trash",
+            "permanent"
+          ],
+          "title": "Delete Mode",
+          "type": "string"
+        },
+        "max_asset_age_hours": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 24.0,
+          "title": "Max Asset Age Hours"
+        },
+        "retention_days": {
+          "default": 7,
+          "minimum": 0,
+          "title": "Retention Days",
+          "type": "integer"
+        },
+        "initial_delay_seconds": {
+          "default": 300,
+          "minimum": 0,
+          "title": "Initial Delay Seconds",
+          "type": "integer"
+        },
+        "concurrency": {
+          "default": 1,
+          "maximum": 4,
+          "minimum": 1,
+          "title": "Concurrency",
+          "type": "integer"
+        },
+        "max_attempts": {
+          "default": 3,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "poll_interval_seconds": {
+          "default": 5.0,
+          "exclusiveMinimum": 0,
+          "title": "Poll Interval Seconds",
+          "type": "number"
+        },
+        "quality": {
+          "default": "balanced",
+          "enum": [
+            "balanced",
+            "higher",
+            "smaller"
+          ],
+          "title": "Quality",
+          "type": "string"
+        },
+        "min_savings_bytes": {
+          "default": 1048576,
+          "minimum": 0,
+          "title": "Min Savings Bytes",
+          "type": "integer"
+        },
+        "max_ratio": {
+          "default": 0.6,
+          "exclusiveMinimum": 0,
+          "maximum": 1.0,
+          "title": "Max Ratio",
+          "type": "number"
+        },
+        "enabled_types": {
+          "items": {
+            "enum": [
+              "IMAGE",
+              "VIDEO",
+              "AUDIO",
+              "OTHER"
+            ],
+            "type": "string"
+          },
+          "title": "Enabled Types",
+          "type": "array"
+        },
+        "skip_if_named_people": {
+          "default": true,
+          "title": "Skip If Named People",
+          "type": "boolean"
+        },
+        "metadata_verify": {
+          "default": "strict",
+          "enum": [
+            "strict",
+            "warn"
+          ],
+          "title": "Metadata Verify",
+          "type": "string"
+        },
+        "post_upload_settle_s": {
+          "default": 30.0,
+          "minimum": 0,
+          "title": "Post Upload Settle S",
+          "type": "number"
+        },
+        "duration_tolerance_s": {
+          "default": 0.5,
+          "minimum": 0,
+          "title": "Duration Tolerance S",
+          "type": "number"
+        },
+        "require_same_resolution": {
+          "default": true,
+          "title": "Require Same Resolution",
+          "type": "boolean"
+        },
+        "require_date_time_original": {
+          "default": true,
+          "title": "Require Date Time Original",
+          "type": "boolean"
+        },
+        "work_dir": {
+          "default": "/var/tmp/immich-compressor",
+          "format": "path",
+          "title": "Work Dir",
+          "type": "string"
+        },
+        "free_space_factor": {
+          "default": 3.0,
+          "minimum": 1.0,
+          "title": "Free Space Factor",
+          "type": "number"
+        },
+        "compressed_marker": {
+          "default": ".cmp",
+          "title": "Compressed Marker",
+          "type": "string"
+        },
+        "metadata_key": {
+          "default": "compressor",
+          "title": "Metadata Key",
+          "type": "string"
+        }
+      },
+      "title": "BehaviorSettings",
+      "type": "object"
+    },
+    "HardwareSettings": {
+      "additionalProperties": false,
+      "description": "Which encoder to use. The default is \"work it out for me\".",
+      "properties": {
+        "mode": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "cpu",
+            "qsv",
+            "vaapi",
+            "nvenc"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "render_node": {
+          "default": "auto",
+          "title": "Render Node",
+          "type": "string"
+        }
+      },
+      "title": "HardwareSettings",
+      "type": "object"
+    },
+    "ImmichSettings": {
+      "additionalProperties": false,
+      "description": "Connection details for the Immich server.",
+      "properties": {
+        "base_url": {
+          "default": "http://immich-server:2283/api",
+          "title": "Base Url",
+          "type": "string"
+        },
+        "api_key": {
+          "default": "",
+          "format": "password",
+          "title": "Api Key",
+          "type": "string",
+          "writeOnly": true
+        },
+        "timeout_s": {
+          "default": 120.0,
+          "title": "Timeout S",
+          "type": "number"
+        },
+        "connect_timeout_s": {
+          "default": 10.0,
+          "title": "Connect Timeout S",
+          "type": "number"
+        }
+      },
+      "title": "ImmichSettings",
+      "type": "object"
+    },
+    "Preset": {
+      "additionalProperties": false,
+      "description": "A single encoder recipe.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "match_type": {
+          "enum": [
+            "IMAGE",
+            "VIDEO",
+            "AUDIO",
+            "OTHER"
+          ],
+          "title": "Match Type",
+          "type": "string"
+        },
+        "extensions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Extensions",
+          "type": "array"
+        },
+        "cmd": {
+          "title": "Cmd",
+          "type": "string"
+        },
+        "suffix": {
+          "title": "Suffix",
+          "type": "string"
+        },
+        "exiftool_copy": {
+          "default": false,
+          "title": "Exiftool Copy",
+          "type": "boolean"
+        },
+        "normalize_orientation": {
+          "default": false,
+          "title": "Normalize Orientation",
+          "type": "boolean"
+        },
+        "timeout_s": {
+          "default": 3600.0,
+          "exclusiveMinimum": 0,
+          "title": "Timeout S",
+          "type": "number"
+        },
+        "max_ratio": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Ratio"
+        },
+        "min_savings_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Savings Bytes"
+        },
+        "require_date_time_original": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Require Date Time Original"
+        },
+        "min_source_quality": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Source Quality"
+        }
+      },
+      "required": [
+        "name",
+        "match_type",
+        "cmd",
+        "suffix"
+      ],
+      "title": "Preset",
+      "type": "object"
+    },
+    "WebhookSettings": {
+      "additionalProperties": false,
+      "description": "Shared-secret configuration for the inbound webhook endpoint.",
+      "properties": {
+        "token": {
+          "default": "",
+          "format": "password",
+          "title": "Token",
+          "type": "string",
+          "writeOnly": true
+        },
+        "header_name": {
+          "default": "X-Compressor-Token",
+          "title": "Header Name",
+          "type": "string"
+        }
+      },
+      "title": "WebhookSettings",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Generated from the settings model by scripts/gen_docs.py. Secrets (immich.api_key, webhook.token) are rejected in this file and come from the environment instead.",
+  "properties": {
+    "immich": {
+      "$ref": "#/$defs/ImmichSettings"
+    },
+    "webhook": {
+      "$ref": "#/$defs/WebhookSettings"
+    },
+    "behavior": {
+      "$ref": "#/$defs/BehaviorSettings"
+    },
+    "hardware": {
+      "$ref": "#/$defs/HardwareSettings"
+    },
+    "presets": {
+      "items": {
+        "$ref": "#/$defs/Preset"
+      },
+      "title": "Presets",
+      "type": "array"
+    },
+    "database_path": {
+      "default": "/var/lib/immich-compressor/state.db",
+      "format": "path",
+      "title": "Database Path",
+      "type": "string"
+    },
+    "listen_host": {
+      "default": "0.0.0.0",
+      "title": "Listen Host",
+      "type": "string"
+    },
+    "listen_port": {
+      "default": 8080,
+      "title": "Listen Port",
+      "type": "integer"
+    },
+    "log_level": {
+      "default": "INFO",
+      "title": "Log Level",
+      "type": "string"
+    }
+  },
+  "title": "immich-compressor configuration",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Navilois/immich-compressor/main/docs/config.schema.json"
+}

@@ -1,0 +1,14 @@
+# Normalise line endings: this project is built and run on Linux only.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.mp4 binary
+*.mov binary
+
+# Keep GitHub's language statistics about the service, not its fixtures and docs.
+tests/fixtures/** linguist-generated=true
+docs/** linguist-documentation=true
+docs/config.schema.json linguist-generated=true
+*.md linguist-documentation=true

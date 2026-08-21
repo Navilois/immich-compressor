@@ -5,6 +5,9 @@ Guiding rules:
 * every step is idempotent, so a crash anywhere is recoverable by replaying from ``state``;
 * nothing is destroyed before the replacement is confirmed to exist on the server;
 * ``dry_run`` short-circuits before the first mutating call.
+
+:func:`check_ingest_guards` is the odd one out — it runs in the webhook handler, before a
+job exists at all. It lives here so that every guard is in one file.
 """
 
 from __future__ import annotations
@@ -14,18 +17,21 @@ import contextlib
 import json
 import logging
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import encoder
 from .api import ImmichClient, ImmichError, sanitize_rating
-from .config import Preset, Settings
+from .config import BehaviorSettings, Preset, Settings
+from .metrics import Histogram
 from .models import (
     AssetDetail,
     Job,
     JobState,
     MetadataItem,
+    RejectReason,
     SkipReason,
     UpdateAssetFields,
     WebhookAsset,
@@ -50,6 +56,68 @@ class SkipJob(Exception):  # noqa: N818 - control flow, not an error condition
         self.detail = detail
 
 
+class WebhookRejected(Exception):  # noqa: N818 - control flow, not an error condition
+    """Raised by :func:`check_ingest_guards` to refuse a webhook before it becomes a job."""
+
+    def __init__(self, reason: RejectReason, detail: str = "") -> None:
+        super().__init__(detail or reason.value)
+        self.reason = reason
+        self.detail = detail
+
+
+def check_ingest_guards(
+    asset: WebhookAsset,
+    behavior: BehaviorSettings,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Step 1a: decide whether this webhook is a new upload or a bulk re-trigger.
+
+    Immich's workflow trigger is ``AssetMetadataExtraction``, and metadata extraction is a
+    maintenance operation: one click on **Administration -> Jobs -> Extract Metadata**
+    re-fires the workflow for every asset in the library, unbounded. Assets this service
+    has already seen are immune — ``store.enqueue`` is ``ON CONFLICT DO NOTHING`` — but the
+    ones it has never seen are not, and that is the entire library until it has been worked
+    through.
+
+    ``createdAt`` is when Immich created the database row, so it dates the *upload*, not
+    the exposure. A webhook for a genuine upload arrives seconds after it; a re-trigger
+    carries whatever age the asset already had. That is the whole discriminator, and unlike
+    a rate limiter it does not fire on a legitimate import of a thousand photos, because
+    every one of those is new.
+
+    This runs in the webhook handler rather than in :func:`check_guards`, and the placement
+    is load-bearing: a rejection must leave *no* row behind. ``backfill`` enqueues through
+    the same ``ON CONFLICT DO NOTHING``, so a library recorded here as skipped would be a
+    library ``backfill`` could never reach again.
+
+    Raises :class:`WebhookRejected`; returns ``None`` when the asset may be queued.
+    """
+    limit_hours = behavior.max_asset_age_hours
+    if limit_hours is None:
+        return
+
+    created = asset.created_at
+    if created is None:
+        # Fail closed. An Immich that stops sending `createdAt` makes this service inert
+        # and loud, which is the correct direction for something that deletes originals:
+        # the alternative is compressing a whole library on the assumption it is new.
+        raise WebhookRejected(
+            RejectReason.NO_CREATED_AT,
+            "payload carries no createdAt, so a new upload cannot be told from a bulk re-trigger",
+        )
+    if created.tzinfo is None:  # pragma: no cover - live Immich always sends a UTC "Z"
+        created = created.replace(tzinfo=UTC)
+
+    age_hours = ((now or datetime.now(UTC)) - created).total_seconds() / 3600.0
+    if age_hours > limit_hours:
+        raise WebhookRejected(
+            RejectReason.TOO_OLD,
+            f"added to Immich {age_hours:.1f} h ago, past max_asset_age_hours {limit_hours:g} — "
+            "this is a re-trigger, not a new upload; use `immich-compressor backfill` if it was meant",
+        )
+
+
 @dataclass(slots=True)
 class PipelineStats:
     processed: int = 0
@@ -57,6 +125,9 @@ class PipelineStats:
     failed: int = 0
     deleted: int = 0
     bytes_saved: int = 0
+    # Wall-clock time of the encoder command, for /metrics. Observed around the encode
+    # itself, not around the whole job, so a slow download does not read as a slow encoder.
+    encode_seconds: Histogram = field(default_factory=Histogram)
 
 
 def check_guards(asset: WebhookAsset, settings: Settings) -> None:
@@ -216,12 +287,9 @@ class Pipeline:
         marker = await self._client.has_metadata_key(asset_id, behavior.metadata_key)
         if marker is not None:
             if marker_blocks_reprocessing(marker):
-                raise SkipJob(
-                    SkipReason.ALREADY_COMPRESSED, "compressor marker present on the asset"
-                )
+                raise SkipJob(SkipReason.ALREADY_COMPRESSED, "compressor marker present on the asset")
             logger.info(
-                "%s carries a v%s marker without a replacement — re-trying under the "
-                "current sanity gate",
+                "%s carries a v%s marker without a replacement — re-trying under the current sanity gate",
                 asset_id,
                 marker.value.get("v"),
             )
@@ -290,7 +358,9 @@ class Pipeline:
         source_probe = await encoder.probe(source, is_still=not is_video)
 
         # --- Step 4: encode ------------------------------------------------------
+        started = time.monotonic()
         result = await encoder.encode(source, preset, tmp)
+        self.stats.encode_seconds.observe(time.monotonic() - started)
         logger.info(
             "encoded %s: %d -> %d bytes (ratio %.3f)",
             asset_id,
@@ -316,14 +386,10 @@ class Pipeline:
             # Mark the *original* so we do not burn CPU on it again on the next webhook.
             await self._safe_mark(
                 asset_id,
-                build_marker(
-                    source_id=asset_id, new_id=None, preset_name=preset.name, ratio=result.ratio
-                ),
+                build_marker(source_id=asset_id, new_id=None, preset_name=preset.name, ratio=result.ratio),
                 extra={"skipped": "no_gain", "detail": sanity.reason()[:300]},
             )
-            await self._store.update(
-                asset_id, new_bytes=result.new_bytes, ratio=round(result.ratio, 4)
-            )
+            await self._store.update(asset_id, new_bytes=result.new_bytes, ratio=round(result.ratio, 4))
             raise SkipJob(SkipReason.NO_GAIN, sanity.reason())
 
         # --- Step 6: upload ------------------------------------------------------
@@ -348,8 +414,9 @@ class Pipeline:
                 visibility=asset.visibility,
             )
             if upload.status == "duplicate":
-                logger.info("upload of %s reported duplicate of %s — leaving original alone",
-                            asset_id, upload.id)
+                logger.info(
+                    "upload of %s reported duplicate of %s — leaving original alone", asset_id, upload.id
+                )
                 await self._store.update(asset_id, new_asset_id=upload.id)
                 raise SkipJob(SkipReason.DUPLICATE, f"server already has this file as {upload.id}")
 
@@ -475,9 +542,7 @@ class Pipeline:
 
     # ------------------------------------------------------------------ deletion
 
-    async def finalize_original(
-        self, job: Job, new_asset_id: str, expected_checksum: str | None
-    ) -> bool:
+    async def finalize_original(self, job: Job, new_asset_id: str, expected_checksum: str | None) -> bool:
         """Step 10b: verify the replacement, then remove the original.
 
         The single place the original is ever deleted. Two callers: ``_run_media_steps``
@@ -516,9 +581,7 @@ class Pipeline:
         )
         return True
 
-    async def _verify_replacement(
-        self, new_asset_id: str, expected_checksum: str | None
-    ) -> str | None:
+    async def _verify_replacement(self, new_asset_id: str, expected_checksum: str | None) -> str | None:
         """The gate in front of the delete. Returns the first failure, or ``None``.
 
         All four conditions are checked in both delete modes. In ``trash`` mode the delete
@@ -567,9 +630,7 @@ class Pipeline:
 
     # ------------------------------------------------------------------ helpers
 
-    async def _apply_fields(
-        self, asset: WebhookAsset, source_detail: AssetDetail, new_asset_id: str
-    ) -> None:
+    async def _apply_fields(self, asset: WebhookAsset, source_detail: AssetDetail, new_asset_id: str) -> None:
         """Step 8a: description / rating / GPS / capture date.
 
         The live source state wins over the webhook snapshot: the payload was produced at
@@ -590,9 +651,7 @@ class Pipeline:
             return
         await self._client.update_asset(new_asset_id, fields)
 
-    async def _apply_tags(
-        self, asset: WebhookAsset, source_detail: AssetDetail, new_asset_id: str
-    ) -> None:
+    async def _apply_tags(self, asset: WebhookAsset, source_detail: AssetDetail, new_asset_id: str) -> None:
         """Step 8b: tags.
 
         The live source carries real tag objects; the webhook payload only has names in
@@ -643,9 +702,7 @@ class Worker:
         for asset_type in behavior.enabled_types:
             for index in range(behavior.concurrency):
                 name = f"worker-{asset_type.lower()}-{index}"
-                self._tasks.append(
-                    asyncio.create_task(self._loop(name, (asset_type,)), name=name)
-                )
+                self._tasks.append(asyncio.create_task(self._loop(name, (asset_type,)), name=name))
         self._tasks.append(asyncio.create_task(self._sweeper(), name="trash-sweeper"))
         logger.info(
             "worker started (lanes=%s, concurrency=%d each, dry_run=%s, trash_original=%s, "
@@ -704,9 +761,7 @@ class Worker:
     async def _trash_one(self, job: Job) -> None:
         """The sweeper's call into the shared finaliser."""
         if not job.new_asset_id:
-            logger.error(
-                "refusing to delete %s: no replacement asset recorded", job.source_asset_id
-            )
+            logger.error("refusing to delete %s: no replacement asset recorded", job.source_asset_id)
             await self._store.mark_failed(job.source_asset_id, "no replacement asset recorded")
             return
         await self.pipeline.finalize_original(job, job.new_asset_id, job.new_checksum)

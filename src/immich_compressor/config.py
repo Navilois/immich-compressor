@@ -33,6 +33,8 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 AssetType = Literal["IMAGE", "VIDEO", "AUDIO", "OTHER"]
+HardwareMode = Literal["auto", "cpu", "qsv", "vaapi", "nvenc"]
+QualityLevel = Literal["balanced", "higher", "smaller"]
 
 # Placeholders a preset command template must contain.
 INPUT_PLACEHOLDER = "{input}"
@@ -107,6 +109,20 @@ class BehaviorSettings(BaseModel):
     #                 undo other than a backup of Postgres plus the upload directory.
     delete_mode: Literal["trash", "permanent"] = "trash"
 
+    # The bulk-trigger gate. Refuse a webhook for an asset that was added to Immich longer
+    # ago than this, measured from the payload's `createdAt` (upload time, not capture
+    # date). The workflow trigger is `AssetMetadataExtraction`, and one click on
+    # Administration -> Jobs -> Extract Metadata re-fires it for *every asset in the
+    # library* — see docs/immich-api-notes.md. A fresh upload reaches this service seconds
+    # old, so a day of slack lets even a big video sit behind a backed-up extraction queue
+    # and still get through, while an asset that has been in the library for a week is
+    # unambiguously a re-trigger.
+    #
+    # `null` disables the gate, and is refused together with `delete_mode: permanent`.
+    # Working through an existing library is what `immich-compressor backfill` is for: it
+    # enqueues directly and is not subject to this gate.
+    max_asset_age_hours: float | None = Field(default=24.0, gt=0)
+
     # 0 means "as soon as the verification chain passes", inline in the job rather than
     # on the sweeper's next pass.
     retention_days: int = Field(default=7, ge=0)
@@ -114,6 +130,11 @@ class BehaviorSettings(BaseModel):
     concurrency: int = Field(default=1, ge=1, le=4)
     max_attempts: int = Field(default=3, ge=1)
     poll_interval_seconds: float = Field(default=5.0, gt=0)
+
+    # Quality target for the *generated* presets, mapped per encoder to the right
+    # CRF / -global_quality / -cq number. Ignored when `presets:` is written by hand.
+    # "balanced" reproduces exactly what this project shipped before the catalog existed.
+    quality: QualityLevel = "balanced"
 
     # How many bytes a job has to actually save to be worth an asset lifecycle — a new
     # database row, thumbnails, a smart-search embedding, face detection, OCR and a
@@ -184,7 +205,33 @@ class BehaviorSettings(BaseModel):
                 "behavior.metadata_verify: 'warn' is incompatible with "
                 "delete_mode: 'permanent' — a warning cannot undo a force-deleted original"
             )
+        if self.max_asset_age_hours is None:
+            # Without the gate, one click on Extract Metadata re-fires the workflow for
+            # every asset in the library, and at this delete_mode each one that passes the
+            # verification chain is force-deleted. The gate is the only thing standing
+            # between a maintenance button and an unrecoverable full-library pass.
+            raise ConfigError(
+                "behavior.max_asset_age_hours: null is incompatible with "
+                "delete_mode: 'permanent' — without the gate a single bulk metadata "
+                "extraction force-deletes every original in the library"
+            )
         return self
+
+
+class HardwareSettings(BaseModel):
+    """Which encoder to use. The default is "work it out for me"."""
+
+    model_config = {"extra": "forbid"}
+
+    # "auto"  detect the best encoder this machine can actually run (see hardware.py)
+    # "cpu"   never consider a GPU
+    # "qsv" / "vaapi" / "nvenc"  pin one hardware encoder; if it fails its one-frame
+    #         test encode the service still falls back to the CPU preset rather than
+    #         refusing to start
+    mode: HardwareMode = "auto"
+    # "auto", or a specific DRM render node such as /dev/dri/renderD129 on a box with
+    # more than one GPU.
+    render_node: str = "auto"
 
 
 class Preset(BaseModel):
@@ -255,9 +302,7 @@ class Preset(BaseModel):
         normalised: list[str] = []
         for extension in self.extensions:
             if not extension.startswith("."):
-                raise ConfigError(
-                    f"preset {self.name!r}: extension {extension!r} must start with a dot"
-                )
+                raise ConfigError(f"preset {self.name!r}: extension {extension!r} must start with a dot")
             normalised.append(extension.lower())
         object.__setattr__(self, "extensions", normalised)
         if self.normalize_orientation:
@@ -304,13 +349,9 @@ class Preset(BaseModel):
     @property
     def render_node(self) -> str:
         """The DRM device the preset pins itself to, or the conventional default."""
-        return self._value_after(("-qsv_device", "-vaapi_device", "-hwaccel_device")) or (
-            DEFAULT_RENDER_NODE
-        )
+        return self._value_after(("-qsv_device", "-vaapi_device", "-hwaccel_device")) or (DEFAULT_RENDER_NODE)
 
-    def _value_after(
-        self, flags: tuple[str, ...], *, endswith: tuple[str, ...] | None = None
-    ) -> str | None:
+    def _value_after(self, flags: tuple[str, ...], *, endswith: tuple[str, ...] | None = None) -> str | None:
         tokens = shlex.split(self.cmd)
         for index, token in enumerate(tokens[:-1]):
             if token in flags:
@@ -377,6 +418,9 @@ class Settings(BaseSettings):
     immich: ImmichSettings = Field(default_factory=ImmichSettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     behavior: BehaviorSettings = Field(default_factory=BehaviorSettings)
+    hardware: HardwareSettings = Field(default_factory=HardwareSettings)
+    # Written by hand, this always wins. Left empty, the presets are generated from
+    # the detected hardware — see `immich_compressor.hardware`.
     presets: list[Preset] = Field(default_factory=list)
 
     database_path: Path = Path("/var/lib/immich-compressor/state.db")
@@ -390,9 +434,12 @@ class Settings(BaseSettings):
         duplicates = {name for name in names if names.count(name) > 1}
         if duplicates:
             raise ConfigError(f"duplicate preset names: {sorted(duplicates)}")
-        for asset_type in self.behavior.enabled_types:
-            if not self.type_is_covered(asset_type):
-                raise ConfigError(f"enabled_types contains {asset_type} but no preset matches it")
+        # Only meaningful once presets exist. An empty list means "generate them from the
+        # detected hardware", and `load_settings` fills it in before anyone sees it.
+        if self.presets:
+            for asset_type in self.behavior.enabled_types:
+                if not self.type_is_covered(asset_type):
+                    raise ConfigError(f"enabled_types contains {asset_type} but no preset matches it")
         return self
 
     def preset_for(self, asset_type: str, filename: str | None = None) -> Preset | None:
@@ -412,6 +459,27 @@ class Settings(BaseSettings):
     def type_is_covered(self, asset_type: str) -> bool:
         """Whether any preset handles ``asset_type``, regardless of extension."""
         return any(preset.match_type == asset_type for preset in self.presets)
+
+
+# Keys an earlier release accepted under a different name. Caught by hand because
+# `extra="forbid"` answers a rename with "Extra inputs are not permitted", which tells
+# nobody what to write instead — and a config that fails to load stops the service.
+_RENAMED_KEYS: dict[tuple[str, str], str] = {
+    ("behavior", "min_size_bytes"): (
+        "behavior.min_size_bytes was replaced by behavior.min_savings_bytes. The old key "
+        "guessed from the input size; the new one is how many bytes a job has to actually "
+        "save. The default is 1048576 (1 MiB) — carrying the old 20971520 across would "
+        "skip almost everything. See docs/upgrading.md"
+    ),
+}
+
+
+def _forbid_renamed_keys(raw: dict[str, Any]) -> None:
+    """Fail with the rename spelled out rather than with a generic "extra input"."""
+    for (section, key), message in _RENAMED_KEYS.items():
+        block = raw.get(section)
+        if isinstance(block, dict) and key in block:
+            raise ConfigError(message)
 
 
 def _forbid_secrets_in_file(raw: dict[str, Any]) -> None:
@@ -452,11 +520,22 @@ def _normalise_presets(raw: dict[str, Any]) -> None:
     raw["presets"] = items
 
 
-def load_settings(config_path: Path | None = None) -> Settings:
+def load_settings(
+    config_path: Path | None = None,
+    *,
+    require_secrets: bool = True,
+    autodetect: bool = True,
+) -> Settings:
     """Read YAML + environment into a validated :class:`Settings`.
 
     Raises :class:`ConfigError` on any structural problem so a misconfigured deployment
     dies at startup rather than halfway through a job.
+
+    ``require_secrets=False`` is for the commands that inspect the machine rather than the
+    server (``hardware``): they must work before an API key exists. ``autodetect=False``
+    returns the configuration exactly as written, without generating presets — which is
+    what the ``hardware`` command wants, because it runs detection itself and would
+    otherwise probe the GPU twice.
     """
     path = config_path or Path(os.environ.get("COMPRESSOR_CONFIG", "config.yaml"))
     raw: dict[str, Any] = {}
@@ -467,6 +546,7 @@ def load_settings(config_path: Path | None = None) -> Settings:
         raw = loaded
 
     _forbid_secrets_in_file(raw)
+    _forbid_renamed_keys(raw)
     _normalise_presets(raw)
 
     token = _yaml_values.set(raw)
@@ -479,11 +559,37 @@ def load_settings(config_path: Path | None = None) -> Settings:
     finally:
         _yaml_values.reset(token)
 
-    if not settings.immich.api_key.get_secret_value():
-        raise ConfigError("IMMICH__API_KEY is not set")
-    if not settings.webhook.token.get_secret_value():
-        raise ConfigError("WEBHOOK__TOKEN is not set")
-    return settings
+    if require_secrets:
+        if not settings.immich.api_key.get_secret_value():
+            raise ConfigError("IMMICH__API_KEY is not set")
+        if not settings.webhook.token.get_secret_value():
+            raise ConfigError("WEBHOOK__TOKEN is not set")
+    if not autodetect:
+        return settings
+    return resolve_hardware(settings)
+
+
+def resolve_hardware(settings: Settings) -> Settings:
+    """Fill in generated presets when the configuration did not write any by hand.
+
+    Imported lazily: ``hardware`` needs ``Preset`` and ``Settings`` from this module, so a
+    module-level import here would be circular. Nothing is detected when ``presets:`` is
+    written out, which is what keeps an upgrade from a hand-written 1.0.0 config a no-op.
+    """
+    if settings.presets:
+        return settings
+
+    from .hardware import apply_to_settings
+
+    try:
+        resolved, report = apply_to_settings(settings)
+    except ValueError as exc:
+        # build_presets refuses an asset type the catalog has no recipe for.
+        raise ConfigError(str(exc)) from exc
+    logger.info("%s", report.summary_line())
+    for candidate in report.rejected:
+        logger.info("  not using %s: %s", candidate.where(), candidate.reason)
+    return resolved
 
 
 def warn_about_permanent_deletion(behavior: BehaviorSettings) -> None:

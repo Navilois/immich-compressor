@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .api import ImmichClient, ImmichError
 from .config import ConfigError, Settings, load_settings
 from .encoder import (
@@ -23,7 +24,15 @@ from .encoder import (
     probe_hardware_encoder,
     verify_metadata,
 )
+from .hardware import HardwareReport, apply_to_settings, format_report
 from .models import JobState, SkipReason
+from .setup_cmd import (
+    DEFAULT_BASE_URL,
+    DEFAULT_NETWORK,
+    DEFAULT_WEBHOOK_URL,
+    SetupOptions,
+    run_setup,
+)
 from .store import JobStore
 
 logger = logging.getLogger("immich_compressor")
@@ -36,8 +45,12 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def _load(args: argparse.Namespace) -> Settings:
-    return load_settings(Path(args.config) if args.config else None)
+def _load(args: argparse.Namespace, *, require_secrets: bool = True, autodetect: bool = True) -> Settings:
+    return load_settings(
+        Path(args.config) if args.config else None,
+        require_secrets=require_secrets,
+        autodetect=autodetect,
+    )
 
 
 # ---------------------------------------------------------------------------- commands
@@ -78,25 +91,82 @@ async def _check(settings: Settings) -> int:
     print(f"Immich reachable, version {version}")
     print(f"presets: {', '.join(f'{p.name}({p.match_type})' for p in settings.presets) or 'none'}")
     print(f"dry_run={settings.behavior.dry_run} trash_original={settings.behavior.trash_original}")
+    return 0
 
-    unusable = 0
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Config, connectivity and hardware in one command.
+
+    The hardware half is the `hardware` command: everything a GPU problem needs is there,
+    and duplicating a shorter version of it here only invited the two to disagree.
+    """
+    settings = _load(args)
+    _configure_logging(settings.log_level)
+    result = asyncio.run(_check(settings))
+
+    report = _hardware_report(settings)
+    selected = report.selected
+    if report.explicit_presets:
+        print("encoder: presets come from config.yaml — see `immich-compressor hardware`")
+    elif selected is None:
+        print("encoder: NONE confirmed, falling back to CPU — run `immich-compressor hardware`")
+        result = result or 1
+    else:
+        where = f" on {selected.device}" if selected.device else ""
+        print(f"encoder: {selected.encoder}{where} confirmed by a one-frame test encode")
+
+    # A hand-written preset that names a GPU still deserves the probe `check` always did.
     for preset in settings.presets:
         encoder_name = preset.hardware_encoder
         if encoder_name is None:
             continue
-        problem = await probe_hardware_encoder(encoder_name, preset.render_node)
+        problem = asyncio.run(probe_hardware_encoder(encoder_name, preset.render_node))
         if problem is None:
             print(f"  {preset.name}: {encoder_name} on {preset.render_node} ok")
         else:
             print(f"  {preset.name}: {encoder_name} on {preset.render_node} UNUSABLE — {problem}")
-            unusable += 1
-    return 1 if unusable else 0
+            result = result or 1
+    return result
 
 
-def cmd_check(args: argparse.Namespace) -> int:
-    settings = _load(args)
-    _configure_logging(settings.log_level)
-    return asyncio.run(_check(settings))
+def _hardware_report(settings: Settings) -> HardwareReport:
+    _, report = apply_to_settings(settings, always_detect=True)
+    return report
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Guided first-run setup. Deliberately does not load config.yaml — it writes one."""
+    _configure_logging("WARNING")
+    return run_setup(
+        SetupOptions(
+            base_url=args.url,
+            api_key=args.api_key or "",
+            session_token=args.session_token,
+            network=args.network,
+            webhook_url=args.webhook_url,
+            directory=Path(args.directory),
+            non_interactive=args.non_interactive,
+            force=args.force,
+            skip_workflow=args.no_workflow,
+        )
+    )
+
+
+def cmd_hardware(args: argparse.Namespace) -> int:
+    """Explain, in one command, which encoder this machine gets and why.
+
+    Deliberately usable before anything else is configured: no API key, no reachable
+    server, no config file. Somebody evaluating the project should be able to run this
+    against their box and see the answer.
+    """
+    settings = _load(args, require_secrets=False, autodetect=False)
+    _configure_logging("WARNING")
+    report = _hardware_report(settings)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(format_report(report))
+    return 0
 
 
 async def _encode_local(settings: Settings, path: Path, asset_type: str) -> int:
@@ -119,9 +189,7 @@ async def _encode_local(settings: Settings, path: Path, asset_type: str) -> int:
 
     source_probe = await probe(path, is_still=not is_video)
     result = await encode(path, preset, work_dir)
-    metadata_differences = (
-        await verify_metadata(path, result.output_path) if preset.exiftool_copy else []
-    )
+    metadata_differences = await verify_metadata(path, result.output_path) if preset.exiftool_copy else []
     sanity = await check_sanity(
         source=path,
         result=result,
@@ -355,13 +423,44 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="immich-compressor", description=__doc__)
+    parser.add_argument("--version", action="version", version=f"immich-compressor {__version__}")
     parser.add_argument("-c", "--config", help="path to config.yaml (default: $COMPRESSOR_CONFIG)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("serve", help="run the webhook service").set_defaults(func=cmd_serve)
-    sub.add_parser("check", help="validate config and reach the Immich API").set_defaults(
+    sub.add_parser("check", help="validate config, reach the Immich API, confirm the encoder").set_defaults(
         func=cmd_check
     )
+
+    setup_parser = sub.add_parser(
+        "setup", help="guided first-run setup: keys, permissions, hardware, config, workflow"
+    )
+    setup_parser.add_argument("--url", default=DEFAULT_BASE_URL, help="Immich API base URL")
+    setup_parser.add_argument("--api-key", help="Immich API key (or set IMMICH_API_KEY)")
+    setup_parser.add_argument(
+        "--session-token", help="browser session token, used only to create the workflow"
+    )
+    setup_parser.add_argument(
+        "--network", default=DEFAULT_NETWORK, help="docker network your Immich stack uses"
+    )
+    setup_parser.add_argument("--webhook-url", default=DEFAULT_WEBHOOK_URL, help="URL Immich should call")
+    setup_parser.add_argument("--directory", default=".", help="where to write config.yaml and .env")
+    setup_parser.add_argument(
+        "--non-interactive", action="store_true", help="never prompt; use flags and defaults"
+    )
+    setup_parser.add_argument(
+        "--force", action="store_true", help="overwrite config.yaml and replace stored secrets"
+    )
+    setup_parser.add_argument("--no-workflow", action="store_true", help="do not create the Immich workflow")
+    setup_parser.set_defaults(func=cmd_setup)
+
+    hardware_parser = sub.add_parser(
+        "hardware", help="show which encoder this machine gets, and why the others were not"
+    )
+    hardware_parser.add_argument(
+        "--json", action="store_true", help="machine-readable report (attach this to bug reports)"
+    )
+    hardware_parser.set_defaults(func=cmd_hardware)
 
     encode_parser = sub.add_parser("encode", help="run a preset on a local file (offline dry run)")
     encode_parser.add_argument("path")
@@ -376,9 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
     reprocess_parser.add_argument("asset_id")
     reprocess_parser.set_defaults(func=cmd_reprocess)
 
-    requeue_parser = sub.add_parser(
-        "requeue", help="re-queue every job that was skipped for one reason"
-    )
+    requeue_parser = sub.add_parser("requeue", help="re-queue every job that was skipped for one reason")
     requeue_parser.add_argument(
         "--reason",
         default=SkipReason.NO_GAIN.value,

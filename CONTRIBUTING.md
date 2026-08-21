@@ -1,0 +1,124 @@
+# Contributing
+
+Bug reports, hardware reports and documentation fixes are all welcome. The single most
+useful thing you can send is the output of `immich-compressor hardware --json` from a
+machine this project has never run on — that is how the compatibility matrix gets filled in.
+
+## Development setup
+
+```bash
+git clone https://github.com/Navilois/immich-compressor
+cd immich-compressor
+python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+```
+
+On Debian and Ubuntu this needs the `python3-venv` package; without it `venv` cannot
+bootstrap pip. `make dev` runs the same two commands. `make` itself is optional — every
+target is a one-line shell command you can run by hand.
+
+```bash
+make lint     # ruff check, ruff format --check, and the English-only guard
+make test     # the unit suite: mocked HTTP, no network, no GPU
+make check    # everything CI runs
+```
+
+Install `ffmpeg`, `ffprobe`, `exiftool` and ImageMagick to unlock the encoder tests — about
+a quarter of the suite skips without them, and CI runs with them installed.
+
+## The live suite
+
+`tests/test_e2e_live.py` drives the whole pipeline against a real Immich. It is marked
+`live` and skipped unless the environment points at one:
+
+```bash
+mkdir -p testinstance
+cp testinstance/example.env testinstance/.env   # set a DB_PASSWORD of your own
+docker compose --env-file testinstance/.env -f docker-compose.test.yaml up -d
+
+export E2E_IMMICH_URL=http://172.25.0.2:2283/api
+export E2E_IMMICH_KEY=<api key from that instance>
+make test-live
+```
+
+`docker-compose.test.yaml` brings up a complete Immich v3.1.0 stack under the separate
+compose project `immich-test`. Machine learning sits behind the `ml` profile because it
+costs about 2 GB of RAM.
+
+**Never point the live suite at a real library.** It uploads throwaway assets, drives the
+full pipeline including trash and restore, and cleans up after itself — on an instance that
+exists for that purpose.
+
+## What not to change
+
+`pipeline.py`, the sanity gate in `encoder.py` and the four-step verification chain in front
+of every delete are load-bearing, and were verified against a live Immich v3.1.0 instance.
+Several of their apparent oddities are fixes for real, reproduced bugs — the rotation-aware
+display-size comparison, the wait for metadata extraction, the explicit field and tag
+carry-over after `PUT /assets/copy`. They are documented in
+[docs/immich-api-notes.md](docs/immich-api-notes.md).
+
+Refactor around them. If you must change one, the pull request has the test that proves the
+new behaviour, in the same commit.
+
+## House rules
+
+**Safe defaults are not negotiable.** The shipped configuration is inert: `dry_run: true`,
+`trash_original: false`, `delete_mode: trash`. Nothing that can delete a photo may become a
+default.
+
+**English only** in every tracked file — code, comments, docstrings, log messages, CLI help,
+error text, YAML comments, docs and commit messages. `scripts/check-language.sh` enforces it
+in CI. (The project's first fifteen commit *subjects* are German; those are history and stay
+as they are.)
+
+**Only verified claims in the docs.** This project's credibility rests on "measured against
+a live instance". Do not write a performance number, a compatibility claim or an API
+behaviour you have not seen yourself. If it is a guess, leave it out or mark it explicitly
+as unverified — [docs/hardware.md](docs/hardware.md) does exactly that for the vendors
+nobody here owns.
+
+**No new runtime dependencies.** One container, one process, SQLite. Anything sixty lines of
+standard library can do does not get a dependency. Python 3.12 is the floor.
+
+**Add the test with the behaviour.** A user-facing change and its test land in the same
+commit.
+
+**Secrets never enter tracked files.** Use obvious placeholders in docs and examples.
+
+## Generated files
+
+`docs/configuration.md` and `docs/config.schema.json` are generated from the pydantic models
+by `scripts/gen_docs.py`. Change the model (or the notes table in the generator), then:
+
+```bash
+make docs
+```
+
+CI fails if they are out of date.
+
+## Commits and pull requests
+
+[Conventional commits](https://www.conventionalcommits.org/), English, imperative:
+
+```
+feat(hardware): rank NVENC above QSV on machines with both
+fix(config): reject a preset whose suffix has no dot
+docs: explain why the VAAPI preset drops subtitle tracks
+```
+
+One branch per topic. Say in the pull request what you changed, why, and how you checked it.
+`make check` should be green before you open it.
+
+## Releasing (maintainers)
+
+1. Update `CHANGELOG.md` — move `Unreleased` into a dated version section.
+2. Bump `__version__` in `src/immich_compressor/__init__.py`. That is the only place.
+3. Commit, tag `vX.Y.Z`, push the tag.
+
+The release workflow refuses to publish if the tag disagrees with `__version__` or the
+CHANGELOG has no section for it, then builds the multi-arch image, pushes it to ghcr.io with
+provenance and an SBOM, and creates the GitHub release from the CHANGELOG section.
+
+[docs/maintainers/launch-checklist.md](docs/maintainers/launch-checklist.md) covers the
+parts no workflow can do: repository metadata, making the published package public, the
+social preview in [docs/assets/](docs/assets/README.md), and where to announce.
