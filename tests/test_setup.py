@@ -590,3 +590,27 @@ def test_every_flag_env_example_documents_is_one_compose_passes_through() -> Non
 
     assert documented, "the flags are commented examples in .env.example; keep them there"
     assert documented == passed
+
+
+def test_quickstart_hands_the_api_key_to_the_container() -> None:
+    """`setup` tells you to export IMMICH_API_KEY. The script has to pass it on.
+
+    Without `-e IMMICH_API_KEY` the advice points straight back into the dead end the
+    reader is already standing in: the variable is set on the host, and the container
+    that prints the message cannot see it. Reproduced against 1.1.1.
+    """
+    script = (REPO / "scripts" / "quickstart.sh").read_text(encoding="utf-8")
+    setup_source = (REPO / "src" / "immich_compressor" / "setup_cmd.py").read_text(encoding="utf-8")
+
+    assert "IMMICH_API_KEY in the environment" in setup_source, "the message this test guards"
+    assert re.search(r"^\s*-e IMMICH_API_KEY\b", script, re.M)
+
+
+def test_quickstart_does_not_repeat_what_setup_already_printed() -> None:
+    """One closing block, not two. `set -e` means the script only reaches its own tail
+    after a successful setup, and `run_setup` has already printed the same three commands
+    by then — a second copy reads like something went wrong."""
+    script = (REPO / "scripts" / "quickstart.sh").read_text(encoding="utf-8")
+
+    assert "==> Next" not in script
+    assert "docker compose up -d" not in script

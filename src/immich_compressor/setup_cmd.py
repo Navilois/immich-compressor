@@ -558,6 +558,7 @@ def run_setup(options: SetupOptions) -> int:
         print("            workflow.create is not one of the permissions this service needs,")
         print("            and adding it would widen the key past its job.")
         print("            The UI route is Utilities -> Workflows -> New.")
+        print("            docs/workflow-setup.md has the full JSON and the gotchas.")
         print(f"            Then delete {workflow_path.name}: it carries COMPRESSOR_TOKEN")
         print("            in clear text and has no further use.")
 
