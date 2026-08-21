@@ -123,6 +123,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/immich_compressor/__pycache__/` was copied into the image — 12 stale `.pyc` files on
   a measured rebuild, three of them orphans from a branch that was not even checked out.
   Harmless at runtime, but it made the image depend on which branch was last built.
+- **`setup` left the shared webhook token where `git add` could reach it.** When Immich
+  refuses the workflow — the API key deliberately lacks `workflow.create` — `setup` writes
+  `immich-workflow.json` so it can be posted by hand, and that file carries
+  `COMPRESSOR_TOKEN` in clear text as its `headerValue`. `.gitignore` covered `.env` but not
+  it, so a fresh checkout offered the live token to `git add` as an untracked file, and it
+  was written with plain `write_text`, taking its mode from the umask while the `.env` beside
+  it was 0600 — measured at 0644 under the usual umask 022, and 0666 under umask 0. It is
+  now gitignored, written through `write_secret_file`, and both `setup` and the docs say to
+  delete it once the workflow exists. It has never been committed to this repository.
+- **`write_secret_file` set the mode after writing the secret, not before.** The docstring
+  promised 0600 "from the start", but the body called `write_text` and only then `chmod`, so
+  the file held the secret at whatever the umask allowed for the length of the write — 0666
+  under umask 0, measured. It now creates the file with `O_CREAT` at 0600 and chmods while
+  the file is still empty, which also covers the one case `O_CREAT`'s mode does not: a file
+  that already exists, such as a 0644 `.env` left by an earlier version. Verified at umask
+  022, 0 and 077, for a new file and for a rewritten 0644 one — 0600 in every case.
 
 ## [1.1.0] - 2026-08-19
 
