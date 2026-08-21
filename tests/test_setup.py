@@ -338,3 +338,26 @@ def test_the_workflow_json_carries_the_token_that_landed_in_env(tmp_path: Path) 
     run_setup(_options(tmp_path))
     body = json.loads((tmp_path / "immich-workflow.json").read_text())
     assert body["steps"][2]["config"]["headerValue"] == read_env_file(tmp_path / ".env")["COMPRESSOR_TOKEN"]
+
+
+@respx.mock
+def test_the_workflow_json_is_never_world_readable(tmp_path: Path, capsys) -> None:
+    """It carries COMPRESSOR_TOKEN in clear text, so it gets the same mode as .env."""
+    _mock_server()
+    respx.post(f"{BASE}/workflows").mock(return_value=httpx.Response(403))
+    run_setup(_options(tmp_path))
+    assert stat.S_IMODE((tmp_path / "immich-workflow.json").stat().st_mode) == 0o600
+    out = capsys.readouterr().out
+    assert "mode 0600" in out
+    assert "delete immich-workflow.json" in out
+
+
+def test_the_workflow_json_is_gitignored() -> None:
+    """git status must not offer to stage the file the shared webhook token lives in."""
+    root = Path(__file__).resolve().parent.parent
+    ignored = {
+        line.strip()
+        for line in (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    assert "immich-workflow.json" in ignored

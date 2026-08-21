@@ -488,8 +488,8 @@ def run_setup(options: SetupOptions) -> int:
     print(f"\nWorkflow    {detail}")
     if not created:
         workflow_path = directory / "immich-workflow.json"
-        workflow_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-        print(f"            wrote {workflow_path} — create it yourself with:")
+        write_secret_file(workflow_path, json.dumps(body, indent=2) + "\n")
+        print(f"            wrote {workflow_path} (mode 0600) — create it yourself with:")
         print(f"""
   curl -X POST '{base_url.rstrip("/")}/workflows' \\
     -H "Authorization: Bearer $SESSION_TOKEN" \\
@@ -500,6 +500,8 @@ def run_setup(options: SetupOptions) -> int:
         print("            workflow.create is not one of the permissions this service needs,")
         print("            and adding it would widen the key past its job.")
         print("            The UI route is Utilities -> Workflows -> New.")
+        print(f"            Then delete {workflow_path.name}: it carries COMPRESSOR_TOKEN")
+        print("            in clear text and has no further use.")
 
     # ---- 5. what to do next ------------------------------------------------------
     print("\nNext")

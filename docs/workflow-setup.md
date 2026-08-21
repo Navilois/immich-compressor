@@ -42,8 +42,9 @@ instance:
 }
 ```
 
-`setup` writes this to `immich-workflow.json` with your real token substituted in. Create it
-with:
+`setup` writes this to `immich-workflow.json` with your real token substituted in — mode
+0600, and gitignored, because that token is the shared webhook secret in clear text. Create
+it with:
 
 ```bash
 curl -X POST "$IMMICH_URL/api/workflows" \
@@ -57,6 +58,9 @@ curl -X POST "$IMMICH_URL/api/workflows" \
 this service asks for — granting them to a long-lived key would widen it well past its job.
 
 Or do it in the UI: **Utilities → Workflows → New**.
+
+Either way, delete `immich-workflow.json` once the workflow exists. It has no further use,
+and the running service reads its token from `.env`.
 
 ## Why each step is what it is
 

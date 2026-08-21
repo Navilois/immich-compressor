@@ -19,6 +19,10 @@ dist/
 # Deployment secrets — API key and shared webhook token.
 .env
 
+# Written by `setup` when it could not create the workflow itself: carries the shared
+# webhook token in clear text. Delete it once the workflow exists.
+immich-workflow.json
+
 # Local compose customisation — see docker-compose.override.example.yaml.
 docker-compose.override.yaml
 
