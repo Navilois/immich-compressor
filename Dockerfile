@@ -15,7 +15,7 @@
 # `immich-compressor hardware` never assumes any of the above — it runs a real one-frame
 # encode before selecting anything.
 
-FROM python:3.12-slim AS base
+FROM python:3.14-slim AS base
 
 # ffmpeg/ffprobe  -> video presets and the sanity gate
 # exiftool        -> metadata carry-over for stills
