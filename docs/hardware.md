@@ -70,7 +70,7 @@ RENDER_GID=$(getent group render | cut -d: -f3) \
 `immich-compressor setup` writes both `RENDER_GID` and
 `COMPOSE_FILE=docker-compose.yaml:docker-compose.gpu.yaml` into `.env`, after which a plain
 `docker compose up -d` picks the overlay up on its own. `docker-compose.override.yaml` is
-appended to that line when it exists: naming files in `COMPOSE_FILE` replaces compose's
+created if it is missing and named on the same line: `COMPOSE_FILE` replaces compose's
 default list, which is the only reason the override loads at all — see
 [installation.md](installation.md).
 

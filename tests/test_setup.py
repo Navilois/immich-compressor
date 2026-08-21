@@ -20,6 +20,7 @@ from immich_compressor.setup_cmd import (
     check_permissions,
     compose_file_value,
     create_workflow,
+    ensure_compose_override,
     read_env_file,
     render_config,
     render_env,
@@ -29,6 +30,7 @@ from immich_compressor.setup_cmd import (
 )
 
 BASE = "http://immich-test:2283/api"
+REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -345,6 +347,15 @@ def test_the_workflow_json_carries_the_token_that_landed_in_env(tmp_path: Path) 
 # ------------------------------------------------------------------- the compose file
 
 
+def _checkout(directory: Path) -> Path:
+    """The one tracked file setup copies. Tests run in an empty dir; deployments do not."""
+    template = directory / "docker-compose.override.example.yaml"
+    template.write_text(
+        (REPO / "docker-compose.override.example.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    return template
+
+
 def _select_gpu(monkeypatch: pytest.MonkeyPatch, encoder: str) -> None:
     """Make setup see a machine whose chosen encoder needs a compose overlay.
 
@@ -419,10 +430,49 @@ def test_the_nvidia_wiring_keeps_the_override_loaded(tmp_path: Path, monkeypatch
 
 
 @respx.mock
-def test_setup_says_how_to_wire_an_override_written_later(
+def test_setup_creates_the_override_so_the_line_can_name_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The override is written at go-live, long after setup ran — too late for COMPOSE_FILE.
+
+    Creating it up front is what makes the line complete for everyone rather than for
+    whoever happened to write their override first.
+    """
+    _mock_server()
+    template = _checkout(tmp_path)
+    _select_gpu(monkeypatch, "hevc_vaapi")
+
+    assert run_setup(_options(tmp_path)) == 0
+
+    override = tmp_path / "docker-compose.override.yaml"
+    assert override.read_text() == template.read_text()
+    assert read_env_file(tmp_path / ".env")["COMPOSE_FILE"].endswith(":docker-compose.override.yaml")
+
+
+@respx.mock
+def test_an_existing_override_survives_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regenerating it would put a live deployment back into dry run without saying so."""
+    _mock_server()
+    _checkout(tmp_path)
+    _select_gpu(monkeypatch, "hevc_vaapi")
+    live = 'services:\n  immich-compressor:\n    environment:\n      BEHAVIOR__DRY_RUN: "false"\n'
+    (tmp_path / "docker-compose.override.yaml").write_text(live, encoding="utf-8")
+
+    run_setup(_options(tmp_path, force=True))
+
+    assert (tmp_path / "docker-compose.override.yaml").read_text() == live
+
+
+def test_an_override_is_only_created_from_the_tracked_template(tmp_path: Path) -> None:
+    """Nothing is invented: with no template there is no file, and COMPOSE_FILE says so."""
+    assert ensure_compose_override(tmp_path) is False
+    assert not (tmp_path / "docker-compose.override.yaml").exists()
+
+
+@respx.mock
+def test_a_checkout_without_the_template_says_what_to_add(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """The override is usually written at go-live, long after setup ran."""
     _mock_server()
     _select_gpu(monkeypatch, "hevc_vaapi")
 
@@ -430,4 +480,4 @@ def test_setup_says_how_to_wire_an_override_written_later(
 
     out = capsys.readouterr().out
     assert "docker-compose.override.yaml" not in read_env_file(tmp_path / ".env")["COMPOSE_FILE"]
-    assert "add :docker-compose.override.yaml to that line" in out
+    assert "add :docker-compose.override.yaml to that line yourself" in out

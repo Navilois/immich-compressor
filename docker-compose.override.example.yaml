@@ -48,6 +48,7 @@ services:
     # environment:
     #   BEHAVIOR__DRY_RUN: "true"
 
-    # Nothing is active in this template — every block above is a comment.
-    # Uncomment what you need; the empty mapping below keeps the file valid meanwhile.
+    # Nothing is active in this template — every block above is a comment. The empty
+    # mapping below is only what keeps the file valid meanwhile: delete the `{}` line as
+    # soon as you uncomment anything, or compose stops with a YAML parse error.
     {}

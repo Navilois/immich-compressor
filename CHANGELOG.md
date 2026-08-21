@@ -91,11 +91,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the resource limits and any local image pin with it, in exact contradiction of the docs
   telling people to keep all of that there. Measured with `docker compose config`:
   `BEHAVIOR__DRY_RUN` resolved to nothing and the image fell back to
-  `ghcr.io/navilois/immich-compressor:1`. The override is now appended last, where it wins,
-  and only when the file exists — compose exits 1 on a file it cannot stat. One written
-  afterwards, which is what `docs/safety.md` has you do at go-live, still has to be added to
-  the line by hand; `setup` now says so, and `docs/safety.md` says it at the step where it
-  matters.
+  `ghcr.io/navilois/immich-compressor:1`. The override is now named last on that line, where
+  it wins. Compose exits 1 on a file it cannot stat, so `setup` creates the override first —
+  copied verbatim from `docker-compose.override.example.yaml`, every block in it still a
+  comment — rather than naming a file that is not there yet. Without that it would only have
+  helped people who wrote their override before running `setup`, and `docs/safety.md` has
+  you write it afterwards, at go-live. An existing override is never touched, `--force` or
+  not: regenerating it would put a live deployment back into dry run silently.
 - `.dockerignore` matched `__pycache__/` and `*.pyc` at the context root only, so
   `src/immich_compressor/__pycache__/` was copied into the image — 12 stale `.pyc` files on
   a measured rebuild, three of them orphans from a branch that was not even checked out.

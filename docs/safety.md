@@ -180,11 +180,11 @@ services:
       BEHAVIOR__DRY_RUN: "false"
 ```
 
-If `.env` carries a `COMPOSE_FILE` line — `setup` writes one when it finds a GPU — make
-sure it ends with `:docker-compose.override.yaml`. That line replaces compose's default
-file list, and the override is only in that list by default, so one that is not named there
-is never loaded and this stage quietly does nothing. `docker compose config` prints what
-actually applies.
+`setup` leaves that file ready to edit, so uncommenting the flag is the whole change. Two
+things to check if the stage appears to do nothing: delete the `{}` line at the bottom of
+the template once you uncomment anything, and — if `.env` carries a `COMPOSE_FILE` line —
+make sure it ends with `:docker-compose.override.yaml`, because that line replaces the list
+compose loads by default. `docker compose config` prints what actually applies.
 
 Both versions now exist side by side. Spend a while here. On the replacement, check: album
 membership, tags, rating, description, GPS, position in the timeline, stack, shared links,

@@ -36,12 +36,15 @@ mounted and `/dev/dri` passed through when the host has it. Setup then:
 - detects the hardware and picks the encoder — see [hardware.md](hardware.md);
 - writes a `config.yaml` tuned to your box;
 - generates the webhook secret and writes `.env` at mode 0600;
-- writes `RENDER_GID` and `COMPOSE_FILE` so the GPU overlay loads by itself afterwards;
+- writes `RENDER_GID` and `COMPOSE_FILE` so the GPU overlay loads by itself afterwards,
+  and creates an inert `docker-compose.override.yaml` for the line to name;
 - creates the Immich workflow, or writes out the exact JSON and curl command if the
   credentials do not allow it.
 
 It is safe to run again. An existing `config.yaml` is left alone and the stored webhook
-secret is kept, because rotating it would break the workflow that already carries it.
+secret is kept, because rotating it would break the workflow that already carries it. An
+existing `docker-compose.override.yaml` is left alone even under `--force`: it is where the
+go-live flags live.
 
 <details>
 <summary>Without the script</summary>
