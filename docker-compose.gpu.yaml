@@ -6,7 +6,9 @@
 #
 # `immich-compressor setup` writes both RENDER_GID and
 # COMPOSE_FILE=docker-compose.yaml:docker-compose.gpu.yaml into .env, after which a plain
-# `docker compose up -d` picks this file up on its own.
+# `docker compose up -d` picks this file up on its own. docker-compose.override.yaml is
+# created if missing and named on the same line: COMPOSE_FILE replaces compose's default
+# list, and the override is only in that list by default.
 #
 # Deliberately not part of the base file: `devices:` pointing at a path the host does not
 # have makes the container fail to start outright ("error gathering device information

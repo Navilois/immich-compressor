@@ -180,6 +180,12 @@ services:
       BEHAVIOR__DRY_RUN: "false"
 ```
 
+`setup` leaves that file ready to edit, so uncommenting the block is the whole change —
+nothing else in it has to be touched. If the stage appears to do nothing and `.env` carries a
+`COMPOSE_FILE` line, check that it ends with `:docker-compose.override.yaml`: that line
+replaces the list compose loads by default. `docker compose config` prints what actually
+applies.
+
 Both versions now exist side by side. Spend a while here. On the replacement, check: album
 membership, tags, rating, description, GPS, position in the timeline, stack, shared links,
 and that the picture actually looks right at full size.

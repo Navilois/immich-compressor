@@ -81,7 +81,7 @@ Then create the workflow by hand — [workflow-setup.md](workflow-setup.md).
 | File | What it is |
 |---|---|
 | `docker-compose.yaml` | The service. Pulls the published image. **Do not edit it.** |
-| `docker-compose.override.yaml` | Yours. Compose loads it automatically; it is gitignored. Start from `docker-compose.override.example.yaml`. |
+| `docker-compose.override.yaml` | Yours. Compose loads it automatically; it is gitignored. `setup` creates it from `docker-compose.override.example.yaml`, inert, and never touches it again. |
 | `docker-compose.build.yaml` | Build from this checkout instead of pulling. |
 | `docker-compose.gpu.yaml` | `/dev/dri` passthrough for Intel and AMD. |
 | `docker-compose.gpu-nvidia.yaml` | NVIDIA runtime and device reservation. |
@@ -93,10 +93,20 @@ tracked file turns every `git pull` into a merge conflict.
 Overlays can be loaded without flags by putting them in `.env`:
 
 ```
-COMPOSE_FILE=docker-compose.yaml:docker-compose.gpu.yaml
+COMPOSE_FILE=docker-compose.yaml:docker-compose.gpu.yaml:docker-compose.override.yaml
 ```
 
-`setup` writes that line for you when it finds a usable GPU.
+That list **replaces** the one compose uses by default, and `docker-compose.override.yaml`
+is only in that default list — so name it here too, or it silently stops being loaded and
+takes the go-live flags, the resource limits and any local image pin with it. It goes last,
+because the last file wins. Leave the entry out if you have no override: compose refuses to
+run at all on a file it cannot find.
+
+`setup` writes that line for you when it finds a usable GPU. Because it can only name a
+file that exists, it creates `docker-compose.override.yaml` from the template first — copied
+verbatim, so nothing in it is active — and then names it on the line. That way the flags you
+uncomment there later, at go-live, are read without your having to touch `.env` again. Your
+own override, if you already have one, is left exactly as it is.
 
 ## Sizing
 

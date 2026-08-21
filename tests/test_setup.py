@@ -3,21 +3,26 @@
 from __future__ import annotations
 
 import json
+import re
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
+import yaml
 
 from immich_compressor.config import ConfigError, load_settings
-from immich_compressor.hardware import CpuBudget, HostFacts
+from immich_compressor.hardware import Candidate, CpuBudget, HardwareReport, HostFacts, RenderNode
 from immich_compressor.setup_cmd import (
     PERMISSION_PROBES,
     SetupOptions,
     check_key,
     check_permissions,
+    compose_file_value,
     create_workflow,
+    ensure_compose_override,
     read_env_file,
     render_config,
     render_env,
@@ -27,6 +32,7 @@ from immich_compressor.setup_cmd import (
 )
 
 BASE = "http://immich-test:2283/api"
+REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -338,3 +344,199 @@ def test_the_workflow_json_carries_the_token_that_landed_in_env(tmp_path: Path) 
     run_setup(_options(tmp_path))
     body = json.loads((tmp_path / "immich-workflow.json").read_text())
     assert body["steps"][2]["config"]["headerValue"] == read_env_file(tmp_path / ".env")["COMPRESSOR_TOKEN"]
+
+
+# ------------------------------------------------------------------- the compose file
+
+
+def _checkout(directory: Path) -> Path:
+    """The one tracked file setup copies. Tests run in an empty dir; deployments do not."""
+    template = directory / "docker-compose.override.example.yaml"
+    template.write_text(
+        (REPO / "docker-compose.override.example.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    return template
+
+
+def _select_gpu(monkeypatch: pytest.MonkeyPatch, encoder: str) -> None:
+    """Make setup see a machine whose chosen encoder needs a compose overlay.
+
+    The real detection runs first, so the presets and the CPU budget in the report stay
+    exactly what setup would have written; only the verdict is swapped.
+    """
+    import immich_compressor.hardware as hardware
+
+    node = RenderNode(path="/dev/dri/renderD128", vendor="intel", group="render", gid=992)
+    spec = next(s for s in hardware.VIDEO_ENCODERS if s.encoder == encoder)
+    nvidia = encoder == "hevc_nvenc"
+    real = hardware.detect_sync
+
+    def detect(**kwargs: object) -> HardwareReport:
+        report = real(**kwargs)
+        chosen = Candidate(
+            encoder=spec.encoder,
+            label=spec.label,
+            device=None if nvidia else node.path,
+            spec=spec,
+            status="selected",
+        )
+        facts = replace(report.facts, render_nodes=() if nvidia else (node,))
+        return replace(report, facts=facts, candidates=[chosen])
+
+    monkeypatch.setattr(hardware, "detect_sync", detect)
+
+
+def test_the_local_override_is_listed_last_so_it_still_wins(tmp_path: Path) -> None:
+    """COMPOSE_FILE replaces compose's default list, and the override is only in it by default.
+
+    Naming an overlay and nothing else unloads docker-compose.override.yaml silently,
+    taking the go-live flags, the resource limits and any local image pin with it.
+    """
+    (tmp_path / "docker-compose.override.yaml").write_text("services: {}\n", encoding="utf-8")
+    assert compose_file_value(tmp_path, "docker-compose.gpu.yaml") == (
+        "docker-compose.yaml:docker-compose.gpu.yaml:docker-compose.override.yaml"
+    )
+
+
+def test_an_override_that_does_not_exist_is_left_out(tmp_path: Path) -> None:
+    """Compose exits 1 on a file it cannot stat, so listing an absent one breaks every command."""
+    assert compose_file_value(tmp_path, "docker-compose.gpu.yaml") == (
+        "docker-compose.yaml:docker-compose.gpu.yaml"
+    )
+
+
+@respx.mock
+def test_the_gpu_wiring_keeps_the_override_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_server()
+    (tmp_path / "docker-compose.override.yaml").write_text("services: {}\n", encoding="utf-8")
+    _select_gpu(monkeypatch, "hevc_vaapi")
+
+    assert run_setup(_options(tmp_path)) == 0
+
+    env = read_env_file(tmp_path / ".env")
+    assert env["RENDER_GID"] == "992"
+    assert env["COMPOSE_FILE"] == "docker-compose.yaml:docker-compose.gpu.yaml:docker-compose.override.yaml"
+
+
+@respx.mock
+def test_the_nvidia_wiring_keeps_the_override_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_server()
+    (tmp_path / "docker-compose.override.yaml").write_text("services: {}\n", encoding="utf-8")
+    _select_gpu(monkeypatch, "hevc_nvenc")
+
+    assert run_setup(_options(tmp_path)) == 0
+
+    assert read_env_file(tmp_path / ".env")["COMPOSE_FILE"] == (
+        "docker-compose.yaml:docker-compose.gpu-nvidia.yaml:docker-compose.override.yaml"
+    )
+
+
+@respx.mock
+def test_setup_creates_the_override_so_the_line_can_name_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The override is written at go-live, long after setup ran — too late for COMPOSE_FILE.
+
+    Creating it up front is what makes the line complete for everyone rather than for
+    whoever happened to write their override first.
+    """
+    _mock_server()
+    template = _checkout(tmp_path)
+    _select_gpu(monkeypatch, "hevc_vaapi")
+
+    assert run_setup(_options(tmp_path)) == 0
+
+    override = tmp_path / "docker-compose.override.yaml"
+    assert override.read_text() == template.read_text()
+    assert read_env_file(tmp_path / ".env")["COMPOSE_FILE"].endswith(":docker-compose.override.yaml")
+
+
+@respx.mock
+def test_an_existing_override_survives_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regenerating it would put a live deployment back into dry run without saying so."""
+    _mock_server()
+    _checkout(tmp_path)
+    _select_gpu(monkeypatch, "hevc_vaapi")
+    live = 'services:\n  immich-compressor:\n    environment:\n      BEHAVIOR__DRY_RUN: "false"\n'
+    (tmp_path / "docker-compose.override.yaml").write_text(live, encoding="utf-8")
+
+    run_setup(_options(tmp_path, force=True))
+
+    assert (tmp_path / "docker-compose.override.yaml").read_text() == live
+
+
+def test_an_override_is_only_created_from_the_tracked_template(tmp_path: Path) -> None:
+    """Nothing is invented: with no template there is no file, and COMPOSE_FILE says so."""
+    assert ensure_compose_override(tmp_path) is False
+    assert not (tmp_path / "docker-compose.override.yaml").exists()
+
+
+@respx.mock
+def test_a_checkout_without_the_template_says_what_to_add(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _mock_server()
+    _select_gpu(monkeypatch, "hevc_vaapi")
+
+    run_setup(_options(tmp_path))
+
+    out = capsys.readouterr().out
+    assert "docker-compose.override.yaml" not in read_env_file(tmp_path / ".env")["COMPOSE_FILE"]
+    assert "add :docker-compose.override.yaml to that line yourself" in out
+
+
+# The settings in the template are commented-out YAML; the prose around them is not. A
+# reader uncomments the former, so that is what this turns on.
+_A_SETTING = re.compile(r"^\s*([\w.-]+:(\s|$)|- )")
+
+
+def _uncomment(template: str) -> str:
+    out = []
+    for line in template.splitlines(True):
+        bare = re.sub(r"^(\s*)# ?", r"\1", line, count=1)
+        out.append(bare if line.lstrip().startswith("#") and _A_SETTING.match(bare) else line)
+    return "".join(out)
+
+
+def test_the_override_template_survives_its_first_edit() -> None:
+    """It used to end in a `{}`, which turned the first uncommented block into a parse error.
+
+    `setup` hands this file to every GPU deployment now, and the first thing anyone does to
+    it is uncomment a block — usually `BEHAVIOR__DRY_RUN` at stage 2 of docs/safety.md. That
+    edit has to stand on its own, with no second line to remember to delete.
+    """
+    template = (REPO / "docker-compose.override.example.yaml").read_text(encoding="utf-8")
+
+    # A real key rather than nothing: a null service would rest on compose tolerating one,
+    # which is only known to hold for the version this was tested against.
+    assert yaml.safe_load(template)["services"]["immich-compressor"]
+
+    edited = yaml.safe_load(_uncomment(template))["services"]["immich-compressor"]
+    assert edited["environment"]["BEHAVIOR__DRY_RUN"] == "false"
+    assert edited["cpus"] == 2
+    assert edited["ports"] == ["127.0.0.1:8080:8080"]
+    # Nothing but real settings came out of the comments: prose that reads like `key: value`
+    # is prose a reader would uncomment too, and compose rejects what it does not know.
+    assert set(edited) <= {"restart", "environment", "cpus", "mem_limit", "build", "image", "ports"}
+
+
+def test_every_flag_env_example_documents_is_one_compose_passes_through() -> None:
+    """`.env` is compose's substitution file, not an env_file: it reaches the container only
+    through names docker-compose.yaml lists.
+
+    The two drifted apart once already — `.env.example` documented four `BEHAVIOR__` flags
+    that the compose file passed on to nobody, so a deployment that went live through `.env`
+    silently stayed in dry run.
+    """
+    documented = set(
+        re.findall(r"^# (BEHAVIOR__\w+)=", (REPO / ".env.example").read_text(encoding="utf-8"), re.M)
+    )
+    service = yaml.safe_load((REPO / "docker-compose.yaml").read_text(encoding="utf-8"))["services"]
+    environment = service["immich-compressor"]["environment"]
+    assert isinstance(environment, list), "only the list form can carry a bare pass-through name"
+    # A bare name is "pass this on only if it is set"; a NAME=value entry is a value the
+    # compose file supplies itself, which is a different thing.
+    passed = {e for e in environment if "=" not in e}
+
+    assert documented, "the flags are commented examples in .env.example; keep them there"
+    assert documented == passed

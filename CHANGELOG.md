@@ -84,6 +84,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the offset tags (`ThumbnailOffset`, `PreviewImageStart`, `OtherImageStart`,
   `StripOffsets`) are ignored because they are file positions, not content — the matching
   `*Length` tags stay compared, since a thumbnail length that moves is a truncated thumbnail.
+- **The `BEHAVIOR__` flags in `.env` reached nothing.** `.env.example` documents four of
+  them as the way to go live, but `.env` is compose's substitution file, not an `env_file`:
+  `docker-compose.yaml` had no `env_file:` and named only three `${...}` values in its
+  `environment:` block, and the service sets `env_file=None` in `config.py` and never had
+  `.env` mounted. Measured on a running container: with `BEHAVIOR__DRY_RUN=false` and
+  `BEHAVIOR__TRASH_ORIGINAL=true` in `.env`, the container environment held neither, so a
+  deployment that went live this way stayed in dry run and said nothing. The compose file
+  now lists the four by name, in the list form — a bare name is passed on only when it is
+  set, where `BEHAVIOR__DRY_RUN: ${BEHAVIOR__DRY_RUN:-}` would have handed every other
+  deployment an empty string to parse. Verified against the 1.1.0 image end to end: unset,
+  `config.yaml` still decides and the defaults stay inert; set, the service resolves
+  `dry_run=False` and `trash_original=True`. A setting in `docker-compose.override.yaml`
+  still wins over `.env`, and a test now holds the two files to the same list of flags.
+- **The compose override template broke on its first edit.** It ended in a `{}` that kept
+  the file valid while every block in it was a comment — but a flow mapping cannot hold
+  block keys, so uncommenting anything made compose stop with a YAML parse error until that
+  line was deleted too. It now carries one real setting instead, `restart: unless-stopped`,
+  which only restates what `docker-compose.yaml` already sets: the file stays valid and
+  inert, and every block can be uncommented on its own. Verified by turning all of them on
+  at once against real compose. The second `environment:` block went the same way — a
+  service takes one, and uncommenting both produced a duplicate key.
+- **`setup` unloaded `docker-compose.override.yaml`.** The `COMPOSE_FILE` line it writes for
+  a detected GPU replaces compose's *default* file list, and the override is only ever in
+  that default list — so naming an overlay there dropped the override entirely, taking the
+  go-live flags (`BEHAVIOR__DRY_RUN`, `BEHAVIOR__TRASH_ORIGINAL`, `BEHAVIOR__DELETE_MODE`),
+  the resource limits and any local image pin with it, in exact contradiction of the docs
+  telling people to keep all of that there. Measured with `docker compose config`:
+  `BEHAVIOR__DRY_RUN` resolved to nothing and the image fell back to
+  `ghcr.io/navilois/immich-compressor:1`. The override is now named last on that line, where
+  it wins. Compose exits 1 on a file it cannot stat, so `setup` creates the override first —
+  copied verbatim from `docker-compose.override.example.yaml`, every block in it still a
+  comment — rather than naming a file that is not there yet. Without that it would only have
+  helped people who wrote their override before running `setup`, and `docs/safety.md` has
+  you write it afterwards, at go-live. An existing override is never touched, `--force` or
+  not: regenerating it would put a live deployment back into dry run silently.
 - `.dockerignore` matched `__pycache__/` and `*.pyc` at the context root only, so
   `src/immich_compressor/__pycache__/` was copied into the image — 12 stale `.pyc` files on
   a measured rebuild, three of them orphans from a branch that was not even checked out.

@@ -5,6 +5,8 @@
 # `immich-compressor setup` writes
 # COMPOSE_FILE=docker-compose.yaml:docker-compose.gpu-nvidia.yaml into .env when it finds
 # a card, after which a plain `docker compose up -d` picks this file up on its own.
+# docker-compose.override.yaml is created if missing and named on the same line, because
+# COMPOSE_FILE replaces compose's default list and the override is only in it by default.
 #
 # Needs the NVIDIA Container Toolkit on the host (`nvidia-ctk runtime configure`). Unlike
 # /dev/dri there is no render group to join: the toolkit injects the devices and the

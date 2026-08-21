@@ -2,6 +2,10 @@
 #
 #   cp docker-compose.override.example.yaml docker-compose.override.yaml
 #
+# `immich-compressor setup` makes that copy for you when it wires up a GPU: the
+# COMPOSE_FILE line it writes then has to name this file, and compose refuses to run on a
+# file that is not there. See docs/installation.md.
+#
 # Compose merges `docker-compose.override.yaml` on top of `docker-compose.yaml`
 # automatically, so `docker compose up -d` picks it up with no extra flags. Editing the
 # tracked `docker-compose.yaml` instead means every `git pull` becomes a merge conflict —
@@ -11,6 +15,12 @@
 
 services:
   immich-compressor:
+    # A service needs at least one setting of its own, and this one only restates what
+    # docker-compose.yaml already sets — so the file is valid, and does nothing, while
+    # every block below is still commented out. Uncomment whatever you need; there is
+    # never a line to delete first.
+    restart: unless-stopped
+
     # ---- Going live -----------------------------------------------------------------
     # The repository ships an inert configuration: nothing is uploaded, nothing is
     # deleted. Turn these on one stage at a time, and read docs/safety.md first.
@@ -30,7 +40,7 @@ services:
     # mem_limit: 2g
 
     # ---- Build from source instead of pulling the published image -------------------
-    # Contributors: use `-f docker-compose.yaml -f docker-compose.build.yaml` instead,
+    # For contributors: use `-f docker-compose.yaml -f docker-compose.build.yaml`,
     # or pin your own tag here.
     #
     # build: .
@@ -43,11 +53,7 @@ services:
     #   - '127.0.0.1:8080:8080'
 
     # ---- Keep the compressor from touching your library at all ----------------------
-    # A read-only, observe-only deployment. Useful for a first week of reporting.
-    #
-    # environment:
-    #   BEHAVIOR__DRY_RUN: "true"
-
-    # Nothing is active in this template — every block above is a comment.
-    # Uncomment what you need; the empty mapping below keeps the file valid meanwhile.
-    {}
+    # A read-only, observe-only deployment, useful for a first week of reporting: set
+    # `BEHAVIOR__DRY_RUN` to "true" in the environment block above rather than opening a
+    # second one — a service gets one `environment:` key, not two. Pinned there it also
+    # survives an accidental `dry_run: false` in config.yaml.
