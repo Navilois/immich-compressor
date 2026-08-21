@@ -654,3 +654,41 @@ def test_quickstart_does_not_repeat_what_setup_already_printed() -> None:
 
     assert "==> Next" not in script
     assert "docker compose up -d" not in script
+
+
+@respx.mock
+def test_the_generated_env_offers_the_sizing_knobs(tmp_path: Path) -> None:
+    """`.env.example` documents COMPRESSOR_CPUS and COMPRESSOR_MEMORY, and nobody who takes
+    the documented route ever opens it — `setup` writes them a real `.env`, and a template
+    stops being read the moment a real file exists."""
+    _mock_server()
+    assert run_setup(_options(tmp_path)) == 0
+
+    body = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert re.search(r"^# COMPRESSOR_CPUS=\d+$", body, re.M)
+    assert re.search(r"^# COMPRESSOR_MEMORY=\S+$", body, re.M)
+    # Inert: commented out, so the shipped defaults still stand.
+    assert not re.search(r"^COMPRESSOR_CPUS=", body, re.M)
+    # And the question the two mechanisms raise is answered where they are offered.
+    assert "docker-compose.override.yaml beat these" in body
+
+
+def test_a_value_already_set_is_not_offered_again(tmp_path: Path) -> None:
+    """Somebody who uncommented the line must not find a commented copy underneath it."""
+    body = render_env({"COMPRESSOR_CPUS": "6"}, suggested={"COMPRESSOR_CPUS": "2", "COMPRESSOR_MEMORY": "2g"})
+    assert "COMPRESSOR_CPUS=6" in body
+    assert "# COMPRESSOR_CPUS=" not in body
+    assert "# COMPRESSOR_MEMORY=2g" in body
+
+
+@respx.mock
+def test_a_granted_asset_delete_is_pointed_out(tmp_path: Path, capsys) -> None:
+    """The quickstart says to leave it out for the first run, because without it the
+    service physically cannot remove an original. Granted anyway it printed an `ok` in the
+    same shape as every other permission, and the guarantee went away unannounced."""
+    _mock_server()
+    assert run_setup(_options(tmp_path)) == 0
+
+    out = capsys.readouterr().out
+    assert "asset.delete is granted" in out
+    assert "from stage 3 on" in out

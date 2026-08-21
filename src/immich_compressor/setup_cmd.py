@@ -352,14 +352,43 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def render_env(values: dict[str, str]) -> str:
+def render_env(values: dict[str, str], *, suggested: dict[str, str] | None = None) -> str:
+    """Render the file. ``suggested`` becomes commented-out lines with a real value in them.
+
+    `.env.example` documents `COMPRESSOR_CPUS` and `COMPRESSOR_MEMORY`, and nobody who
+    takes the documented route ever reads it: `setup` writes a real `.env`, and a template
+    stops being opened the moment a real file exists. The knobs therefore go in here as
+    well — inert, but carrying the numbers this machine actually has.
+    """
     lines = [
         "# Written by `immich-compressor setup`. Contains secrets — never commit it.",
         "# docker compose reads this file automatically from the project directory.",
         "",
     ]
     lines.extend(f"{key}={value}" for key, value in values.items())
+    offered = {key: value for key, value in (suggested or {}).items() if key not in values}
+    if offered:
+        lines += [
+            "",
+            "# Resource limits. Commented out, so the defaults in docker-compose.yaml stand;",
+            "# the values are what this machine suggests. `cpus:` and `mem_limit:` written",
+            "# into docker-compose.override.yaml beat these — compose merges the override on",
+            "# top of the base file, and a value set there wins over one substituted from here.",
+        ]
+        lines.extend(f"# {key}={value}" for key, value in offered.items())
     return "\n".join(lines) + "\n"
+
+
+def resource_suggestions(report: HardwareReport) -> dict[str, str]:
+    """The sizing knobs, with this box's own numbers rather than a made-up default.
+
+    Half the host's cores, which is the rule of thumb everywhere else in the project:
+    Immich's own thumbnailing, machine learning and transcoding want the other half.
+    """
+    return {
+        "COMPRESSOR_CPUS": str(max(1, report.facts.cpu.host_cores // 2)),
+        "COMPRESSOR_MEMORY": "2g",
+    }
 
 
 def write_secret_file(path: Path, body: str) -> None:
@@ -454,6 +483,13 @@ def _print_permissions(results: list[PermissionResult]) -> list[PermissionResult
         print("\n  Add these in Immich under Account Settings -> API Keys -> edit the key:")
         for result in missing:
             print(f"    {result.probe.permission}   ({result.detail})")
+    # The quickstart tells people to leave asset.delete out on purpose: without it the
+    # service physically cannot remove an original, which is a guarantee worth having for
+    # a first run. Granting it anyway looked identical to every other `ok` above, so the
+    # guarantee went away without anybody being told.
+    if any(result.probe.permission == "asset.delete" and result.granted for result in results):
+        print("\n  Note: asset.delete is granted. This configuration never uses it —")
+        print("  trash_original is off — but the key can remove assets from stage 3 on.")
     return missing
 
 
@@ -543,7 +579,7 @@ def run_setup(options: SetupOptions) -> int:
             print(f"wrote {directory / COMPOSE_OVERRIDE} — put deployment-specific settings here")
         values["COMPOSE_FILE"] = compose_file_value(directory, overlay)
 
-    write_secret_file(env_path, render_env(values))
+    write_secret_file(env_path, render_env(values, suggested=resource_suggestions(report)))
     print(f"wrote {env_path} (mode 0600)")
     if kept:
         print(f"      kept the existing {', '.join(kept)} (pass --force to replace)")

@@ -1,4 +1,9 @@
-"""CLI: ``serve``, ``check``, ``encode``, ``report``, ``reprocess``, ``requeue``, ``backfill``."""
+"""The command line: one function per subcommand, and the parser that wires them up.
+
+The user-facing description is :data:`_DESCRIPTION` rather than this docstring. A module
+docstring is written for whoever opens the file; it went out through ``--help`` verbatim
+once, RST backticks and all, listing seven of the twelve commands.
+"""
 
 from __future__ import annotations
 
@@ -339,7 +344,10 @@ async def _report(settings: Settings, as_json: bool) -> int:
             print(f"  {reason:20s} {count}")
     saved_mb = stats["saved_bytes"] / (1024 * 1024)
     print(f"compressed assets: {stats['compressed_assets']}")
-    print(f"saved: {saved_mb:.1f} MiB (average ratio {stats['average_ratio']})")
+    # `average_ratio` is None until something has been compressed, and Python's None is not
+    # a word to show a user — least of all in the first command the quickstart runs.
+    ratio = stats["average_ratio"]
+    print(f"saved: {saved_mb:.1f} MiB (average ratio {ratio if ratio is not None else '—'})")
     failed = [job for job in jobs if job.state == JobState.FAILED]
     if failed:
         print(f"failed jobs ({len(failed)}):")
@@ -403,7 +411,15 @@ async def _reprocess(settings: Settings, asset_id: str) -> int:
         if await store.reset(asset_id):
             print(f"{asset_id} re-queued")
             return 0
+    # The name reads like "process this asset"; it means "re-queue a job I already have".
+    # Somebody reaching for it on an asset the webhook never delivered needs the other
+    # command, and this is the moment they need to hear about it.
     print(f"{asset_id} is not in the store", file=sys.stderr)
+    print(
+        "  no webhook ever arrived for it. `backfill` is the way in for assets that are "
+        "already in the library",
+        file=sys.stderr,
+    )
     return 1
 
 
@@ -577,8 +593,17 @@ def cmd_restore(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------------------- parser
 
 
+# What a user reads at the top of `--help`. Kept short: the subcommand list underneath is
+# generated and complete, so this only has to say what the thing is and where to start.
+_DESCRIPTION = (
+    "Out-of-band recompression for Immich, driven by a workflow webhook. "
+    "Start with `setup`, then `check` and `hardware`; `report` and `jobs` tell you what "
+    "happened, and `restore` and `resume` are what you reach for when something went wrong."
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="immich-compressor", description=__doc__)
+    parser = argparse.ArgumentParser(prog="immich-compressor", description=_DESCRIPTION)
     parser.add_argument("--version", action="version", version=f"immich-compressor {__version__}")
     parser.add_argument("-c", "--config", help="path to config.yaml (default: $COMPRESSOR_CONFIG)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -627,7 +652,9 @@ def build_parser() -> argparse.ArgumentParser:
     encode_parser.add_argument("--type", default="VIDEO", choices=["VIDEO", "IMAGE", "AUDIO", "OTHER"])
     encode_parser.set_defaults(func=cmd_encode)
 
-    report_parser = sub.add_parser("report", help="print job statistics")
+    report_parser = sub.add_parser(
+        "report", help="job statistics, and how many webhooks arrived or were refused"
+    )
     report_parser.add_argument("--json", action="store_true")
     report_parser.set_defaults(func=cmd_report)
 

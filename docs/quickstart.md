@@ -101,7 +101,7 @@ jobs total: 1
 skip reasons:
   dry_run              1
 compressed assets: 0
-saved: 0.0 MiB (average ratio None)
+saved: 0.0 MiB (average ratio —)
 ```
 
 That is the whole point of stage 1: it saw the asset, decided it would compress it, and did

@@ -16,7 +16,7 @@ import pytest
 import respx
 
 import immich_compressor.__main__ as main
-from immich_compressor.__main__ import _backfill, _jobs, _report
+from immich_compressor.__main__ import _backfill, _jobs, _report, _reprocess
 from immich_compressor.config import Settings
 from immich_compressor.store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
@@ -201,3 +201,34 @@ def test_serve_configures_logging_before_it_loads_the_settings(
 
     assert main.cmd_serve(argparse.Namespace(config=None)) == 0
     assert order.index("logging") < order.index("settings")
+
+
+def test_the_help_description_is_written_for_a_terminal() -> None:
+    """It used to be the module docstring, printed verbatim: RST backticks and a list of
+    seven commands out of twelve, missing `setup` and all three recovery commands."""
+    text = main.build_parser().format_help()
+
+    assert "``" not in text
+    for command in ("setup", "hardware", "resume", "restore", "jobs"):
+        assert command in text
+
+
+async def test_report_prints_no_python_none_before_anything_is_compressed(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """This is the very first command the quickstart has anybody run."""
+    assert await _report(settings, as_json=False) == 0
+
+    out = capsys.readouterr().out
+    assert "average ratio —" in out
+    assert "None" not in out
+
+
+async def test_reprocess_names_the_command_that_would_have_worked(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`reprocess` reads like "process this asset" and means "re-queue a job I know". For
+    an asset the webhook never delivered, `backfill` is the way in — and this is the exact
+    moment somebody needs to hear that."""
+    assert await _reprocess(settings, "an-asset-nobody-sent-us") == 1
+    assert "backfill" in capsys.readouterr().err

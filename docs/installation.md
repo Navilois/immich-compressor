@@ -118,6 +118,18 @@ services:
     mem_limit: 3g
 ```
 
+Or through `.env`, where `setup` leaves both knobs commented out with this machine's own
+numbers in them:
+
+```bash
+COMPRESSOR_CPUS=4
+COMPRESSOR_MEMORY=3g
+```
+
+**The override wins.** Compose merges `docker-compose.override.yaml` on top of the base
+file, so a `cpus:` written there beats one substituted from `.env`. Use `.env` for the
+simple case and the override when you are already editing it for something else.
+
 Leave Immich at least half the host's cores. The encoder reads this limit from its own
 cgroup and sizes its thread pool to match, so there is no second number to keep in sync —
 see [the CPU budget](hardware.md#the-cpu-budget).
