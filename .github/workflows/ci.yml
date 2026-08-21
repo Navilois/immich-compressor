@@ -54,7 +54,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.12', '3.13']
+        # 3.12 is the floor from pyproject. 3.14 is what the published image runs, so it
+        # belongs here too — an interpreter that ships to users and is not in the matrix is
+        # an interpreter nobody tests.
+        python-version: ['3.12', '3.13', '3.14']
     steps:
       - uses: actions/checkout@v7
       # ffmpeg/ffprobe drive the video presets and the sanity gate, exiftool carries the

@@ -81,7 +81,7 @@ services:
   # Records every webhook request verbatim to /out/webhook-capture.jsonl.
   # Only used while verifying the workflow payload shape.
   webhook-echo:
-    image: python:3.12-alpine
+    image: python:3.14-alpine
     profiles: ['echo']
     volumes:
       - ./testinstance/echo:/app
