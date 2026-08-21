@@ -180,11 +180,11 @@ services:
       BEHAVIOR__DRY_RUN: "false"
 ```
 
-`setup` leaves that file ready to edit, so uncommenting the flag is the whole change. Two
-things to check if the stage appears to do nothing: delete the `{}` line at the bottom of
-the template once you uncomment anything, and — if `.env` carries a `COMPOSE_FILE` line —
-make sure it ends with `:docker-compose.override.yaml`, because that line replaces the list
-compose loads by default. `docker compose config` prints what actually applies.
+`setup` leaves that file ready to edit, so uncommenting the block is the whole change —
+nothing else in it has to be touched. If the stage appears to do nothing and `.env` carries a
+`COMPOSE_FILE` line, check that it ends with `:docker-compose.override.yaml`: that line
+replaces the list compose loads by default. `docker compose config` prints what actually
+applies.
 
 Both versions now exist side by side. Spend a while here. On the replacement, check: album
 membership, tags, rating, description, GPS, position in the timeline, stack, shared links,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import stat
 from dataclasses import replace
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+import yaml
 
 from immich_compressor.config import ConfigError, load_settings
 from immich_compressor.hardware import Candidate, CpuBudget, HardwareReport, HostFacts, RenderNode
@@ -481,3 +483,38 @@ def test_a_checkout_without_the_template_says_what_to_add(
     out = capsys.readouterr().out
     assert "docker-compose.override.yaml" not in read_env_file(tmp_path / ".env")["COMPOSE_FILE"]
     assert "add :docker-compose.override.yaml to that line yourself" in out
+
+
+# The settings in the template are commented-out YAML; the prose around them is not. A
+# reader uncomments the former, so that is what this turns on.
+_A_SETTING = re.compile(r"^\s*([\w.-]+:(\s|$)|- )")
+
+
+def _uncomment(template: str) -> str:
+    out = []
+    for line in template.splitlines(True):
+        bare = re.sub(r"^(\s*)# ?", r"\1", line, count=1)
+        out.append(bare if line.lstrip().startswith("#") and _A_SETTING.match(bare) else line)
+    return "".join(out)
+
+
+def test_the_override_template_survives_its_first_edit() -> None:
+    """It used to end in a `{}`, which turned the first uncommented block into a parse error.
+
+    `setup` hands this file to every GPU deployment now, and the first thing anyone does to
+    it is uncomment a block — usually `BEHAVIOR__DRY_RUN` at stage 2 of docs/safety.md. That
+    edit has to stand on its own, with no second line to remember to delete.
+    """
+    template = (REPO / "docker-compose.override.example.yaml").read_text(encoding="utf-8")
+
+    # A real key rather than nothing: a null service would rest on compose tolerating one,
+    # which is only known to hold for the version this was tested against.
+    assert yaml.safe_load(template)["services"]["immich-compressor"]
+
+    edited = yaml.safe_load(_uncomment(template))["services"]["immich-compressor"]
+    assert edited["environment"]["BEHAVIOR__DRY_RUN"] == "false"
+    assert edited["cpus"] == 2
+    assert edited["ports"] == ["127.0.0.1:8080:8080"]
+    # Nothing but real settings came out of the comments: prose that reads like `key: value`
+    # is prose a reader would uncomment too, and compose rejects what it does not know.
+    assert set(edited) <= {"restart", "environment", "cpus", "mem_limit", "build", "image", "ports"}

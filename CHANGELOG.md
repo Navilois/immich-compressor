@@ -84,6 +84,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the offset tags (`ThumbnailOffset`, `PreviewImageStart`, `OtherImageStart`,
   `StripOffsets`) are ignored because they are file positions, not content — the matching
   `*Length` tags stay compared, since a thumbnail length that moves is a truncated thumbnail.
+- **The compose override template broke on its first edit.** It ended in a `{}` that kept
+  the file valid while every block in it was a comment — but a flow mapping cannot hold
+  block keys, so uncommenting anything made compose stop with a YAML parse error until that
+  line was deleted too. It now carries one real setting instead, `restart: unless-stopped`,
+  which only restates what `docker-compose.yaml` already sets: the file stays valid and
+  inert, and every block can be uncommented on its own. Verified by turning all of them on
+  at once against real compose. The second `environment:` block went the same way — a
+  service takes one, and uncommenting both produced a duplicate key.
 - **`setup` unloaded `docker-compose.override.yaml`.** The `COMPOSE_FILE` line it writes for
   a detected GPU replaces compose's *default* file list, and the override is only ever in
   that default list — so naming an overlay there dropped the override entirely, taking the
