@@ -79,8 +79,9 @@ docker compose up -d
 docker compose logs -f immich-compressor
 ```
 
-The first log line tells you which encoder it chose and why. Nothing is uploaded and nothing
-is deleted: the shipped configuration is a dry run.
+The first lines tell you which encoder it chose and why every other candidate was rejected,
+and print the `assetFileFilter` pattern your workflow has to carry. Nothing is uploaded and
+nothing is deleted: the shipped configuration is a dry run.
 
 ## 5. Watch a dry run
 

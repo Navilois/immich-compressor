@@ -997,3 +997,17 @@ def test_the_maintenance_routes_do_not_count_as_webhooks(settings: Settings) -> 
         client.post("/resume", headers={"X-Compressor-Token": "wrong"})
         client.post("/resume", headers={"X-Compressor-Token": "test-token"})
         assert client.get("/stats").json()["webhooks"] == {"received": 0, "rejected": 0}
+
+
+def test_startup_prints_the_pattern_the_workflow_has_to_carry(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The marker couples three things nobody sees side by side: `compressed_marker`, the
+    filename the encoder writes, and the workflow's regex — which lives inside Immich,
+    where nothing here can check it. Printing the expected pattern is what makes the
+    comparison possible at all."""
+    caplog.set_level(logging.INFO)
+    with _test_client(settings):
+        pass
+
+    assert r"^(?!.*\.cmp\.).*$" in caplog.text

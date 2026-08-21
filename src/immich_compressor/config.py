@@ -610,6 +610,20 @@ def resolve_hardware(settings: Settings) -> Settings:
     return resolved
 
 
+def workflow_file_pattern(marker: str) -> str:
+    """The ``assetFileFilter`` regex that keeps a compressed upload from re-triggering.
+
+    A negative lookahead, because ``assetFileFilter`` has no ``inverse`` option — verified
+    on v3.1.0, where without it the compressed upload fires the workflow again.
+
+    Built in one place because the marker lives in three that nobody ever sees together:
+    ``behavior.compressed_marker`` here, the workflow inside Immich, and the filename the
+    encoder writes. Only two of them are in this repository's reach.
+    """
+    escaped = marker.replace(".", "\\.")
+    return f"^(?!.*{escaped}\\.).*$"
+
+
 def warn_about_permanent_deletion(behavior: BehaviorSettings) -> None:
     """Say it once, loudly, at startup — the setting has no undo and leaves no trace.
 

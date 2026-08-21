@@ -6,13 +6,16 @@ publishes a port — which is the default deployment. What they say is the produ
 
 from __future__ import annotations
 
+import argparse
 import json
+import logging
 from typing import Any
 
 import httpx
 import pytest
 import respx
 
+import immich_compressor.__main__ as main
 from immich_compressor.__main__ import _backfill, _jobs, _report
 from immich_compressor.config import Settings
 from immich_compressor.store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
@@ -171,3 +174,30 @@ async def test_jobs_refuses_a_status_it_does_not_know(
 ) -> None:
     assert await _jobs(settings, status="nonsense", limit=100, as_json=False) == 2
     assert "one of: queued" in capsys.readouterr().err
+
+
+def test_serve_configures_logging_before_it_loads_the_settings(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loading the settings is what runs hardware detection, and detection logs the
+    encoder it chose and why every other candidate was rejected.
+
+    Configured afterwards, those lines went out through `logging.lastResort`, which drops
+    everything below WARNING — so the explanation docs/quickstart.md points at was thrown
+    away on every start, and the log opened on an unrelated preset probe instead.
+    """
+    order: list[str] = []
+
+    def fake_basic_config(**_: object) -> None:
+        order.append("logging")
+
+    def fake_load(*_: object, **__: object) -> Settings:
+        order.append("settings")
+        return settings
+
+    monkeypatch.setattr(logging, "basicConfig", fake_basic_config)
+    monkeypatch.setattr(main, "_load", fake_load)
+    monkeypatch.setattr("uvicorn.run", lambda *_, **__: order.append("serve"))
+
+    assert main.cmd_serve(argparse.Namespace(config=None)) == 0
+    assert order.index("logging") < order.index("settings")

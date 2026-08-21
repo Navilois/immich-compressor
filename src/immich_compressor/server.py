@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from . import __version__
 from .api import ImmichClient
-from .config import Settings, load_settings, warn_about_permanent_deletion
+from .config import Settings, load_settings, warn_about_permanent_deletion, workflow_file_pattern
 from .encoder import probe_hardware_encoder
 from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from .metrics import render as render_metrics
@@ -106,6 +106,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             connect_timeout_s=resolved.immich.connect_timeout_s,
         )
         warn_about_permanent_deletion(resolved.behavior)
+        # The marker couples three things nobody ever sees side by side: this setting, the
+        # filename the encoder writes, and the workflow's `assetFileFilter` regex — which
+        # lives inside Immich, out of reach of any validation here. Printing the expected
+        # pattern once at startup is what makes the comparison possible at all.
+        logger.info(
+            "compressed marker %r: the workflow's assetFileFilter pattern must be %s",
+            resolved.behavior.compressed_marker,
+            workflow_file_pattern(resolved.behavior.compressed_marker),
+        )
         await _warn_about_unusable_hardware(resolved)
         worker = Worker(resolved, client, store)
         app.state.settings = resolved

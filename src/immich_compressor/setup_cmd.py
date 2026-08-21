@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from .config import Settings
+from .config import Settings, workflow_file_pattern
 from .hardware import HardwareReport, apply_to_settings
 
 DEFAULT_BASE_URL = "http://immich-server:2283/api"
@@ -112,7 +112,6 @@ def workflow_json(*, webhook_url: str, token: str, marker: str = ".cmp") -> dict
     has no ``inverse`` option — without it the compressed upload re-triggers the workflow,
     which was confirmed to happen.
     """
-    escaped = marker.replace(".", "\\.")
     return {
         "name": "immich-compressor",
         "description": "Recompress large assets out of band",
@@ -127,7 +126,7 @@ def workflow_json(*, webhook_url: str, token: str, marker: str = ".cmp") -> dict
             {
                 "method": "immich-plugin-core#assetFileFilter",
                 "config": {
-                    "pattern": f"^(?!.*{escaped}\\.).*$",
+                    "pattern": workflow_file_pattern(marker),
                     "matchType": "regex",
                     "usePath": False,
                 },

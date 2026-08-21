@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,10 +40,15 @@ logger = logging.getLogger("immich_compressor")
 
 
 def _configure_logging(level: str) -> None:
+    resolved = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=resolved,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    # `basicConfig` configures the root logger once and is a no-op on every later call,
+    # level included. `serve` calls this twice on purpose — see `cmd_serve` — so the level
+    # is set here rather than left to whichever call happened to come first.
+    logging.getLogger().setLevel(resolved)
 
 
 def _load(args: argparse.Namespace, *, require_secrets: bool = True, autodetect: bool = True) -> Settings:
@@ -61,6 +67,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     from .server import create_app
 
+    # Logging first, settings second. Loading the settings is what runs hardware
+    # detection, and detection logs the encoder it picked along with the reason every
+    # other candidate was rejected — the explanation docs/quickstart.md points at. With no
+    # handler configured yet those lines went out through `logging.lastResort`, which
+    # drops everything below WARNING, so the whole explanation was discarded on every
+    # single start and the log opened on a preset probe with no "why" anywhere near it.
+    #
+    # LOG_LEVEL is read straight from the environment because the settings that would
+    # carry it are precisely what has not been loaded yet.
+    _configure_logging(os.environ.get("LOG_LEVEL", "INFO"))
     settings = _load(args)
     _configure_logging(settings.log_level)
     logger.info(
