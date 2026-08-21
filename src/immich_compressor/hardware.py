@@ -825,9 +825,12 @@ class HardwareReport:
         selected = self.selected
         encoder = selected.encoder if selected else "libx265"
         threads = self.facts.cpu.threads
+        # THREADS in both, or the container variant falls back to calibrate.sh's own
+        # default of 2 and the sweep is measured against half the threads the encoder will
+        # really get — which tunes the quality number against the wrong machine.
         return (
             f"ENCODER={encoder} THREADS={threads} scripts/calibrate.sh /path/to/your/clip.mov\n"
-            f"  in the container:  docker compose exec -e ENCODER={encoder} "
+            f"  in the container:  docker compose exec -e ENCODER={encoder} -e THREADS={threads} "
             "immich-compressor scripts/calibrate.sh /path/clip.mov"
         )
 

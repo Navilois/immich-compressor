@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import stat
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -618,8 +619,10 @@ def test_every_flag_env_example_documents_is_one_compose_passes_through() -> Non
     that the compose file passed on to nobody, so a deployment that went live through `.env`
     silently stayed in dry run.
     """
+    # The `BEHAVIOR__` flags and TZ: the names `.env.example` shows commented out because
+    # leaving them unset is meaningful, which is exactly what a bare pass-through means.
     documented = set(
-        re.findall(r"^# (BEHAVIOR__\w+)=", (REPO / ".env.example").read_text(encoding="utf-8"), re.M)
+        re.findall(r"^# (BEHAVIOR__\w+|TZ)=", (REPO / ".env.example").read_text(encoding="utf-8"), re.M)
     )
     service = yaml.safe_load((REPO / "docker-compose.yaml").read_text(encoding="utf-8"))["services"]
     environment = service["immich-compressor"]["environment"]
@@ -628,7 +631,7 @@ def test_every_flag_env_example_documents_is_one_compose_passes_through() -> Non
     # compose file supplies itself, which is a different thing.
     passed = {e for e in environment if "=" not in e}
 
-    assert documented, "the flags are commented examples in .env.example; keep them there"
+    assert documented, "these are commented examples in .env.example; keep them there"
     assert documented == passed
 
 
@@ -670,7 +673,7 @@ def test_the_generated_env_offers_the_sizing_knobs(tmp_path: Path) -> None:
     # Inert: commented out, so the shipped defaults still stand.
     assert not re.search(r"^COMPRESSOR_CPUS=", body, re.M)
     # And the question the two mechanisms raise is answered where they are offered.
-    assert "docker-compose.override.yaml beat these" in body
+    assert "docker-compose.override.yaml beat COMPRESSOR_CPUS" in body
 
 
 def test_a_value_already_set_is_not_offered_again(tmp_path: Path) -> None:
@@ -692,3 +695,55 @@ def test_a_granted_asset_delete_is_pointed_out(tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "asset.delete is granted" in out
     assert "from stage 3 on" in out
+
+
+@respx.mock
+def test_the_container_gets_the_hosts_timezone_when_the_host_has_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Immich's compose file hands its containers TZ; this one had neither TZ nor
+    /etc/localtime, so the two logged two hours apart — while troubleshooting.md asks
+    people to correlate them line by line."""
+    _mock_server()
+    monkeypatch.setenv("TZ", "Europe/Vienna")
+
+    assert run_setup(_options(tmp_path)) == 0
+    assert "TZ=Europe/Vienna" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+@respx.mock
+def test_a_host_without_a_timezone_is_offered_the_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_server()
+    monkeypatch.delenv("TZ", raising=False)
+
+    assert run_setup(_options(tmp_path)) == 0
+
+    body = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert re.search(r"^# TZ=", body, re.M)
+    assert "Copy the value from" in body or "copy the value from" in body
+
+
+def test_a_backup_of_env_is_ignored_too() -> None:
+    """The entry was the bare name. Everything beside it was committable: `.env.bak` from a
+    `setup --force`, `.env.local`, `.env.prod` — each carrying the same API key and the
+    same webhook token as the original. It happened during the audit."""
+    ignored = subprocess.run(
+        ["git", "check-ignore", ".env", ".env.bak-153238", ".env.local"],  # noqa: S607
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ignored.stdout.split() == [".env", ".env.bak-153238", ".env.local"]
+
+    # ...and the template stays tracked, or a fresh clone has no example to copy.
+    tracked = subprocess.run(
+        ["git", "check-ignore", ".env.example"],  # noqa: S607
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.returncode == 1, ".env.example must not be ignored"

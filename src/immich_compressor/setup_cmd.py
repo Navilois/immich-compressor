@@ -370,17 +370,22 @@ def render_env(values: dict[str, str], *, suggested: dict[str, str] | None = Non
     if offered:
         lines += [
             "",
-            "# Resource limits. Commented out, so the defaults in docker-compose.yaml stand;",
-            "# the values are what this machine suggests. `cpus:` and `mem_limit:` written",
-            "# into docker-compose.override.yaml beat these — compose merges the override on",
-            "# top of the base file, and a value set there wins over one substituted from here.",
+            "# Optional, commented out so the shipped defaults stand. The values are what",
+            "# this machine suggests.",
+            "#",
+            "# `cpus:` and `mem_limit:` in docker-compose.override.yaml beat COMPRESSOR_CPUS",
+            "# and COMPRESSOR_MEMORY here — compose merges the override on top of the base",
+            "# file, and a value set there wins over one substituted from this one.",
+            "#",
+            "# TZ is the clock this container's log timestamps with. Copy the value from",
+            "# your Immich .env, or the two logs cannot be read side by side.",
         ]
         lines.extend(f"# {key}={value}" for key, value in offered.items())
     return "\n".join(lines) + "\n"
 
 
-def resource_suggestions(report: HardwareReport) -> dict[str, str]:
-    """The sizing knobs, with this box's own numbers rather than a made-up default.
+def optional_settings(report: HardwareReport) -> dict[str, str]:
+    """The knobs worth putting in front of somebody, with real numbers rather than defaults.
 
     Half the host's cores, which is the rule of thumb everywhere else in the project:
     Immich's own thumbnailing, machine learning and transcoding want the other half.
@@ -388,6 +393,7 @@ def resource_suggestions(report: HardwareReport) -> dict[str, str]:
     return {
         "COMPRESSOR_CPUS": str(max(1, report.facts.cpu.host_cores // 2)),
         "COMPRESSOR_MEMORY": "2g",
+        "TZ": "UTC",
     }
 
 
@@ -565,6 +571,14 @@ def run_setup(options: SetupOptions) -> int:
     values["IMMICH_BASE_URL"] = base_url
     values["IMMICH_NETWORK"] = network
 
+    # Immich's compose file hands its container TZ and /etc/localtime; this one had
+    # neither, so the two services timestamped their logs two hours apart while
+    # troubleshooting.md asks people to correlate them line by line. `quickstart.sh` passes
+    # TZ through, so it lands here when the host exported it; otherwise it is offered as a
+    # commented line to fill in from Immich's own .env.
+    if host_tz := os.environ.get("TZ", "").strip():
+        values["TZ"] = host_tz
+
     # The GPU wiring, so a plain `docker compose up -d` keeps doing the right thing.
     selected = report.selected
     node = next((n for n in report.facts.render_nodes if selected and n.path == selected.device), None)
@@ -579,7 +593,7 @@ def run_setup(options: SetupOptions) -> int:
             print(f"wrote {directory / COMPOSE_OVERRIDE} — put deployment-specific settings here")
         values["COMPOSE_FILE"] = compose_file_value(directory, overlay)
 
-    write_secret_file(env_path, render_env(values, suggested=resource_suggestions(report)))
+    write_secret_file(env_path, render_env(values, suggested=optional_settings(report)))
     print(f"wrote {env_path} (mode 0600)")
     if kept:
         print(f"      kept the existing {', '.join(kept)} (pass --force to replace)")

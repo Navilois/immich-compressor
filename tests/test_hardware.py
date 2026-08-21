@@ -426,6 +426,21 @@ async def test_detect_reports_the_full_picture() -> None:
     assert len(report.rejected) >= 1
 
 
+async def test_both_calibration_commands_carry_the_same_thread_budget() -> None:
+    """calibrate.sh falls back to THREADS=2 on its own.
+
+    Left out of the container variant, the sweep therefore measures with half the threads
+    the encoder will really get, and the quality number comes out tuned against a machine
+    that does not exist.
+    """
+    report = await detect(facts=INTEL_GEN9, probe=_probe_stub("hevc_qsv"))
+    hint = report.calibrate_hint()
+
+    threads = f"THREADS={report.facts.cpu.threads}"
+    assert hint.count(threads) == 2, hint
+    assert f"-e {threads}" in hint
+
+
 async def test_the_json_report_is_serialisable_and_names_every_rejection() -> None:
     report = await detect(facts=INTEL_GEN9, probe=_probe_stub("hevc_qsv", "hevc_vaapi"))
     body = json.loads(json.dumps(report.to_dict()))

@@ -34,6 +34,10 @@ services:
       - BEHAVIOR__TRASH_ORIGINAL
       - BEHAVIOR__RETENTION_DAYS
       - BEHAVIOR__DELETE_MODE
+      # The clock this container's log timestamps with. Immich's own compose file sets it
+      # for its containers; without it here the two logs are hours apart, and correlating
+      # them is the first thing docs/troubleshooting.md asks anybody to do.
+      - TZ
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - compressor-state:/var/lib/immich-compressor

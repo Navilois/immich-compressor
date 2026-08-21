@@ -16,8 +16,11 @@ dist/
 .pytest_cache/
 .ruff_cache/
 
-# Deployment secrets — API key and shared webhook token.
-.env
+# Deployment secrets — API key and shared webhook token. The glob, not the bare name:
+# .env.bak taken before a `setup --force`, .env.local, .env.prod and any backup made
+# before an edit all carry the same key and the same token as .env itself.
+.env*
+!.env.example
 
 # Written by `setup` when it could not create the workflow itself: carries the shared
 # webhook token in clear text. Delete it once the workflow exists.
