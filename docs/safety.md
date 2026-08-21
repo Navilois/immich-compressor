@@ -180,6 +180,12 @@ services:
       BEHAVIOR__DRY_RUN: "false"
 ```
 
+If `.env` carries a `COMPOSE_FILE` line — `setup` writes one when it finds a GPU — make
+sure it ends with `:docker-compose.override.yaml`. That line replaces compose's default
+file list, and the override is only in that list by default, so one that is not named there
+is never loaded and this stage quietly does nothing. `docker compose config` prints what
+actually applies.
+
 Both versions now exist side by side. Spend a while here. On the replacement, check: album
 membership, tags, rating, description, GPS, position in the timeline, stack, shared links,
 and that the picture actually looks right at full size.

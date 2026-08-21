@@ -30,6 +30,7 @@ DEFAULT_BASE_URL = "http://immich-server:2283/api"
 DEFAULT_NETWORK = "immich_default"
 DEFAULT_WEBHOOK_URL = "http://immich-compressor:8080/webhook"
 WEBHOOK_HEADER = "X-Compressor-Token"
+COMPOSE_OVERRIDE = "docker-compose.override.yaml"
 
 # A uuid that cannot exist. The permission probes below aim their requests at it so a
 # "may I?" question can never turn into a change to somebody's library.
@@ -348,6 +349,22 @@ def write_secret_file(path: Path, body: str) -> None:
     path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
+def compose_file_value(directory: Path, overlay: str) -> str:
+    """The ``COMPOSE_FILE`` list that loads ``overlay`` without dropping the user's override.
+
+    ``COMPOSE_FILE`` *replaces* compose's default file list, and
+    ``docker-compose.override.yaml`` is only in that list by default. Naming an overlay
+    here and nothing else therefore unloads the override silently, taking the go-live
+    flags, the resource limits and any local image pin with it. It goes back on the end
+    because the last file wins. Compose refuses to run at all on a file it cannot stat,
+    so the entry is only added when the file is actually there.
+    """
+    parts = ["docker-compose.yaml", overlay]
+    if (directory / COMPOSE_OVERRIDE).is_file():
+        parts.append(COMPOSE_OVERRIDE)
+    return ":".join(parts)
+
+
 # --------------------------------------------------------------------- orchestration
 
 
@@ -465,9 +482,9 @@ def run_setup(options: SetupOptions) -> int:
     node = next((n for n in report.facts.render_nodes if selected and n.path == selected.device), None)
     if node is not None and node.gid is not None:
         values["RENDER_GID"] = str(node.gid)
-        values["COMPOSE_FILE"] = "docker-compose.yaml:docker-compose.gpu.yaml"
+        values["COMPOSE_FILE"] = compose_file_value(directory, "docker-compose.gpu.yaml")
     elif selected is not None and selected.encoder == "hevc_nvenc":
-        values["COMPOSE_FILE"] = "docker-compose.yaml:docker-compose.gpu-nvidia.yaml"
+        values["COMPOSE_FILE"] = compose_file_value(directory, "docker-compose.gpu-nvidia.yaml")
 
     write_secret_file(env_path, render_env(values))
     print(f"wrote {env_path} (mode 0600)")
@@ -475,6 +492,9 @@ def run_setup(options: SetupOptions) -> int:
         print(f"      kept the existing {', '.join(kept)} (pass --force to replace)")
     if "COMPOSE_FILE" in values:
         print(f"      COMPOSE_FILE={values['COMPOSE_FILE']} — GPU overlay wired in automatically")
+        if not (directory / COMPOSE_OVERRIDE).is_file():
+            print(f"      add :{COMPOSE_OVERRIDE} to that line if you write one later —")
+            print("      that line replaces the default file list, so it no longer loads by itself")
 
     # ---- 4. the workflow ---------------------------------------------------------
     token = values["COMPRESSOR_TOKEN"]

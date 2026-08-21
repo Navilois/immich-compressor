@@ -84,6 +84,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the offset tags (`ThumbnailOffset`, `PreviewImageStart`, `OtherImageStart`,
   `StripOffsets`) are ignored because they are file positions, not content — the matching
   `*Length` tags stay compared, since a thumbnail length that moves is a truncated thumbnail.
+- **`setup` unloaded `docker-compose.override.yaml`.** The `COMPOSE_FILE` line it writes for
+  a detected GPU replaces compose's *default* file list, and the override is only ever in
+  that default list — so naming an overlay there dropped the override entirely, taking the
+  go-live flags (`BEHAVIOR__DRY_RUN`, `BEHAVIOR__TRASH_ORIGINAL`, `BEHAVIOR__DELETE_MODE`),
+  the resource limits and any local image pin with it, in exact contradiction of the docs
+  telling people to keep all of that there. Measured with `docker compose config`:
+  `BEHAVIOR__DRY_RUN` resolved to nothing and the image fell back to
+  `ghcr.io/navilois/immich-compressor:1`. The override is now appended last, where it wins,
+  and only when the file exists — compose exits 1 on a file it cannot stat. One written
+  afterwards, which is what `docs/safety.md` has you do at go-live, still has to be added to
+  the line by hand; `setup` now says so, and `docs/safety.md` says it at the step where it
+  matters.
 - `.dockerignore` matched `__pycache__/` and `*.pyc` at the context root only, so
   `src/immich_compressor/__pycache__/` was copied into the image — 12 stale `.pyc` files on
   a measured rebuild, three of them orphans from a branch that was not even checked out.

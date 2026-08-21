@@ -93,10 +93,18 @@ tracked file turns every `git pull` into a merge conflict.
 Overlays can be loaded without flags by putting them in `.env`:
 
 ```
-COMPOSE_FILE=docker-compose.yaml:docker-compose.gpu.yaml
+COMPOSE_FILE=docker-compose.yaml:docker-compose.gpu.yaml:docker-compose.override.yaml
 ```
 
-`setup` writes that line for you when it finds a usable GPU.
+That list **replaces** the one compose uses by default, and `docker-compose.override.yaml`
+is only in that default list — so name it here too, or it silently stops being loaded and
+takes the go-live flags, the resource limits and any local image pin with it. It goes last,
+because the last file wins. Leave the entry out if you have no override: compose refuses to
+run at all on a file it cannot find.
+
+`setup` writes that line for you when it finds a usable GPU, and appends the override when
+one already exists. If you write your override afterwards — which is what
+[safety.md](safety.md) has you do at go-live — add it to the line yourself.
 
 ## Sizing
 

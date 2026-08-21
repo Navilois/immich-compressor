@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -11,12 +12,13 @@ import pytest
 import respx
 
 from immich_compressor.config import ConfigError, load_settings
-from immich_compressor.hardware import CpuBudget, HostFacts
+from immich_compressor.hardware import Candidate, CpuBudget, HardwareReport, HostFacts, RenderNode
 from immich_compressor.setup_cmd import (
     PERMISSION_PROBES,
     SetupOptions,
     check_key,
     check_permissions,
+    compose_file_value,
     create_workflow,
     read_env_file,
     render_config,
@@ -338,3 +340,94 @@ def test_the_workflow_json_carries_the_token_that_landed_in_env(tmp_path: Path) 
     run_setup(_options(tmp_path))
     body = json.loads((tmp_path / "immich-workflow.json").read_text())
     assert body["steps"][2]["config"]["headerValue"] == read_env_file(tmp_path / ".env")["COMPRESSOR_TOKEN"]
+
+
+# ------------------------------------------------------------------- the compose file
+
+
+def _select_gpu(monkeypatch: pytest.MonkeyPatch, encoder: str) -> None:
+    """Make setup see a machine whose chosen encoder needs a compose overlay.
+
+    The real detection runs first, so the presets and the CPU budget in the report stay
+    exactly what setup would have written; only the verdict is swapped.
+    """
+    import immich_compressor.hardware as hardware
+
+    node = RenderNode(path="/dev/dri/renderD128", vendor="intel", group="render", gid=992)
+    spec = next(s for s in hardware.VIDEO_ENCODERS if s.encoder == encoder)
+    nvidia = encoder == "hevc_nvenc"
+    real = hardware.detect_sync
+
+    def detect(**kwargs: object) -> HardwareReport:
+        report = real(**kwargs)
+        chosen = Candidate(
+            encoder=spec.encoder,
+            label=spec.label,
+            device=None if nvidia else node.path,
+            spec=spec,
+            status="selected",
+        )
+        facts = replace(report.facts, render_nodes=() if nvidia else (node,))
+        return replace(report, facts=facts, candidates=[chosen])
+
+    monkeypatch.setattr(hardware, "detect_sync", detect)
+
+
+def test_the_local_override_is_listed_last_so_it_still_wins(tmp_path: Path) -> None:
+    """COMPOSE_FILE replaces compose's default list, and the override is only in it by default.
+
+    Naming an overlay and nothing else unloads docker-compose.override.yaml silently,
+    taking the go-live flags, the resource limits and any local image pin with it.
+    """
+    (tmp_path / "docker-compose.override.yaml").write_text("services: {}\n", encoding="utf-8")
+    assert compose_file_value(tmp_path, "docker-compose.gpu.yaml") == (
+        "docker-compose.yaml:docker-compose.gpu.yaml:docker-compose.override.yaml"
+    )
+
+
+def test_an_override_that_does_not_exist_is_left_out(tmp_path: Path) -> None:
+    """Compose exits 1 on a file it cannot stat, so listing an absent one breaks every command."""
+    assert compose_file_value(tmp_path, "docker-compose.gpu.yaml") == (
+        "docker-compose.yaml:docker-compose.gpu.yaml"
+    )
+
+
+@respx.mock
+def test_the_gpu_wiring_keeps_the_override_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_server()
+    (tmp_path / "docker-compose.override.yaml").write_text("services: {}\n", encoding="utf-8")
+    _select_gpu(monkeypatch, "hevc_vaapi")
+
+    assert run_setup(_options(tmp_path)) == 0
+
+    env = read_env_file(tmp_path / ".env")
+    assert env["RENDER_GID"] == "992"
+    assert env["COMPOSE_FILE"] == "docker-compose.yaml:docker-compose.gpu.yaml:docker-compose.override.yaml"
+
+
+@respx.mock
+def test_the_nvidia_wiring_keeps_the_override_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_server()
+    (tmp_path / "docker-compose.override.yaml").write_text("services: {}\n", encoding="utf-8")
+    _select_gpu(monkeypatch, "hevc_nvenc")
+
+    assert run_setup(_options(tmp_path)) == 0
+
+    assert read_env_file(tmp_path / ".env")["COMPOSE_FILE"] == (
+        "docker-compose.yaml:docker-compose.gpu-nvidia.yaml:docker-compose.override.yaml"
+    )
+
+
+@respx.mock
+def test_setup_says_how_to_wire_an_override_written_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The override is usually written at go-live, long after setup ran."""
+    _mock_server()
+    _select_gpu(monkeypatch, "hevc_vaapi")
+
+    run_setup(_options(tmp_path))
+
+    out = capsys.readouterr().out
+    assert "docker-compose.override.yaml" not in read_env_file(tmp_path / ".env")["COMPOSE_FILE"]
+    assert "add :docker-compose.override.yaml to that line" in out
