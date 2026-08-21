@@ -6,15 +6,16 @@ publishes a port — which is the default deployment. What they say is the produ
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
 import pytest
 import respx
 
-from immich_compressor.__main__ import _backfill
+from immich_compressor.__main__ import _backfill, _report
 from immich_compressor.config import Settings
-from immich_compressor.store import JobStore
+from immich_compressor.store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 BASE = "http://immich-test:2283/api"
 
@@ -76,3 +77,47 @@ async def test_backfill_counts_only_what_it_looked_at(
     assert "scanned 2 assets, queued 0 (dry run — pass --apply)" in out
     assert out.count("[dry] would queue") == 2
     assert "ignored" not in out
+
+
+async def test_report_leads_with_the_webhook_counters(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ "0 received, 7 rejected" explains every zero underneath it, so it goes first.
+
+    Without it the report of a deployment whose shared secret does not match is
+    indistinguishable from one that simply has not been given anything to do.
+    """
+    async with JobStore(settings.database_path) as store:
+        await store.bump_counter(WEBHOOKS_REJECTED, 7)
+
+    assert await _report(settings, as_json=False) == 0
+
+    out = capsys.readouterr().out
+    assert "webhooks: 0 received, 7 rejected (bad or missing token)" in out
+    assert "WEBHOOK__TOKEN disagree" in out
+    assert out.index("webhooks:") < out.index("jobs total:")
+
+
+async def test_report_names_no_cause_when_webhooks_are_getting_through(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async with JobStore(settings.database_path) as store:
+        await store.bump_counter(WEBHOOKS_RECEIVED, 4)
+
+    assert await _report(settings, as_json=False) == 0
+
+    out = capsys.readouterr().out
+    assert "webhooks: 4 received, 0 rejected" in out
+    assert "disagree" not in out
+
+
+async def test_report_json_carries_the_counters_too(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async with JobStore(settings.database_path) as store:
+        await store.bump_counter(WEBHOOKS_RECEIVED, 2)
+        await store.bump_counter(WEBHOOKS_REJECTED)
+
+    assert await _report(settings, as_json=True) == 0
+
+    assert json.loads(capsys.readouterr().out)["webhooks"] == {"received": 2, "rejected": 1}

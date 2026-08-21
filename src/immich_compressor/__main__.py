@@ -33,7 +33,7 @@ from .setup_cmd import (
     SetupOptions,
     run_setup,
 )
-from .store import JobStore
+from .store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 logger = logging.getLogger("immich_compressor")
 
@@ -81,6 +81,40 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _webhook_summary(counters: dict[str, int]) -> list[str]:
+    """The line that separates "nothing has happened yet" from "nothing can happen".
+
+    A shared secret that does not match leaves no other trace anywhere. Immich discards the
+    401 and logs the workflow as executed successfully, no job row is written, and every
+    other line of `check` and `report` reads exactly like a healthy installation with an
+    empty queue. Without this the only evidence is one WARNING in the container log, which
+    only somebody already running `logs -f` will ever see.
+    """
+    received = counters.get(WEBHOOKS_RECEIVED, 0)
+    rejected = counters.get(WEBHOOKS_REJECTED, 0)
+    lines = [f"webhooks: {received} received, {rejected} rejected (bad or missing token)"]
+    if rejected and not received:
+        lines.append(
+            "  not one webhook has been accepted: the workflow's `headerValue` and "
+            "WEBHOOK__TOKEN disagree — see docs/workflow-setup.md"
+        )
+    elif rejected:
+        lines.append("  some were refused; the container log names the token that arrived")
+    return lines
+
+
+async def _webhook_lines(settings: Settings) -> list[str]:
+    """Read the counters, but never create the database just to report on it.
+
+    `check` is meant to be usable before anything has run, and on a host where the state
+    directory may not exist or may not be writable.
+    """
+    if not settings.database_path.is_file():
+        return []
+    async with JobStore(settings.database_path) as store:
+        return _webhook_summary(await store.counters())
+
+
 async def _check(settings: Settings) -> int:
     async with ImmichClient(
         settings.immich.base_url,
@@ -91,6 +125,8 @@ async def _check(settings: Settings) -> int:
     print(f"Immich reachable, version {version}")
     print(f"presets: {', '.join(f'{p.name}({p.match_type})' for p in settings.presets) or 'none'}")
     print(f"dry_run={settings.behavior.dry_run} trash_original={settings.behavior.trash_original}")
+    for line in await _webhook_lines(settings):
+        print(line)
     return 0
 
 
@@ -257,8 +293,13 @@ async def _report(settings: Settings, as_json: bool) -> int:
         stats = await store.stats()
         jobs = await store.list_jobs(limit=1000)
         latched = await store.pause_state()
+        counters = await store.counters()
     if as_json:
         stats["paused"] = {"since": latched.since.isoformat(), "reason": latched.reason} if latched else None
+        stats["webhooks"] = {
+            "received": counters[WEBHOOKS_RECEIVED],
+            "rejected": counters[WEBHOOKS_REJECTED],
+        }
         print(json.dumps(stats, indent=2))
         return 0
     print("=== immich-compressor report ===")
@@ -268,6 +309,10 @@ async def _report(settings: Settings, as_json: bool) -> int:
     if latched is not None:
         print(f"PAUSED since {latched.since.isoformat()}: {latched.reason}")
         print("  nothing is queued, processed or deleted — `immich-compressor resume --apply`")
+    # Above the job counts, because "0 received, 7 rejected" is the explanation for every
+    # zero underneath it.
+    for line in _webhook_summary(counters):
+        print(line)
     print(f"jobs total: {stats['total']}")
     for state, count in sorted(stats["by_state"].items()):
         print(f"  {state:16s} {count}")

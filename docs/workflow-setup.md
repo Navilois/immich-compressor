@@ -86,8 +86,16 @@ Immich reports as success — see below.
 
 > **Immich ignores the webhook's response status.** A 401 (wrong `headerValue`), a 422
 > (payload the service could not parse) or a 500 is still logged as *"Workflow … executed
-> successfully"*. Never diagnose from the Immich side alone; the compressor logs every
-> rejection at WARNING or ERROR.
+> successfully"*. Never diagnose from the Immich side alone. Ask the compressor instead —
+> the first line of `report` counts what arrived:
+>
+> ```
+> webhooks: 0 received, 7 rejected (bad or missing token)
+> ```
+>
+> Nothing but a mismatched secret produces that. The WARNING line for each rejection names
+> the length and first characters of the token Immich sent next to the one expected, which
+> is what tells a paste that was cut short from a token left over from an earlier install.
 
 > **If a workflow stops firing, restart `immich-server`.** Creating or editing a workflow
 > normally takes effect immediately (verified), but execution was observed going quiet after

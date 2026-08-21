@@ -40,6 +40,8 @@ immich_compressor_compressed_assets 2
 immich_compressor_original_bytes 50710662
 immich_compressor_compressed_bytes 26686614
 immich_compressor_saved_bytes 24024048
+immich_compressor_webhooks_received_total 12
+immich_compressor_webhooks_rejected_total 0
 immich_compressor_session_processed_total 2
 immich_compressor_session_deleted_total 2
 immich_compressor_session_bytes_saved_total 24024048
@@ -60,6 +62,12 @@ The three `config_*` gauges are the ones worth alerting on. `config_dry_run 1` o
 deployment you thought was live means nothing has been compressed for however long that has
 been true; `config_permanent_delete 1` means originals are being removed with no undo.
 
+`webhooks_rejected_total` deserves an alert of its own. It counts webhooks refused for a
+bad or missing shared secret, and anything above zero means the workflow's `headerValue`
+and `WEBHOOK__TOKEN` disagree — a state that is otherwise invisible, because Immich logs a
+401 as *"executed successfully"*. Both webhook counters live in the database and survive a
+restart, unlike the `session_*` ones.
+
 Scrape it from inside the docker network — if your Prometheus runs there too, no port needs
 publishing at all.
 
@@ -77,7 +85,7 @@ docker compose exec immich-compressor immich-compressor <command>
 | `hardware [--json]` | which encoder this machine gets, and why every other was rejected |
 | `check` | config, connectivity to Immich, and a real one-frame encode through the chosen encoder |
 | `encode <file> [--type]` | run the preset against a local file and print ratio, sanity verdict, rotation and display size. Never talks to Immich — this is how you tune a preset |
-| `report [--json]` | job statistics |
+| `report [--json]` | job statistics, and how many webhooks arrived or were refused |
 | `reprocess <assetId>` | re-queue one asset |
 | `requeue --reason <r> [--apply]` | re-queue everything skipped for one reason. Dry until `--apply` |
 | `backfill --type VIDEO --limit N [--apply]` | queue existing large assets. Dry until `--apply` |

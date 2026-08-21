@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -932,3 +933,67 @@ def test_reprocess_requires_the_shared_secret(settings: Settings, video_payload_
             client.post(f"/reprocess/{asset_id}", headers={"X-Compressor-Token": "test-token"}).status_code
             == 404
         )
+
+
+# ------------------------------------------------------- the webhook counters
+
+
+def test_a_refused_token_is_counted_where_somebody_will_see_it(
+    settings: Settings, fresh_video_payload_raw: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A shared secret that does not match leaves no other trace anywhere.
+
+    Immich discards the 401 and logs the workflow as executed successfully; no job row is
+    written; `/healthz` says healthy and `report` says zero jobs, which is exactly what an
+    idle installation says. Reproduced on a live v3.1.0 — the only evidence in the whole
+    system was one WARNING line in the container log.
+    """
+    caplog.set_level(logging.WARNING)
+    with _test_client(settings) as client:
+        assert (
+            client.post(
+                "/webhook", json=fresh_video_payload_raw, headers={"X-Compressor-Token": "wrong"}
+            ).status_code
+            == 401
+        )
+        webhooks = client.get("/stats").json()["webhooks"]
+        assert webhooks == {"received": 0, "rejected": 1}
+        assert "immich_compressor_webhooks_rejected_total 1" in client.get("/metrics").text
+
+    # The line has to name what arrived, or a truncated paste and a token from an earlier
+    # installation are indistinguishable — and the second one is what actually happens.
+    message = caplog.text
+    assert "5 characters starting wrong" in message
+    assert "10 characters starting test-t" in message
+
+
+def test_an_accepted_webhook_is_counted_too(
+    settings: Settings, fresh_video_payload_raw: dict[str, Any]
+) -> None:
+    """ "0 received, 7 rejected" and "0 received, 0 rejected" are different problems: a
+    wrong token, and Immich never reaching the service at all."""
+    settings.behavior.initial_delay_seconds = 3600
+    with _test_client(settings) as client:
+        client.post("/webhook", json=fresh_video_payload_raw, headers={"X-Compressor-Token": "test-token"})
+        assert client.get("/stats").json()["webhooks"] == {"received": 1, "rejected": 0}
+
+
+def test_the_counters_outlive_the_process(
+    settings: Settings, fresh_video_payload_raw: dict[str, Any]
+) -> None:
+    """Restarting the container is the first thing anybody tries. It must not be the thing
+    that erases the evidence — and `report` reads them from a different process anyway."""
+    with _test_client(settings) as client:
+        client.post("/webhook", json=fresh_video_payload_raw, headers={"X-Compressor-Token": "no"})
+
+    with _test_client(settings) as client:
+        assert client.get("/stats").json()["webhooks"]["rejected"] == 1
+
+
+def test_the_maintenance_routes_do_not_count_as_webhooks(settings: Settings) -> None:
+    """`/reprocess` and `/resume` carry the same header and are not webhooks. Counting them
+    would put a number in front of a user that does not answer the question they asked."""
+    with _test_client(settings) as client:
+        client.post("/resume", headers={"X-Compressor-Token": "wrong"})
+        client.post("/resume", headers={"X-Compressor-Token": "test-token"})
+        assert client.get("/stats").json()["webhooks"] == {"received": 0, "rejected": 0}

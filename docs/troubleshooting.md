@@ -15,7 +15,7 @@ real one-frame encode. `hardware` explains every encoder decision.
 
 | Symptom | Where to look |
 |---|---|
-| Immich says the workflow ran, nothing happens here | **The service's log.** Immich discards the webhook response, so a 401 (wrong `headerValue`) or a 422 (payload it could not parse) is invisible on the Immich side. Both are logged here, at WARNING and ERROR. |
+| Immich says the workflow ran, nothing happens here | **`report`, first line.** `webhooks: 0 received, 7 rejected` means the workflow's `headerValue` and `WEBHOOK__TOKEN` disagree; `0 received, 0 rejected` means nothing reached the service at all. Immich discards the webhook response, so a 401 or a 422 is invisible on its side — both are also logged here, at WARNING and ERROR, and the 401 line names the length and first characters of the token that arrived next to the one expected. |
 | Nothing at all in the log | Immich cannot reach the service. Test from inside the Immich container: `docker exec immich_server curl -s -o /dev/null -w '%{http_code}' http://immich-compressor:8080/healthz` |
 | The workflow used to fire and stopped | Restart `immich-server`. Execution was observed going quiet after a workflow run threw `NoResultError`. |
 | Webhook arrives, the job never runs | `initial_delay_seconds` is 300 by default. `GET /jobs/{id}` shows `run_after`. |
