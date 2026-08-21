@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -24,6 +25,7 @@ from immich_compressor.pipeline import (
     MARKER_VERSION,
     Pipeline,
     WebhookRejected,
+    Worker,
     check_ingest_guards,
     marker_blocks_reprocessing,
 )
@@ -793,6 +795,116 @@ async def test_a_refused_webhook_leaves_the_asset_reachable_by_backfill(
     async with JobStore(settings.database_path) as store:
         # What `immich-compressor backfill --apply` does, with its own trigger name.
         assert await store.enqueue(asset_id, {**old, "trigger": "Backfill"}, delay_seconds=0) is True
+
+
+def _fresh(raw: dict[str, Any], asset_id: str) -> dict[str, Any]:
+    """A brand-new upload with its own asset id, so each one is a distinct insert."""
+    payload = aged(raw, hours=0)
+    payload["data"]["asset"]["id"] = asset_id
+    return payload
+
+
+def test_the_surge_breaker_latches_and_then_refuses_everything(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    headers = {"X-Compressor-Token": "test-token"}
+    settings.behavior.initial_delay_seconds = 3600  # keep the workers off the queue
+    settings.behavior.surge_threshold = 3
+    with _test_client(settings) as client:
+        for index in range(3):
+            body = client.post(
+                "/webhook", json=_fresh(video_payload_raw, f"asset-{index}"), headers=headers
+            ).json()
+            assert body["accepted"] is True
+
+        # The fourth new asset inside the window is the one over the line.
+        tripped = client.post("/webhook", json=_fresh(video_payload_raw, "asset-3"), headers=headers).json()
+        assert tripped["accepted"] is True  # this one was already queued before the trip
+
+        # Everything after it is refused — including a perfectly fresh upload.
+        after = client.post("/webhook", json=_fresh(video_payload_raw, "asset-4"), headers=headers).json()
+        assert after["accepted"] is False
+        assert after["reason"] == "paused"
+        assert client.get("/jobs").json()["count"] == 4
+
+        # /stats rather than /healthz: the latter reaches out to Immich, which costs the
+        # connect timeout in a unit test. `test_healthz_reports_the_pause` covers that side.
+        paused = client.get("/stats").json()["paused"]
+        assert paused is not None
+        assert "surge_threshold 3" in paused["reason"]
+
+
+def test_a_replay_of_a_known_asset_does_not_push_the_breaker(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    """A re-trigger queues no work, so it must not count as work arriving."""
+    headers = {"X-Compressor-Token": "test-token"}
+    settings.behavior.initial_delay_seconds = 3600
+    settings.behavior.surge_threshold = 3
+    payload = _fresh(video_payload_raw, "the-same-asset")
+    with _test_client(settings) as client:
+        for _ in range(10):
+            assert client.post("/webhook", json=payload, headers=headers).json()["accepted"] is True
+        assert client.get("/stats").json()["paused"] is None
+
+
+def test_resume_clears_the_latch_and_needs_the_token(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    headers = {"X-Compressor-Token": "test-token"}
+    settings.behavior.initial_delay_seconds = 3600
+    settings.behavior.surge_threshold = 1
+    with _test_client(settings) as client:
+        for index in range(2):
+            client.post("/webhook", json=_fresh(video_payload_raw, f"a-{index}"), headers=headers)
+        assert client.get("/stats").json()["paused"] is not None
+
+        # Re-arming a service that deletes originals is not an unauthenticated action.
+        assert client.post("/resume").status_code == 401
+
+        resumed = client.post("/resume", headers=headers).json()
+        assert resumed["resumed"] is True
+        assert client.get("/stats").json()["paused"] is None
+
+        # A second resume is honest about having had nothing to do.
+        assert client.post("/resume", headers=headers).json()["resumed"] is False
+
+        # And webhooks are accepted again.
+        again = client.post("/webhook", json=_fresh(video_payload_raw, "a-9"), headers=headers)
+        assert again.json()["accepted"] is True
+
+
+async def test_a_paused_worker_claims_nothing(settings: Settings, video_payload_raw: dict[str, Any]) -> None:
+    """The latch has to stop work already in the queue, not only new arrivals."""
+    async with JobStore(settings.database_path) as store:
+        await store.enqueue("queued-before-the-pause", video_payload_raw, delay_seconds=0)
+        await store.pause("surge")
+
+        worker = Worker(settings, ImmichClient("http://immich-test/api", "k"), store)
+        await worker.start()
+        try:
+            await asyncio.sleep(settings.behavior.poll_interval_seconds * 4)
+        finally:
+            await worker.stop()
+
+        job = await store.get("queued-before-the-pause")
+        assert job is not None
+        assert job.state is JobState.QUEUED  # never claimed, never moved to running
+        assert job.attempts == 0
+
+
+def test_healthz_reports_the_pause(settings: Settings, video_payload_raw: dict[str, Any]) -> None:
+    """The one place the latch has to be visible to a container health check."""
+    headers = {"X-Compressor-Token": "test-token"}
+    settings.behavior.initial_delay_seconds = 3600
+    settings.behavior.surge_threshold = 1
+    with _test_client(settings) as client:
+        for index in range(2):
+            client.post("/webhook", json=_fresh(video_payload_raw, f"h-{index}"), headers=headers)
+        health = client.get("/healthz").json()
+    assert health["status"] == "paused"
+    assert health["paused"] is True
+    assert "surge_threshold 1" in health["paused_reason"]
 
 
 def test_webhook_rejects_a_malformed_body(settings: Settings) -> None:

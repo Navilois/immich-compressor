@@ -264,9 +264,24 @@ class RejectReason(StrEnum):
     TOO_OLD = "too_old"
     # The payload carried no `createdAt`, so freshness cannot be established either way.
     NO_CREATED_AT = "no_created_at"
+    # The surge breaker has latched. Nothing is queued or processed until it is cleared.
+    PAUSED = "paused"
 
 
 TERMINAL_STATES: frozenset[JobState] = frozenset({JobState.DONE, JobState.SKIPPED, JobState.FAILED})
+
+
+class PauseState(BaseModel):
+    """The surge breaker's latch, as stored in the ``service_state`` table.
+
+    Persisted rather than held in memory: restarting the container is the first thing an
+    operator reaches for, and it must not be the thing that clears the latch.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    reason: str
+    since: datetime
 
 
 class Job(BaseModel):

@@ -201,3 +201,37 @@ async def test_rows_without_a_type_stay_claimable(tmp_path: Path) -> None:
         assert (await store.get("legacy")).asset_type is None  # type: ignore[union-attr]
         claimed = await store.claim_next(types=("IMAGE",))
         assert claimed is not None and claimed.source_asset_id == "legacy"
+
+
+# ------------------------------------------------------------------- the pause latch
+
+
+async def test_the_pause_latch_survives_a_restart(tmp_path: Path) -> None:
+    """A restart is the first thing an operator reaches for; it must not clear a pause."""
+    db = tmp_path / "state.db"
+    async with JobStore(db) as store:
+        assert await store.pause_state() is None
+        assert await store.pause("300 assets in 600s") is True
+
+    async with JobStore(db) as store:
+        latched = await store.pause_state()
+        assert latched is not None
+        assert latched.reason == "300 assets in 600s"
+
+
+async def test_a_second_surge_does_not_overwrite_the_first_reason(tmp_path: Path) -> None:
+    """The first trip is the one that explains the pause. Later ones are noise."""
+    async with JobStore(tmp_path / "state.db") as store:
+        assert await store.pause("the original reason") is True
+        assert await store.pause("a later surge") is False
+        latched = await store.pause_state()
+        assert latched is not None
+        assert latched.reason == "the original reason"
+
+
+async def test_resume_clears_the_latch_and_reports_whether_it_had_to(tmp_path: Path) -> None:
+    async with JobStore(tmp_path / "state.db") as store:
+        assert await store.resume() is False  # was never paused
+        await store.pause("surge")
+        assert await store.resume() is True
+        assert await store.pause_state() is None

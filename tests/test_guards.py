@@ -16,6 +16,7 @@ from immich_compressor.models import RejectReason, SkipReason, WebhookAsset, Web
 from immich_compressor.pipeline import (
     MARKER_VERSION,
     SkipJob,
+    SurgeDetector,
     WebhookRejected,
     build_marker,
     check_guards,
@@ -223,3 +224,38 @@ def test_the_gate_can_be_turned_off(
     """`null` accepts any age — including a payload with no `createdAt` at all."""
     settings.behavior.max_asset_age_hours = None
     _ingest(video_payload_raw, settings, createdAt=created_at)  # must not raise
+
+
+# ----------------------------------------------------------------- the surge detector
+
+
+def test_the_detector_stays_quiet_up_to_the_threshold() -> None:
+    detector = SurgeDetector(threshold=3, window_seconds=600)
+    assert [detector.record(now=NOW) for _ in range(3)] == [None, None, None]
+
+
+def test_the_detector_trips_on_the_one_over() -> None:
+    detector = SurgeDetector(threshold=3, window_seconds=600)
+    for _ in range(3):
+        detector.record(now=NOW)
+    assert detector.record(now=NOW) == 4
+
+
+def test_a_trip_is_reported_once_not_on_every_later_webhook() -> None:
+    """The caller latches on the first report; repeating it would only spam the log."""
+    detector = SurgeDetector(threshold=2, window_seconds=600)
+    for _ in range(3):
+        detector.record(now=NOW)
+    assert detector.record(now=NOW) is None
+
+
+def test_arrivals_outside_the_window_do_not_count() -> None:
+    """Rate, not total. A steady trickle must never add up to a surge."""
+    detector = SurgeDetector(threshold=3, window_seconds=600)
+    for minutes in (0, 20, 40, 60):
+        assert detector.record(now=NOW + timedelta(minutes=minutes)) is None
+
+
+def test_the_detector_can_be_turned_off() -> None:
+    detector = SurgeDetector(threshold=None, window_seconds=600)
+    assert all(detector.record(now=NOW) is None for _ in range(1000))

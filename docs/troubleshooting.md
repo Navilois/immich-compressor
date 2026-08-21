@@ -88,6 +88,25 @@ library. Full explanation in [operations.md](operations.md#the-metadata-extracti
 If a *genuine* upload is being refused, its metadata extraction sat in Immich's queue for
 longer than the window — raise `max_asset_age_hours`.
 
+## The service has stopped doing anything
+
+```
+WARNING starting PAUSED since 2026-08-21T09:14:22+00:00: 201 assets queued from webhooks
+        within 600s, over surge_threshold 200
+```
+
+The surge breaker latched. Nothing is queued, processed or deleted until it is cleared, and
+that is deliberate — it fires when far more work arrived than anybody asked for. `report`
+says so on its first line, `/healthz` reports `"status": "paused"`, and:
+
+```bash
+docker compose exec immich-compressor immich-compressor resume
+```
+
+prints the reason without changing anything. `--apply` clears it. If your normal traffic
+trips it — a phone backup of a few hundred photos will — raise `behavior.surge_threshold`.
+Full explanation in [operations.md](operations.md#the-surge-breaker).
+
 ## The whole library queued at once
 
 Only possible with `max_asset_age_hours: null`, which turns the gate above off. Set it back

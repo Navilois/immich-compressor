@@ -5,10 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.1] - 2026-08-21
 
 ### Added
 
+- **A surge breaker** (`behavior.surge_threshold` / `surge_window_seconds`, 200 per 10 min).
+  Backstop behind the gate below, for a bulk influx it does not model — an unfamiliar
+  trigger, a re-uploaded library, a misdirected workflow. More than the threshold in new
+  webhook-queued assets inside the window latches the service paused: workers claim nothing,
+  the sweeper finalises no deletes, further webhooks are refused. The latch is stored in the
+  database, because restarting the container is the first thing an operator reaches for and
+  it must not be the thing that clears a pause. Cleared with `immich-compressor resume
+  --apply` or a token-protected `POST /resume`, and visible in `report`, `/healthz` and
+  `/stats`. A large phone backup will trip it; the breaker only pauses, and that is the right
+  way round for a service that deletes originals.
 - **A bulk-trigger gate** (`behavior.max_asset_age_hours`, 24 h by default). Immich's
   `AssetMetadataExtraction` trigger is a maintenance operation: one click on
   **Administration → Jobs → Extract Metadata** re-fires the workflow for every asset in the
@@ -254,6 +264,7 @@ First working release, developed and verified against a live Immich v3.1.0 insta
 - Test suite: unit tests with mocked HTTP plus a `live`-marked end-to-end suite against a
   full Immich v3.1.0 stack (`docker-compose.test.yaml`).
 
-[Unreleased]: https://github.com/Navilois/immich-compressor/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Navilois/immich-compressor/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/Navilois/immich-compressor/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Navilois/immich-compressor/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Navilois/immich-compressor/releases/tag/v1.0.0

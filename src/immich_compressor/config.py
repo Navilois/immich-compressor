@@ -123,6 +123,21 @@ class BehaviorSettings(BaseModel):
     # enqueues directly and is not subject to this gate.
     max_asset_age_hours: float | None = Field(default=24.0, gt=0)
 
+    # The surge breaker: defence in depth behind `max_asset_age_hours`, for the bulk influx
+    # nobody predicted — a trigger this project has not seen, a re-uploaded library, a
+    # misconfigured workflow. More than `surge_threshold` *new* assets queued from webhooks
+    # inside `surge_window_seconds` latches the service paused: workers stop claiming, the
+    # sweeper stops finalising deletes, and further webhooks are refused until somebody runs
+    # `immich-compressor resume --apply`. The latch is stored in the database, so restarting
+    # the container does not clear it.
+    #
+    # Counted for webhook-driven work only, so `backfill` and `reprocess` never trip it.
+    # A genuine bulk upload can: 200 photos from a phone backup in ten minutes is a surge by
+    # this definition, and pausing is the correct answer for a service that deletes
+    # originals. Raise it if that is your normal, or set `null` to switch it off.
+    surge_threshold: int | None = Field(default=200, gt=0)
+    surge_window_seconds: float = Field(default=600.0, gt=0)
+
     # 0 means "as soon as the verification chain passes", inline in the job rather than
     # on the sweeper's next pass.
     retention_days: int = Field(default=7, ge=0)
