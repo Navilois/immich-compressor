@@ -25,8 +25,8 @@ from .config import Settings, load_settings, warn_about_permanent_deletion
 from .encoder import probe_hardware_encoder
 from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from .metrics import render as render_metrics
-from .models import JobState, WebhookPayload
-from .pipeline import Worker
+from .models import JobState, RejectReason, WebhookPayload
+from .pipeline import WebhookRejected, Worker, check_ingest_guards
 from .store import JobStore
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,8 @@ class EnqueueResponse(BaseModel):
     accepted: bool
     asset_id: str
     duplicate: bool
+    # Set only when `accepted` is false: why the webhook was refused before it became a job.
+    reason: RejectReason | None = None
 
 
 class HealthResponse(BaseModel):
@@ -138,6 +140,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store: JobStore = request.app.state.store
         settings: Settings = request.app.state.settings
         asset = payload.data.asset
+
+        # Before the store, never after: a rejection must not leave a row behind, or
+        # `backfill` could never reach the asset again. Answered 202 like everything else
+        # — Immich logs a non-2xx as "executed successfully" anyway, so the status code is
+        # not a channel we have; the body and the log line are.
+        try:
+            check_ingest_guards(asset, settings.behavior)
+        except WebhookRejected as rejected:
+            logger.warning(
+                "refused %s asset=%s type=%s (%s): %s",
+                payload.trigger,
+                asset.id,
+                asset.type,
+                rejected.reason.value,
+                rejected.detail,
+            )
+            return EnqueueResponse(accepted=False, asset_id=asset.id, duplicate=False, reason=rejected.reason)
+
         inserted = await store.enqueue(
             asset.id,
             payload.model_dump(mode="json", by_alias=True),

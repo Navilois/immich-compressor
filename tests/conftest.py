@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,25 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def load_fixture(name: str) -> dict[str, Any]:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def aged(raw: dict[str, Any], *, hours: float) -> dict[str, Any]:
+    """A copy of the payload whose asset was added to Immich ``hours`` ago.
+
+    The captures are verbatim, so their `createdAt` grows a day older every day and the
+    ingest freshness gate refuses them. Any test that posts to `/webhook` about something
+    other than that gate wants an asset that was just uploaded: `aged(raw, hours=0)`.
+    """
+    copy = json.loads(json.dumps(raw))
+    created = datetime.now(UTC) - timedelta(hours=hours)
+    copy["data"]["asset"]["createdAt"] = created.isoformat().replace("+00:00", "Z")
+    return copy
+
+
+@pytest.fixture
+def fresh_video_payload_raw(video_payload_raw: dict[str, Any]) -> dict[str, Any]:
+    """The VIDEO capture, restamped as a brand new upload."""
+    return aged(video_payload_raw, hours=0)
 
 
 @pytest.fixture

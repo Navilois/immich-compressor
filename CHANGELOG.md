@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A bulk-trigger gate** (`behavior.max_asset_age_hours`, 24 h by default). Immich's
+  `AssetMetadataExtraction` trigger is a maintenance operation: one click on
+  **Administration → Jobs → Extract Metadata** re-fires the workflow for every asset in the
+  library. Assets already recorded were immune; assets never seen were not, which was the
+  whole library until it had been worked through. Every webhook carries `createdAt`, which
+  dates the *upload* rather than the exposure, so a re-trigger is now refused at ingest
+  while a legitimate import of a thousand old photos still passes — something a rate limit
+  could not distinguish. A refusal writes no job, deliberately: `backfill` enqueues through
+  the same `ON CONFLICT DO NOTHING`, and a row recorded here would put the asset permanently
+  out of its reach. `max_asset_age_hours: null` turns the gate off and is refused at startup
+  together with `delete_mode: permanent`.
 - **JPEG stills are compressed too.** `enabled_types: [VIDEO, IMAGE]` and `IMAGE` in the
   workflow's type filter are what `setup` now writes. The encoder path already existed;
   what was missing was the decision logic around it.

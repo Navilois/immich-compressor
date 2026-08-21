@@ -39,6 +39,16 @@ behavior:
   # Read docs/safety.md before changing any of the three above. `permanent` is refused at
   # startup unless trash_original is true and dry_run is false.
 
+  # The bulk-trigger gate. Refuse a webhook for an asset that was added to Immich longer
+  # ago than this. The workflow trigger is `AssetMetadataExtraction`, and one click on
+  # Administration -> Jobs -> Extract Metadata re-fires it for EVERY asset in the library;
+  # this is what keeps that click from becoming a library-wide recompression. It reads the
+  # payload's `createdAt`, which is the upload time and not the capture date, so importing
+  # a thousand photos from 2009 still passes. A refused webhook writes no job, so the asset
+  # stays reachable by `immich-compressor backfill` — the intentional way through a
+  # library. `null` turns the gate off and is refused together with delete_mode: permanent.
+  max_asset_age_hours: 24
+
   # balanced | higher | smaller. Mapped per encoder to the right CRF / -global_quality /
   # -cq number. `balanced` is what this project shipped in 1.0.0.
   quality: balanced

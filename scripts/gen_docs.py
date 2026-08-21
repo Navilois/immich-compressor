@@ -117,6 +117,18 @@ NOTES: dict[str, str] = {
         "are unlinked. There is no undo other than a backup. Rejected at startup unless "
         "`trash_original: true` and `dry_run: false`."
     ),
+    "behavior.max_asset_age_hours": (
+        "**The bulk-trigger gate.** Refuse a webhook for an asset that was added to Immich "
+        "longer ago than this. The workflow trigger is `AssetMetadataExtraction`, and one "
+        "click on **Administration -> Jobs -> Extract Metadata** re-fires it for *every "
+        "asset in the library* — this is what stops that click from becoming a "
+        "library-wide recompression. Measured from the payload's `createdAt`, which is the "
+        "upload time and not the capture date, so a legitimate import of a thousand old "
+        "photos still passes. A refused webhook writes no job, so the asset stays reachable "
+        "by `immich-compressor backfill`, which is the intentional way through a library. "
+        "`null` turns the gate off, and is rejected at startup together with "
+        "`delete_mode: permanent`."
+    ),
     "behavior.retention_days": (
         "How long a replaced original survives before it is removed. `0` removes it "
         "inline, the moment the verification chain passes."

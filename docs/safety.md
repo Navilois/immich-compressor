@@ -17,6 +17,7 @@ the last of those is refused at startup unless the other two already agree.
 | **Edited assets** | `isEdited` means non-destructive edits are attached, and they do not follow the replacement. |
 | **Locked-folder assets** | `visibility: locked` means skip. |
 | **Assets already in the trash** | Checked from the payload *and* re-checked live before anything happens. |
+| **Assets that were not just uploaded** | `createdAt` dates the upload, not the exposure. Past `max_asset_age_hours` (24 h) the webhook is a re-trigger, not an upload, and it is refused before a job exists — see [the metadata-extraction trap](operations.md#the-metadata-extraction-trap). |
 | **Assets with manually named faces** | Faces are re-detected for the replacement, so a name you typed could be lost. `skip_if_named_people: true` is the default. |
 | **Anything that cannot save `min_savings_bytes`** | 1 MiB by default. A file cannot save more bytes than it has, so this is decided before the download. |
 | **Anything it has already processed** | The `compressor` metadata marker on the asset is a hard, versioned loop guard. |

@@ -15,11 +15,18 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from conftest import aged
 from immich_compressor.api import ImmichClient
 from immich_compressor.config import Settings
 from immich_compressor.encoder import run_command
-from immich_compressor.models import Job, JobState, MetadataItem, SkipReason
-from immich_compressor.pipeline import MARKER_VERSION, Pipeline, marker_blocks_reprocessing
+from immich_compressor.models import Job, JobState, MetadataItem, SkipReason, WebhookPayload
+from immich_compressor.pipeline import (
+    MARKER_VERSION,
+    Pipeline,
+    WebhookRejected,
+    check_ingest_guards,
+    marker_blocks_reprocessing,
+)
 from immich_compressor.server import create_app
 from immich_compressor.store import JobStore
 
@@ -730,21 +737,62 @@ def test_webhook_requires_the_shared_secret(settings: Settings, video_payload_ra
         )
 
 
-def test_webhook_accepts_and_is_idempotent(settings: Settings, video_payload_raw: dict[str, Any]) -> None:
+def test_webhook_accepts_and_is_idempotent(
+    settings: Settings, fresh_video_payload_raw: dict[str, Any]
+) -> None:
     headers = {"X-Compressor-Token": "test-token"}
     settings.behavior.initial_delay_seconds = 3600  # keep the worker away from the job
     with _test_client(settings) as client:
-        first = client.post("/webhook", json=video_payload_raw, headers=headers)
+        first = client.post("/webhook", json=fresh_video_payload_raw, headers=headers)
         assert first.status_code == 202
         assert first.json()["duplicate"] is False
 
         # A second webhook for the same asset must be a no-op.
-        second = client.post("/webhook", json=video_payload_raw, headers=headers)
+        second = client.post("/webhook", json=fresh_video_payload_raw, headers=headers)
         assert second.status_code == 202
         assert second.json()["duplicate"] is True
 
         jobs = client.get("/jobs").json()
         assert jobs["count"] == 1
+
+
+def test_webhook_refuses_a_bulk_retrigger_and_writes_no_job(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    """One click on Extract Metadata must not become a library-wide queue.
+
+    The 202 is deliberate — Immich logs any non-2xx as "executed successfully", so the
+    status code carries nothing. The body and the log line are where the refusal lives.
+    """
+    headers = {"X-Compressor-Token": "test-token"}
+    with _test_client(settings) as client:
+        response = client.post("/webhook", json=aged(video_payload_raw, hours=24 * 30), headers=headers)
+        assert response.status_code == 202
+        body = response.json()
+        assert body["accepted"] is False
+        assert body["reason"] == "too_old"
+
+        assert client.get("/jobs").json()["count"] == 0
+
+
+async def test_a_refused_webhook_leaves_the_asset_reachable_by_backfill(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    """The reason the gate sits in front of the store rather than inside `check_guards`.
+
+    `backfill` enqueues through the same `ON CONFLICT DO NOTHING`, so a row written here —
+    in any state, including `skipped` — would make the asset permanently unreachable by the
+    one path that is supposed to work through the library on purpose.
+    """
+    old = aged(video_payload_raw, hours=24 * 30)
+    asset_id = old["data"]["asset"]["id"]
+
+    with pytest.raises(WebhookRejected):
+        check_ingest_guards(WebhookPayload.model_validate(old).data.asset, settings.behavior)
+
+    async with JobStore(settings.database_path) as store:
+        # What `immich-compressor backfill --apply` does, with its own trigger name.
+        assert await store.enqueue(asset_id, {**old, "trigger": "Backfill"}, delay_seconds=0) is True
 
 
 def test_webhook_rejects_a_malformed_body(settings: Settings) -> None:

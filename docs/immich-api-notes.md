@@ -202,7 +202,9 @@ with `source: undefined`; and `onAssetMetadataExtracted` (`workflow-execution.se
 only returns early for `source === 'sidecar-write'`. So **"Extract Metadata → All" fires the
 workflow for every asset in the library.**
 
-See [operations.md](operations.md#the-metadata-extraction-trap) for what to do about it.
+This is what `behavior.max_asset_age_hours` exists for: the payload's `createdAt` dates the
+upload, so a re-trigger for an asset that has been in the library a while is refused at
+ingest. See [operations.md](operations.md#the-metadata-extraction-trap).
 
 ### 13. A scoped API key gets 403 on `/users/me`, and that is not an error
 

@@ -197,6 +197,48 @@ def test_permanent_delete_mode_loads_when_it_is_coherent(
     assert settings.behavior.retention_days == 0
 
 
+def test_permanent_delete_mode_cannot_disable_the_bulk_trigger_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`null` there plus `permanent` here is one Extract Metadata click from an empty library."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _with_behavior(
+        dry_run=False,
+        trash_original=True,
+        delete_mode="permanent",
+        max_asset_age_hours="null",
+    )
+    with pytest.raises(ConfigError, match=r"max_asset_age_hours"):
+        load_settings(_write(tmp_path, body))
+
+
+def test_the_bulk_trigger_gate_is_on_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    settings = load_settings(_write(tmp_path, _MINIMAL))
+    assert settings.behavior.max_asset_age_hours == 24.0
+
+
+def test_the_bulk_trigger_gate_may_be_disabled_when_deletes_are_recoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off is a legitimate choice — as long as an original can still be brought back."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    body = _with_behavior(dry_run=False, trash_original=True, max_asset_age_hours="null")
+    settings = load_settings(_write(tmp_path, body))
+    assert settings.behavior.max_asset_age_hours is None
+
+
+def test_a_zero_length_freshness_window_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """0 would refuse every webhook, which is a stopped service, not a configured one."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    with pytest.raises(ConfigError):
+        load_settings(_write(tmp_path, _with_behavior(max_asset_age_hours=0)))
+
+
 def test_delete_mode_defaults_to_the_recoverable_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")

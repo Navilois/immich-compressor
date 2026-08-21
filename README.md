@@ -69,9 +69,12 @@ not survive fails the job, with the original untouched.
 network traffic to anything but your own Immich server.
 
 **One thing to know before you go live:** Immich's `AssetMetadataExtraction` trigger fires
-in bulk, so re-running **Administration → Jobs → Extract Metadata** queues your *entire*
-library at once, not just new uploads. Work through a backlog with `backfill --limit`
-instead, and disable the workflow before running extraction —
+in bulk, so **Administration → Jobs → Extract Metadata** re-fires the workflow for your
+*entire* library, not just new uploads. Every webhook carries `createdAt`, which dates the
+upload rather than the exposure, and `behavior.max_asset_age_hours` (24 h by default)
+refuses anything older than that — so the button is safe to press, and importing a thousand
+photos from 2009 still goes through. It is still not a way to reach a backlog: use
+`backfill --limit` for that —
 [the details, and why](docs/operations.md#the-metadata-extraction-trap).
 
 Full detail, and the four stages of going live: **[docs/safety.md](docs/safety.md)**.
