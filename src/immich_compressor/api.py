@@ -340,7 +340,13 @@ class ImmichClient:
         size: int = 100,
         page: int = 1,
     ) -> AsyncIterator[dict[str, Any]]:
-        """``POST /search/large-assets`` — used only by the optional backfill CLI."""
+        """``POST /search/large-assets`` — used only by the optional backfill CLI.
+
+        ``type`` and ``size`` are sent and **ignored** by the server. Measured on v3.1.0:
+        ``IMAGE`` and ``VIDEO`` answer with the identical set of videos, and ``size: 5``
+        answers with 250 items. They are still sent, because a later Immich may honour
+        them; the caller filters and counts for itself either way. See ``_backfill``.
+        """
         response = await self._request(
             "POST",
             "/search/large-assets",

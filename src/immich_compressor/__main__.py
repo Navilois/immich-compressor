@@ -357,9 +357,18 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 
 async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool) -> int:
-    """Queue existing large assets, as if a webhook had arrived for each."""
+    """Queue existing large assets, as if a webhook had arrived for each.
+
+    The type filter is applied here rather than trusted to the server. Measured against a
+    live v3.1.0: ``POST /search/large-assets`` ignores the ``type`` field in the request
+    body — ``IMAGE`` and ``VIDEO`` answer with the identical set of videos — and ignores
+    ``size`` as well. Without a client-side check the stills backfill is not merely broken
+    but unreachable, and anybody who thinks they are testing 50 photos re-encodes 50
+    videos instead. Harmless in stage 1; not harmless from stage 3 on.
+    """
     queued = 0
     seen = 0
+    foreign = 0
     async with (
         ImmichClient(
             settings.immich.base_url,
@@ -373,9 +382,12 @@ async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool
             asset_type=asset_type,
             size=min(limit, 200),
         ):
-            seen += 1
-            if seen > limit:
+            if item.get("type") != asset_type:
+                foreign += 1
+                continue
+            if seen >= limit:
                 break
+            seen += 1
             asset_id = item.get("id")
             if not asset_id:
                 continue
@@ -390,6 +402,13 @@ async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool
             if await store.enqueue(asset_id, payload, delay_seconds=0):
                 queued += 1
     print(f"scanned {seen} assets, queued {queued}" + ("" if apply else " (dry run — pass --apply)"))
+    # Said out loud, because silence here looks like an empty library rather than a filter
+    # the server declined to apply.
+    if foreign:
+        print(
+            f"  ignored {foreign} result(s) that were not {asset_type}: this Immich answers "
+            "/search/large-assets without applying the type filter"
+        )
     return 0
 
 
