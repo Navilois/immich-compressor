@@ -12,6 +12,16 @@ updates:
       python-minor-and-patch:
         update-types: [minor, patch]
 
+  # Dockerfile only. Compose files are a separate ecosystem (`docker-compose`) and are
+  # deliberately not enrolled, because the images worth updating there are none:
+  #   docker-compose.yaml       ghcr.io/navilois/immich-compressor:1 — the major tag is the
+  #                             feature: a patch release reaches deployments with no edit.
+  #   docker-compose.test.yaml  the Immich v3.1.0 stack, plus the valkey and postgres
+  #                             digests that release shipped with. The live suite asserts
+  #                             against v3.1.0 API behaviour, so moving it invalidates the
+  #                             tests rather than updating them.
+  # What is left is the `echo` profile's stock python image, which is a debugging helper
+  # and not worth a weekly pull request. Bump it by hand when the base image moves.
   - package-ecosystem: docker
     directory: /
     schedule:
