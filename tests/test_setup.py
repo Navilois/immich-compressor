@@ -206,6 +206,33 @@ def test_a_secret_file_is_never_world_readable(tmp_path: Path) -> None:
     assert mode == 0o600
 
 
+def test_a_secret_file_is_tightened_before_the_secret_goes_into_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chmod after write leaves the new secret world-readable for the length of the write.
+
+    Only reachable when the file already exists — a 0644 `.env` from a version that wrote
+    it with plain `write_text` — so the spy watches what the file holds at chmod time.
+    """
+    path = tmp_path / ".env"
+    path.write_text("IMMICH_API_KEY=stale\n", encoding="utf-8")
+    path.chmod(0o644)
+
+    held_at_chmod: list[str] = []
+    real_chmod = Path.chmod
+
+    def spy(self: Path, mode: int) -> None:
+        held_at_chmod.append(self.read_text(encoding="utf-8"))
+        real_chmod(self, mode)
+
+    monkeypatch.setattr(Path, "chmod", spy)
+    write_secret_file(path, "IMMICH_API_KEY=fresh\n")
+
+    assert held_at_chmod == [""], "the mode was set after the secret was already on disk"
+    assert path.read_text(encoding="utf-8") == "IMMICH_API_KEY=fresh\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_the_generated_config_loads_and_carries_no_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

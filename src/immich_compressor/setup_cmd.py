@@ -343,9 +343,18 @@ def render_env(values: dict[str, str]) -> str:
 
 
 def write_secret_file(path: Path, body: str) -> None:
-    """Write with mode 0600 from the start, so the secret is never briefly world-readable."""
-    path.write_text(body, encoding="utf-8")
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    """Write with mode 0600 from the start, so the secret is never briefly world-readable.
+
+    `O_CREAT` applies its mode to a new file only, and umask can narrow it further, so the
+    explicit chmod stays. It just has to run while the file is still empty: rewriting a
+    0644 `.env` left by an older version would otherwise put the new secret in a
+    world-readable file for as long as the write takes.
+    """
+    mode = stat.S_IRUSR | stat.S_IWUSR
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        path.chmod(mode)
+        handle.write(body)
 
 
 # --------------------------------------------------------------------- orchestration
