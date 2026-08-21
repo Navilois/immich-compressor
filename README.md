@@ -164,6 +164,7 @@ $ docker compose exec immich-compressor immich-compressor report
 
 === immich-compressor report ===
 database: /var/lib/immich-compressor/state.db
+webhooks: 5 received, 0 rejected (bad or missing token)
 jobs total: 5
   done             2
   failed           1
