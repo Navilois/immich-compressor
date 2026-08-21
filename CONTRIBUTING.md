@@ -40,9 +40,22 @@ export E2E_IMMICH_KEY=<api key from that instance>
 make test-live
 ```
 
-`docker-compose.test.yaml` brings up a complete Immich v3.1.0 stack under the separate
-compose project `immich-test`. Machine learning sits behind the `ml` profile because it
-costs about 2 GB of RAM.
+`docker-compose.test.yaml` brings up a complete Immich stack under the separate compose
+project `immich-test`. Machine learning sits behind the `ml` profile because it costs about
+2 GB of RAM.
+
+That stack follows the floating `v3` tag, inherited from `testinstance/example.env`, so the
+live suite runs against whatever Immich 3.x is current on the day — **not** against v3.1.0,
+which is what `tests/fixtures/` and [docs/immich-api-notes.md](docs/immich-api-notes.md)
+were captured from. Pin it in `testinstance/.env` when you need a documented behaviour
+reproduced exactly:
+
+```bash
+IMMICH_VERSION=v3.1.0
+```
+
+A live failure that appears right after an upstream Immich release is therefore worth
+reading as a possible upstream change before assuming this code broke.
 
 **Never point the live suite at a real library.** It uploads throwaway assets, drives the
 full pipeline including trash and restore, and cleans up after itself — on an instance that

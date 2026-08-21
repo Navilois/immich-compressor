@@ -1,5 +1,10 @@
-# Immich v3.1.0 test instance for developing and verifying immich-compressor.
+# Immich test instance for developing and verifying immich-compressor.
 # Derived from the official docker-compose.yml of the v3.1.0 release.
+#
+# The tag follows IMMICH_VERSION from testinstance/.env, and example.env sets the floating
+# `v3` — so this tracks whatever Immich 3.x is current, not the v3.1.0 that the fixtures in
+# tests/fixtures/ and docs/immich-api-notes.md were captured against. Set
+# IMMICH_VERSION=v3.1.0 there to reproduce those exactly.
 #
 # NOT for production. It exists so the `live`-marked suite has something to drive.
 #
@@ -24,7 +29,7 @@ name: immich-test
 
 services:
   immich-server:
-    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-v3.1.0}
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-v3}
     volumes:
       - ./testinstance/library:/data
       - /etc/localtime:/etc/localtime:ro
@@ -43,7 +48,7 @@ services:
   # significant CPU, and this container only has 2 vCPU / 8 GiB. Enable with
   # `--profile ml` if you want to test the `skip_if_named_people` guard end to end.
   immich-machine-learning:
-    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-v3.1.0}
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-v3}
     profiles: ['ml']
     volumes:
       - model-cache:/cache
