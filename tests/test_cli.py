@@ -232,3 +232,15 @@ async def test_reprocess_names_the_command_that_would_have_worked(
     moment somebody needs to hear that."""
     assert await _reprocess(settings, "an-asset-nobody-sent-us") == 1
     assert "backfill" in capsys.readouterr().err
+
+
+async def test_jobs_clamps_its_limit_like_the_endpoint_does(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """SQLite reads a negative LIMIT as "no limit at all"."""
+    async with JobStore(settings.database_path) as store:
+        for index in range(3):
+            await store.enqueue(f"a{index}", {}, delay_seconds=0)
+
+    assert await _jobs(settings, status=None, limit=-1, as_json=True) == 0
+    assert len(json.loads(capsys.readouterr().out)) == 1

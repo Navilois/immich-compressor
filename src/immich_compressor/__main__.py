@@ -382,7 +382,9 @@ async def _jobs(settings: Settings, status: str | None, limit: int, as_json: boo
             print(f"unknown status {status!r} — one of: {known}", file=sys.stderr)
             return 2
     async with JobStore(settings.database_path) as store:
-        found = await store.list_jobs(state=state, limit=limit)
+        # Clamped like `GET /jobs` does it. SQLite reads a negative LIMIT as "no limit",
+        # so `--limit -1` would quietly dump the whole table.
+        found = await store.list_jobs(state=state, limit=min(max(limit, 1), 1000))
 
     if as_json:
         print(json.dumps([job.model_dump(mode="json", exclude={"payload"}) for job in found], indent=2))
