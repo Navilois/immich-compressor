@@ -44,25 +44,38 @@ jobs:
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # Debian trixie, the same base the published image is built from, so the encoder tests
+    # run against the ImageMagick and exiftool that users actually get. On the Ubuntu 24.04
+    # runner they did not run at all: Ubuntu packages ImageMagick 6, which installs
+    # `convert` but no `magick` binary, and exiftool 12.76, which predates the XMP-GCamera
+    # namespace the motion-photo detection needs. Both guards skip instead of failing, so
+    # CI reported a green "302 passed, 14 skipped" and nobody saw the hole.
+    container: python:${{ matrix.python-version }}-slim
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.12', '3.13']
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python-version }}
+      # ffmpeg/ffprobe drive the video presets and the sanity gate, exiftool carries the
+      # metadata across a still re-encode, and ImageMagick is the still encoder itself.
+      - name: Media toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ffmpeg libimage-exiftool-perl imagemagick
+          rm -rf /var/lib/apt/lists/*
+      # A missing binary makes these tests skip rather than fail, which is exactly how they
+      # went unnoticed. Assert the precondition instead of trusting a green summary line.
+      - name: The toolchain the tests need is present
+        run: |
+          for tool in ffmpeg ffprobe exiftool magick identify; do
+            command -v "$tool" >/dev/null \
+              || { echo "::error::$tool is missing; encoder tests would skip silently"; exit 1; }
+          done
       - name: Install
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
-      # ffmpeg, ffprobe, exiftool and ImageMagick unlock the encoder tests that are
-      # skipped without them — about a quarter of the suite.
-      - name: Install media tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg libimage-exiftool-perl imagemagick
       - name: pytest
         run: python -m pytest -m 'not live' -q
 
