@@ -84,6 +84,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the offset tags (`ThumbnailOffset`, `PreviewImageStart`, `OtherImageStart`,
   `StripOffsets`) are ignored because they are file positions, not content — the matching
   `*Length` tags stay compared, since a thumbnail length that moves is a truncated thumbnail.
+- **The `BEHAVIOR__` flags in `.env` reached nothing.** `.env.example` documents four of
+  them as the way to go live, but `.env` is compose's substitution file, not an `env_file`:
+  `docker-compose.yaml` had no `env_file:` and named only three `${...}` values in its
+  `environment:` block, and the service sets `env_file=None` in `config.py` and never had
+  `.env` mounted. Measured on a running container: with `BEHAVIOR__DRY_RUN=false` and
+  `BEHAVIOR__TRASH_ORIGINAL=true` in `.env`, the container environment held neither, so a
+  deployment that went live this way stayed in dry run and said nothing. The compose file
+  now lists the four by name, in the list form — a bare name is passed on only when it is
+  set, where `BEHAVIOR__DRY_RUN: ${BEHAVIOR__DRY_RUN:-}` would have handed every other
+  deployment an empty string to parse. Verified against the 1.1.0 image end to end: unset,
+  `config.yaml` still decides and the defaults stay inert; set, the service resolves
+  `dry_run=False` and `trash_original=True`. A setting in `docker-compose.override.yaml`
+  still wins over `.env`, and a test now holds the two files to the same list of flags.
 - **The compose override template broke on its first edit.** It ended in a `{}` that kept
   the file valid while every block in it was a comment — but a flow mapping cannot hold
   block keys, so uncommenting anything made compose stop with a YAML parse error until that

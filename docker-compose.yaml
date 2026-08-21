@@ -17,14 +17,23 @@ services:
     image: ghcr.io/navilois/immich-compressor:1
     container_name: immich-compressor
     restart: unless-stopped
+    # The list form, because a bare name means "pass this through, but only if it is set".
+    # A mapping cannot say that: `BEHAVIOR__DRY_RUN: ${BEHAVIOR__DRY_RUN:-}` would hand the
+    # container an empty string on every deployment that does not set it.
     environment:
       # Secrets come from the environment only; never from config.yaml.
-      IMMICH__API_KEY: ${IMMICH_API_KEY:?IMMICH_API_KEY is required — run `immich-compressor setup`}
-      WEBHOOK__TOKEN: ${COMPRESSOR_TOKEN:?COMPRESSOR_TOKEN is required — run `immich-compressor setup`}
-      IMMICH__BASE_URL: ${IMMICH_BASE_URL:-http://immich-server:2283/api}
-      # Going live is a change to docker-compose.override.yaml or config.yaml, never here.
-      # The shipped defaults are inert: nothing is uploaded, nothing is deleted.
-      # docs/safety.md walks through the four stages.
+      - IMMICH__API_KEY=${IMMICH_API_KEY:?IMMICH_API_KEY is required — run `immich-compressor setup`}
+      - WEBHOOK__TOKEN=${COMPRESSOR_TOKEN:?COMPRESSOR_TOKEN is required — run `immich-compressor setup`}
+      - IMMICH__BASE_URL=${IMMICH_BASE_URL:-http://immich-server:2283/api}
+      # The four flags .env may set, and the only ones it can: compose passes on what is
+      # named here and nothing else. Left unset in .env they never reach the container at
+      # all, so the shipped defaults stand — inert: nothing is uploaded, nothing deleted.
+      # Going live is a change to .env, docker-compose.override.yaml or config.yaml, never
+      # to this file. docs/safety.md walks through the four stages.
+      - BEHAVIOR__DRY_RUN
+      - BEHAVIOR__TRASH_ORIGINAL
+      - BEHAVIOR__RETENTION_DAYS
+      - BEHAVIOR__DELETE_MODE
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - compressor-state:/var/lib/immich-compressor

@@ -518,3 +518,25 @@ def test_the_override_template_survives_its_first_edit() -> None:
     # Nothing but real settings came out of the comments: prose that reads like `key: value`
     # is prose a reader would uncomment too, and compose rejects what it does not know.
     assert set(edited) <= {"restart", "environment", "cpus", "mem_limit", "build", "image", "ports"}
+
+
+def test_every_flag_env_example_documents_is_one_compose_passes_through() -> None:
+    """`.env` is compose's substitution file, not an env_file: it reaches the container only
+    through names docker-compose.yaml lists.
+
+    The two drifted apart once already — `.env.example` documented four `BEHAVIOR__` flags
+    that the compose file passed on to nobody, so a deployment that went live through `.env`
+    silently stayed in dry run.
+    """
+    documented = set(
+        re.findall(r"^# (BEHAVIOR__\w+)=", (REPO / ".env.example").read_text(encoding="utf-8"), re.M)
+    )
+    service = yaml.safe_load((REPO / "docker-compose.yaml").read_text(encoding="utf-8"))["services"]
+    environment = service["immich-compressor"]["environment"]
+    assert isinstance(environment, list), "only the list form can carry a bare pass-through name"
+    # A bare name is "pass this on only if it is set"; a NAME=value entry is a value the
+    # compose file supplies itself, which is a different thing.
+    passed = {e for e in environment if "=" not in e}
+
+    assert documented, "the flags are commented examples in .env.example; keep them there"
+    assert documented == passed
