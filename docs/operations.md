@@ -31,7 +31,7 @@ Prometheus text exposition format, hand-rolled, no extra dependency. Every famil
 `HELP` and `TYPE`, and is emitted even when empty so a dashboard query never disappears:
 
 ```
-immich_compressor_build_info{version="1.1.0"} 1
+immich_compressor_build_info{version="1.1.1"} 1
 immich_compressor_jobs{state="done"} 2
 immich_compressor_jobs{state="failed"} 1
 immich_compressor_jobs_skipped{reason="no_gain"} 1

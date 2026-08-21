@@ -5,7 +5,7 @@
 
 # Configuration reference
 
-Generated from the settings model of immich-compressor 1.1.0.
+Generated from the settings model of immich-compressor 1.1.1.
 
 `config.yaml` is optional. Every value below has a default, and the encoder is detected rather than configured, so the shortest working file is an empty one.
 
