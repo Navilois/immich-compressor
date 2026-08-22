@@ -35,7 +35,7 @@ mkdir -p testinstance
 cp testinstance/example.env testinstance/.env   # set a DB_PASSWORD of your own
 docker compose --env-file testinstance/.env -f docker-compose.test.yaml up -d
 
-export E2E_IMMICH_URL=http://172.25.0.2:2283/api
+export E2E_IMMICH_URL=http://127.0.0.1:2283/api
 export E2E_IMMICH_KEY=<api key from that instance>
 make test-live
 ```

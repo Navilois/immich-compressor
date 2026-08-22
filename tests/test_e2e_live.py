@@ -2,7 +2,7 @@
 
 Deselect with ``pytest -m "not live"``. Requires:
 
-    E2E_IMMICH_URL=http://172.25.0.2:2283/api
+    E2E_IMMICH_URL=http://127.0.0.1:2283/api
     E2E_IMMICH_KEY=<api key with asset.* and tag.* permissions>
 
 The test uploads its own throwaway video, drives the full pipeline, asserts that album,

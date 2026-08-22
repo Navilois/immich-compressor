@@ -31,3 +31,11 @@ docker-compose.override.yaml
 
 # Claude Code session material (prompts, scratch state); never part of the public repo.
 .claude/
+
+# Internal working notes: the prompt this repository was built from, and the handover
+# written for one specific machine. Both describe a private deployment and a moment that
+# has passed, and neither is addressed to anybody who finds this project. They stay on
+# disk for whoever wants them; docs/maintainers/launch-checklist.md is the part of that
+# material that is genuinely for a reader, and stays tracked.
+docs/public-release.md
+docs/maintainers/HANDOVER.md
