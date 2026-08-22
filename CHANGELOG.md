@@ -87,9 +87,11 @@ what this release is.
 
 ### Known
 
-- `docker pull ghcr.io/navilois/immich-compressor` answers `unauthorized` while the package
-  is private, which makes the documented quickstart unusable for anybody outside the
-  repository. Unchanged here, and resolved by publication rather than by code.
+- The repository is private, and the documented quickstart begins with `git clone` — so the
+  five-minute path is not open to anybody outside it. The published **image** is a separate
+  matter and is pullable anonymously: an unauthenticated registry token lists
+  `ghcr.io/navilois/immich-compressor` and serves its manifests. Resolved by publication
+  rather than by code.
 
 ## [1.1.1] - 2026-08-21
 
