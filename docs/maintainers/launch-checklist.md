@@ -3,6 +3,34 @@
 Everything a human still has to do, in the order it makes sense to do it. Nothing here can
 be automated from inside the repository, which is why it is written down.
 
+Done so far, so nobody repeats it: the **repository is public** since 2026-08-22, the
+**ghcr.io package is public**, and **1.2.0 is released** — image and GitHub release both.
+Still open in section 1: the description below, the topics, the homepage, Discussions and
+private vulnerability reporting.
+
+## 0. Make the repository public
+
+The one that blocks everything else, and it blocks more than it looks like:
+
+- the quickstart starts from `git clone`, so a stranger cannot follow a single documented
+  step while the repository is closed — the image being public does not help;
+- **provenance attestation is refused on a user-owned private repository.** The release
+  workflow's `image` job then fails *after* pushing the image, which skips the dependent
+  `release` job — leaving a published image, a tag, and no GitHub release. This happened to
+  both 1.1.1 and 1.2.0, and each had to be finished by hand with
+  `gh release create <tag> --notes-file <(./scripts/changelog-section.sh <tag>) --verify-tag`;
+- **CodeQL's SARIF upload is refused** for the same reason, so the security workflow is red
+  on every push and pull request while telling you nothing.
+
+Verify it rather than trusting the settings page — the same probe answers before and after:
+
+```bash
+GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/Navilois/immich-compressor
+```
+
+A private repository asks for credentials and, with prompts disabled, fails. A public one
+prints refs.
+
 ## 1. Repository metadata
 
 The description and topics are what GitHub search and "related repositories" run on. An
@@ -38,28 +66,33 @@ Then, in the web UI (no CLI equivalent):
 - **Settings → Actions → General** — confirm workflows may write packages, so the release
   workflow can push to ghcr.io.
 
-## 2. First release
+## 2. Cutting a release
 
 ```bash
 # 1. The CHANGELOG's Unreleased section becomes a dated version section.
 # 2. Bump __version__ in src/immich_compressor/__init__.py. That is the only place.
 make check                      # lint, tests, generated docs, compose overlays
-git commit -am "chore: release 1.1.0"
+git commit -am "chore(release): X.Y.Z"
 git push origin main
 
-git tag -a v1.1.0 -m "1.1.0"
-git push origin v1.1.0
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
 ```
+
+Read the CHANGELOG section for the version once more before tagging.
+`scripts/changelog-section.sh` turns it into the body of the GitHub release, so anything
+wrong in it is published as the announcement rather than sitting in a file.
 
 The tag starts `release.yml`, which refuses to publish if the tag disagrees with
 `__version__` or the CHANGELOG has no section for it, then builds `linux/amd64` and
-`linux/arm64`, pushes to ghcr.io as `1.1.0` / `1.1` / `1` / `latest` with provenance and an
+`linux/arm64`, pushes to ghcr.io as `X.Y.Z` / `X.Y` / `X` / `latest` with provenance and an
 SBOM, and creates the GitHub release from the CHANGELOG section.
 
-Afterwards, once: **Packages → immich-compressor → Package settings → Change visibility →
-Public**. A package created by Actions is private by default, and every `docker pull` in the
-README fails until this is done. This is the single most likely reason the first ten people
-cannot install it.
+Afterwards, once — **already done for this package**: **Packages → immich-compressor →
+Package settings → Change visibility → Public**. A package created by Actions is private by
+default, and every `docker pull` in the README fails until this is done. It is a *separate*
+switch from the repository's own visibility, which is why the two were confused for a day:
+the package had been public for a while when the repository still was not.
 
 Verify from a machine that has never seen the repository:
 
@@ -67,8 +100,12 @@ Verify from a machine that has never seen the repository:
 docker pull ghcr.io/navilois/immich-compressor:1
 docker run --rm ghcr.io/navilois/immich-compressor:1 --version
 docker run --rm ghcr.io/navilois/immich-compressor:1 hardware
-gh attestation verify oci://ghcr.io/navilois/immich-compressor:1.1.0 --repo Navilois/immich-compressor
+gh attestation verify oci://ghcr.io/navilois/immich-compressor:X.Y.Z --repo Navilois/immich-compressor
 ```
+
+The last command only has anything to verify from the first release cut **after** the
+repository went public: 1.1.1 and 1.2.0 carry no attestation, because the step that would
+have created it is the step that failed.
 
 ## 3. Announce
 
