@@ -87,11 +87,14 @@ what this release is.
 
 ### Known
 
-- The repository is private, and the documented quickstart begins with `git clone` — so the
-  five-minute path is not open to anybody outside it. The published **image** is a separate
-  matter and is pullable anonymously: an unauthenticated registry token lists
-  `ghcr.io/navilois/immich-compressor` and serves its manifests. Resolved by publication
-  rather than by code.
+- The repository was private when this was tagged, and the documented quickstart begins with
+  `git clone` — so the five-minute path was not open to anybody outside it. The published
+  **image** was a separate matter and was pullable anonymously throughout.
+
+  **Resolved the same day.** The repository was made public on 2026-08-22, and the
+  documented path was then walked from an empty directory on this machine: `git clone` with
+  credentials refused, `docker pull ghcr.io/navilois/immich-compressor:1.2.0`, and
+  `--version` answering `1.2.0`.
 
 ## [1.1.1] - 2026-08-21
 
