@@ -23,7 +23,11 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      # Every tag, not just the one being pushed: `version.py check --strict` asserts that
+      # each released CHANGELOG section has one, and a shallow checkout would see none.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -41,6 +45,11 @@ jobs:
           echo "version=$tag" >> "$GITHUB_OUTPUT"
       - name: The CHANGELOG has a section for it
         run: ./scripts/changelog-section.sh "${{ github.ref_name }}" > /dev/null
+      # The same guard CI runs, plus the tag requirement CI cannot make: by the time a
+      # release is building, every section named in the CHANGELOG must be reachable, or
+      # the compare links in the release notes point at nothing.
+      - name: The version, the CHANGELOG and the upgrading notes agree
+        run: python scripts/version.py check --strict
       - name: Install and test
         run: |
           python -m pip install --upgrade pip
