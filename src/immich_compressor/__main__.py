@@ -739,12 +739,11 @@ def cmd_restore(args: argparse.Namespace) -> int:
     """Rollback helper: pull originals back out of the trash."""
     settings = _load(args)
     _configure_logging("WARNING")
-    if settings.behavior.delete_mode == "permanent":
-        print(
-            "warning: delete_mode is 'permanent' — originals removed by this service were "
-            "not trashed and cannot be restored.",
-            file=sys.stderr,
-        )
+    # Deliberately no warning about `delete_mode: permanent` here. One used to fire on the
+    # mode the deployment is in *now*, before a single id had been tried, and it claimed
+    # that originals "cannot be restored" — which a run that then restored every one of
+    # them printed alongside its own success. `_restore` says the true version afterwards,
+    # naming the ids the server actually refused and why.
     ids: list[str] = list(args.asset_id)
     if args.all_pending:
 
