@@ -23,9 +23,34 @@ jobs:
     name: Open the release pull request
     runs-on: ubuntu-latest
     permissions:
+      administration: read  # read the setting the last step depends on
       contents: write       # push the release branch
       pull-requests: write  # open the pull request
     steps:
+      # This workflow's last step needs a repository setting that is off by default, and
+      # finding that out after the chore has run and a branch has been pushed is the worst
+      # time to find it out. Checked first, before any work.
+      #
+      # A refused read is not treated as a failure: `administration: read` may be narrowed
+      # by an organisation policy, and guessing would turn a working release into a blocked
+      # one. The step that actually needs the setting reports it either way.
+      - name: GitHub Actions is allowed to open pull requests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          allowed=$(gh api "repos/$GITHUB_REPOSITORY/actions/permissions/workflow" \
+            --jq .can_approve_pull_request_reviews 2>/dev/null || echo unknown)
+          case "$allowed" in
+            true)
+              ;;
+            unknown)
+              echo "::notice::could not read the setting; continuing, and the last step will report it"
+              ;;
+            *)
+              echo "::error::Settings > Actions > General > Workflow permissions > 'Allow GitHub Actions to create and approve pull requests' is off. This workflow cannot open the release pull request without it."
+              exit 1
+              ;;
+          esac
       # `next` reads the commits since the newest tag, so it needs them.
       - uses: actions/checkout@v7
         with:
@@ -94,4 +119,7 @@ jobs:
             echo
             ./scripts/changelog-section.sh "$VERSION"
           } > body.md
-          gh pr create --base main --title "chore(release): $VERSION" --body-file body.md
+          if ! gh pr create --base main --title "chore(release): $VERSION" --body-file body.md; then
+            echo "::error::The branch chore/release-$VERSION is pushed and correct; only opening the pull request failed. The usual cause is 'Allow GitHub Actions to create and approve pull requests' being off. Enable it and re-run, or open the pull request by hand: gh pr create --base main --head chore/release-$VERSION --title 'chore(release): $VERSION'"
+            exit 1
+          fi

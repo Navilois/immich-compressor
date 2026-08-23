@@ -169,6 +169,19 @@ Run **Prepare a release** from the Actions tab (`workflow_dispatch`), with `auto
 `minor` or `patch`. It runs the same chore, checks the result, and opens
 `chore(release): X.Y.Z` as a pull request with the release notes in the body.
 
+**It needs one repository setting**, off by default and easy to miss because nothing about
+the failure names it: **Settings ▸ Actions ▸ General ▸ Workflow permissions ▸ "Allow GitHub
+Actions to create and approve pull requests"**. Without it every step succeeds and the last
+one fails with `GitHub Actions is not permitted to create or approve pull requests`, leaving
+a correct `chore/release-X.Y.Z` branch pushed and no pull request. The workflow now checks
+this before doing any work, and if the check itself cannot run, the failing step prints the
+command that opens the pull request by hand from the branch it already pushed. On a fork,
+this is the first thing to turn on.
+
+```bash
+gh api repos/OWNER/REPO/actions/permissions/workflow --jq .can_approve_pull_request_reviews
+```
+
 **Merging that pull request is the release.** `release-tag.yml` then notices a
 `__version__` on `main` that nothing has tagged, tags it, and calls `release.yml`.
 
