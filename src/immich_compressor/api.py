@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -51,6 +51,21 @@ def format_timestamp(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("refusing to serialise a naive datetime")
     return value.astimezone(UTC).strftime(_ISO_MS)[:-3] + "Z"
+
+
+@dataclass(slots=True)
+class AssetPage:
+    """One page of search results, with whatever paging information came with it."""
+
+    page: int
+    items: list[dict[str, Any]] = field(default_factory=list)
+    # `None` means "the server did not say" — not "this was the last page". Which of the
+    # two it is, `paged` decides: with an envelope, a null `nextPage` is the end of the
+    # library; without one there is nothing to read and the caller walks on until a page
+    # comes back empty or repeats.
+    next_page: int | None = None
+    total: int | None = None
+    paged: bool = False
 
 
 class ImmichClient:
@@ -332,37 +347,53 @@ class ImmichClient:
             return
         await self._request("POST", "/trash/restore/assets", json={"ids": asset_ids}, expected=(200, 204))
 
-    async def search_large_assets(
-        self,
-        *,
-        min_file_size: int,
-        asset_type: str,
-        size: int = 100,
-        page: int = 1,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """``POST /search/large-assets`` — used only by the optional backfill CLI.
+    async def search_assets(self, *, asset_type: str, page: int = 1, size: int = 1000) -> AssetPage:
+        """``POST /search/metadata`` — one page of the library. Used by ``backfill scan``.
 
-        ``type`` and ``size`` are sent and **ignored** by the server. Measured on v3.1.0:
-        ``IMAGE`` and ``VIDEO`` answer with the identical set of videos, and ``size: 5``
-        answers with 250 items. They are still sent, because a later Immich may honour
-        them; the caller filters and counts for itself either way. See ``_backfill``.
+        Everything in the request body is a request, not a guarantee. This API has form:
+        ``POST /search/large-assets``, which the backfill used until the inventory replaced
+        it, accepts both ``type`` and ``size`` and applies neither — measured on v3.1.0,
+        finding 15 in ``docs/immich-api-notes.md``. So the scanner filters by type itself,
+        counts for itself, and stops when a page repeats the one before it. A server that
+        honours the parameters makes the scan cheaper; one that ignores them makes it
+        slower and still correct.
+
+        ``nextPage`` is normalised to an ``int`` or ``None`` here, so no caller has to know
+        whether it arrived as a number or as a string.
         """
         response = await self._request(
             "POST",
-            "/search/large-assets",
-            json={
-                "minFileSize": min_file_size,
-                "type": asset_type,
-                "size": size,
-                "page": page,
-                "withExif": True,
-            },
+            "/search/metadata",
+            json={"type": asset_type, "size": size, "page": page, "withExif": True},
             expected=(200,),
         )
         body = response.json()
-        items = body if isinstance(body, list) else body.get("assets", {}).get("items", [])
-        for item in items:
-            yield item
+        if isinstance(body, list):
+            # A bare array is what `large-assets` answers with. No envelope means no
+            # `nextPage`, so the caller's own stop conditions are what end the walk.
+            return AssetPage(page=page, items=body)
+        assets = body.get("assets") if isinstance(body, dict) else None
+        if not isinstance(assets, dict):
+            return AssetPage(page=page)
+        items = assets.get("items")
+        return AssetPage(
+            page=page,
+            items=items if isinstance(items, list) else [],
+            next_page=_as_page_number(assets.get("nextPage")),
+            total=_as_page_number(assets.get("total")),
+            paged=True,
+        )
+
+
+def _as_page_number(value: object) -> int | None:
+    """A page or total from the search envelope, whatever type it arrived as."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
 
 
 def sanitize_rating(rating: int | None) -> int | None:

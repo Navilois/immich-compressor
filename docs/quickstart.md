@@ -132,9 +132,16 @@ The webhook only fires for assets moving through Immich's pipeline. Everything a
 the library is invisible to it. Use `backfill`, which is dry until you say otherwise:
 
 ```bash
-docker compose exec immich-compressor immich-compressor backfill --type VIDEO --limit 50
-docker compose exec immich-compressor immich-compressor backfill --type VIDEO --limit 50 --apply
+docker compose exec immich-compressor immich-compressor backfill scan
+docker compose exec immich-compressor immich-compressor backfill status
+docker compose exec immich-compressor immich-compressor backfill run --limit 50
+docker compose exec immich-compressor immich-compressor backfill run --limit 50 --apply
 ```
+
+`scan` inventories the library and queues nothing; `status` says how much of it is worth
+compressing and how much is left; `run` queues that many jobs, biggest first, and can be
+repeated until `status` reports nothing waiting. Details and every flag:
+[operations.md](operations.md#working-through-the-existing-library).
 
 Re-running Immich's metadata extraction is *not* a way to reach them: that trigger fires for
 every asset in the library, and `behavior.max_asset_age_hours` refuses every one of them on

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from immich_compressor.models import JobState, SkipReason
+from immich_compressor.models import BackfillCandidate, JobState, SkipReason
 from immich_compressor.store import JobStore
 
 PAYLOAD = {"type": "AssetV1", "trigger": "AssetMetadataExtraction", "data": {"asset": {"id": "a"}}}
@@ -235,3 +235,77 @@ async def test_resume_clears_the_latch_and_reports_whether_it_had_to(tmp_path: P
         await store.pause("surge")
         assert await store.resume() is True
         assert await store.pause_state() is None
+
+
+# ------------------------------------------------------------- the backfill inventory
+
+
+def _candidate(asset_id: str, *, size: int = 1000, verdict: str | None = None) -> BackfillCandidate:
+    return BackfillCandidate(
+        asset_id=asset_id,
+        asset_type="VIDEO",
+        size_bytes=size,
+        filename=f"{asset_id}.mp4",
+        verdict=verdict,
+        payload={"data": {"asset": {"id": asset_id}}} if verdict is None else {},
+        scanned_at=datetime.now(UTC),
+    )
+
+
+async def test_a_rescan_does_not_forget_what_was_already_queued(tmp_path: Path) -> None:
+    """The inventory is refreshed by every scan; `queued_at` is the one column it may not
+    overwrite, or a re-scan would offer the same assets again on every run."""
+    async with JobStore(tmp_path / "state.db") as store:
+        await store.record_candidates([_candidate("v1")])
+        await store.mark_candidate_queued("v1")
+
+        await store.record_candidates([_candidate("v1", size=2000)])
+
+        assert await store.pick_candidates(limit=10) == []
+        stats = await store.inventory_stats()
+        assert stats["types"]["VIDEO"]["queued"] == 1
+        assert stats["types"]["VIDEO"]["scanned_bytes"] == 2000
+
+
+async def test_candidates_come_back_biggest_first(tmp_path: Path) -> None:
+    async with JobStore(tmp_path / "state.db") as store:
+        await store.record_candidates(
+            [_candidate("small", size=10), _candidate("big", size=9000), _candidate("mid", size=500)]
+        )
+        by_size = await store.pick_candidates(order="size", limit=10)
+        assert [candidate.asset_id for candidate in by_size] == ["big", "mid", "small"]
+
+
+async def test_a_verdict_takes_a_row_out_of_the_candidate_set_and_frees_its_payload(
+    tmp_path: Path,
+) -> None:
+    async with JobStore(tmp_path / "state.db") as store:
+        await store.record_candidates([_candidate("v1"), _candidate("v2", verdict="too_small")])
+        await store.set_candidate_verdict("v1", "missing")
+
+        assert await store.pick_candidates(limit=10) == []
+        stats = await store.inventory_stats()
+        assert stats["types"]["VIDEO"]["by_verdict"] == {"missing": 1, "too_small": 1}
+        assert stats["candidates"] == 0
+
+
+async def test_clear_inventory_is_per_type(tmp_path: Path) -> None:
+    async with JobStore(tmp_path / "state.db") as store:
+        image = _candidate("i1").model_copy(update={"asset_type": "IMAGE"})
+        await store.record_candidates([_candidate("v1"), image])
+
+        assert await store.clear_inventory(["VIDEO"]) == 1
+
+        assert set((await store.inventory_stats())["types"]) == {"IMAGE"}
+
+
+async def test_service_state_round_trips_json(tmp_path: Path) -> None:
+    """The scan cursor lives here, so an interrupted walk survives the process."""
+    async with JobStore(tmp_path / "state.db") as store:
+        assert await store.get_state("backfill_scan:VIDEO") is None
+        await store.set_state("backfill_scan:VIDEO", {"next_page": 7})
+        assert await store.get_state("backfill_scan:VIDEO") == {"next_page": 7}
+        await store.set_state("backfill_scan:VIDEO", {"next_page": 8})
+        assert await store.get_state("backfill_scan:VIDEO") == {"next_page": 8}
+        await store.clear_state("backfill_scan:VIDEO")
+        assert await store.get_state("backfill_scan:VIDEO") is None

@@ -61,7 +61,49 @@ commit.
 ## Commits
 
 Conventional commits, English, imperative: `feat(hardware): …`, `fix(config): …`,
-`docs: …`, `chore(ci): …`. One branch per topic, merged into `main`.
+`docs: …`, `chore(ci): …`. One branch per topic, merged into `main`. Scopes come from what
+is already in `git log`, not from invention:
+
+```bash
+git log --pretty='%s' -200 | grep -oE '^[a-z]+\(([^)]+)\)' | sort | uniq -c | sort -rn
+```
+
+Atomic commits: implementation and its test together, two unrelated changes in two
+commits. Agent commits carry a `Co-Authored-By:` trailer naming the model that wrote them.
+
+## Shipping
+
+Base branch is `main`; branches are `<type>/<slug>`, lowercase and hyphenated.
+
+```bash
+make check                                        # the gate — never push without it
+git push -u origin <branch>
+gh pr create --base main
+gh pr checks <number> --watch                     # ten checks, all required in practice
+gh pr merge <number> --merge --delete-branch      # merge commit, never squash or rebase
+git switch main && git pull --ff-only origin main
+```
+
+CI runs the same things `make check` does, plus the image build, CodeQL and the unit suite
+on Python 3.12, 3.13 and 3.14 — a suite that only passes on the local 3.12 is not green.
+Never `--no-verify`, never force-push, and never weaken a check to get past it: a check
+that is wrong is its own change.
+
+The PR body carries what changed, why, and the test evidence — which suite ran, where, and
+with what result. Anything that could not be measured against a live Immich is named as
+unverified there too, not quietly asserted.
+
+**Unreleased work is documented as unreleased.** User-visible changes go under
+`## [Unreleased]` in `CHANGELOG.md`, and anything an operator has to know about goes under
+`## Unreleased` in `docs/upgrading.md`. A release chore renames **both** headings — the
+upgrading one was missed once and spent two releases describing shipped behaviour as
+upcoming.
+
+## Releases
+
+Bump `__version__`, rename the two `Unreleased` headings, merge, then tag `vX.Y.Z`. The
+tag is what publishes the image: `release.yml` triggers on `v*`, verifies that the tag
+matches `__version__`, and pushes to ghcr.io. Merging to `main` deploys nothing.
 
 ## Layout
 
@@ -74,6 +116,7 @@ Conventional commits, English, imperative: `feat(hardware): …`, `fix(config): 
 | `src/immich_compressor/store.py` | SQLite job store (WAL) |
 | `src/immich_compressor/encoder.py` | preset execution, exiftool, sanity gate |
 | `src/immich_compressor/pipeline.py` | the ten steps, worker loop, trash sweeper |
+| `src/immich_compressor/backfill.py` | library scan, candidate inventory, queue run |
 | `src/immich_compressor/server.py` | FastAPI endpoints |
 | `src/immich_compressor/setup_cmd.py` | the guided `setup` command |
 | `docs/` | everything the README links to; `configuration.md` is generated |

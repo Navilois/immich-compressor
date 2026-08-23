@@ -72,7 +72,7 @@ and an `exifInfo` object.
 | Delete | `DELETE /assets` `{ids, force}` | `force: false` → trash |
 | Restore | `POST /trash/restore/assets` `{ids}` | |
 | Detail | `GET /assets/{id}` | For the people check, the checksum and the live field values |
-| Backfill | `POST /search/large-assets` `{minFileSize, type, size, page, withExif}` | Optional, CLI only. **`type` and `size` are ignored** — see [15](#15-post-searchlarge-assets-ignores-type-and-size) |
+| Backfill | `POST /search/metadata` `{type, size, page, withExif}` | Optional, CLI only. A paged walk of the library, and the client trusts none of the three parameters — see [15](#15-post-searchlarge-assets-ignores-type-and-size) |
 
 ## API key permissions
 
@@ -249,3 +249,14 @@ from [stage 3](safety.md#stage-3--move-originals-to-the-trash).
 
 `backfill` therefore filters on `item["type"]` itself and says how many foreign-type
 results it discarded, rather than reporting an empty run that looks like an empty library.
+
+**What replaced it.** The client-side filter fixes the correctness problem and not the
+reachability one: the endpoint answers with one fixed set of results — 250 items on the
+library above, every one of them a video — so the stills half of a library cannot be
+reached through it at all, whatever the caller filters afterwards. The backfill walks
+`POST /search/metadata` instead and keeps its own inventory of what it found.
+
+Whether v3.1.0 applies `type`, `size` and `page` to `/search/metadata` has **not** been
+measured here. The scanner is written so that the answer changes the number of requests and
+not the result: it filters by type itself, counts for itself, and stops when a page comes
+back with the same assets as the one before it.

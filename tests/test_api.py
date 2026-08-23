@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -232,3 +233,49 @@ async def test_named_people_detection(client: ImmichClient) -> None:
     )
     asset = await client.get_asset("a1")
     assert asset.named_people() == ["Anna"]
+
+
+@respx.mock
+async def test_search_assets_reads_the_paginated_envelope(client: ImmichClient) -> None:
+    """v3 answers `{assets: {items, total, nextPage}}`, and `nextPage` arrives as a string."""
+    route = respx.post(f"{BASE}/search/metadata").mock(
+        return_value=httpx.Response(
+            200,
+            json={"assets": {"items": [{"id": "a1"}], "total": 51, "count": 1, "nextPage": "2"}},
+        )
+    )
+
+    page = await client.search_assets(asset_type="VIDEO", page=1, size=50)
+
+    assert (page.items, page.next_page, page.total, page.paged) == ([{"id": "a1"}], 2, 51, True)
+    assert json.loads(route.calls[0].request.read()) == {
+        "type": "VIDEO",
+        "size": 50,
+        "page": 1,
+        # Without it the guards see no `fileSizeInByte` and every asset looks small enough
+        # to be worth compressing.
+        "withExif": True,
+    }
+
+
+@respx.mock
+async def test_search_assets_survives_a_bare_array(client: ImmichClient) -> None:
+    """What `/search/large-assets` answers with. No envelope means no paging information,
+    and the caller — not this method — decides when the walk is over."""
+    respx.post(f"{BASE}/search/metadata").mock(return_value=httpx.Response(200, json=[{"id": "a1"}]))
+
+    page = await client.search_assets(asset_type="VIDEO")
+
+    assert page.items == [{"id": "a1"}]
+    assert page.next_page is None
+    assert page.paged is False
+
+
+@respx.mock
+async def test_search_assets_treats_an_unknown_shape_as_an_empty_page(client: ImmichClient) -> None:
+    respx.post(f"{BASE}/search/metadata").mock(return_value=httpx.Response(200, json={"albums": {}}))
+
+    page = await client.search_assets(asset_type="VIDEO")
+
+    assert page.items == []
+    assert page.paged is False
