@@ -52,15 +52,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fileCreatedAt` descending. The scanner's client-side type filter and repeated-page check
   stay exactly where they are; what changes is that the cost of a walk is now known — 55
   requests and 16.5 s for a 53 775-asset library.
-- **`restore --all-pending` stops working once `delete_mode: permanent` has run**, and
-  [docs/safety.md](docs/safety.md#rolling-back) now says so. It sends every completed job's
-  source id in one `POST /trash/restore/assets`, force-deleted originals are no longer in the
-  database, and one unknown id fails the whole batch with HTTP 400 — measured on a deployment
-  where 46 of 50 ids were already gone, and the one original that was genuinely in the trash
-  did not come back. `restore <assetId>` is unaffected and is the documented way out.
 
 ### Fixed
 
+- **`restore --all-pending` survives originals that no longer exist.** On any deployment
+  that had ever run `delete_mode: permanent` it restored **nothing**: it sent the source id
+  of every completed job in a single `POST /trash/restore/assets`, originals removed with
+  `force: true` are gone from Immich's database, and one id the server cannot find refuses
+  the whole request with `HTTP 400 Not found or no asset.delete access` — including the
+  originals that really were sitting in the trash. Measured on a live v3.1.0 instance on
+  2026-08-23: of the 50 ids it sent, 46 had been force-deleted by earlier stage-4 runs, and
+  the one recoverable original stayed trashed while the command exited 1.
+  - The selection now goes out in batches, and a refused batch is halved and re-sent until
+    each unknown id stands alone, so **a dead id costs only itself**. Once a batch turns out
+    to be mostly missing — what a stage-4 deployment looks like — the rest is sent one id at
+    a time rather than halved, which is the cheaper way to isolate them.
+  - It reports **the server's own `count`** instead of the number of ids it sent, and names
+    how many ids Immich no longer knows.
+  - The explanation of why ids go missing no longer depends on `delete_mode` being
+    `permanent` *right now*. On the measured deployment the mode was already back to `trash`,
+    so that message never printed and the operator got a bare HTTP 400 with no reason for it.
+  - **Exit codes**: `0` every id came back, `3` some ids are no longer in Immich's database,
+    `2` nothing was selected, `1` the call to Immich failed. `3` is new — a rollback that
+    could not roll everything back must not look like a clean success in a script.
 - **The backfill asked the server for the wrong size threshold.** It sent
   `behavior.min_savings_bytes` as `minFileSize` while the guard that decides the same
   question uses `preset.effective_min_savings_bytes()`, so a preset with its own override —

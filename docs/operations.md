@@ -95,7 +95,7 @@ docker compose exec immich-compressor immich-compressor <command>
 | `requeue --reason <r> [--apply]` | re-queue everything skipped for one reason. Dry until `--apply` |
 | `backfill [scan\|run\|status]` | work through the library that was there before this service. `run` is the default and is dry until `--apply` |
 | `resume [--apply]` | show why the surge breaker paused the service, and clear it. Reports until `--apply` |
-| `restore <assetId>… \| --all-pending` | pull originals back out of the trash |
+| `restore <assetId>… \| --all-pending` | pull originals back out of the trash. Restores what Immich still has and counts the ids it no longer knows; exits 3 when some could not come back |
 | `--version` | |
 
 ## Job states

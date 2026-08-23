@@ -13,24 +13,25 @@ Job state lives in a volume and survives. Schema changes are applied automatical
 
 ## Unreleased
 
-### If this deployment has ever run `delete_mode: permanent`, use `restore <assetId>`
+### `restore --all-pending` works on a deployment that has run `delete_mode: permanent`
 
-Nothing to change, but worth knowing before you need it. `immich-compressor restore
---all-pending` sends the source id of every completed job in a single
-`POST /trash/restore/assets`. Originals that stage 4 removed with `force: true` are gone from
-Immich's database, so that request carries ids the server cannot find — and it fails the
-**whole batch** with `HTTP 400 Not found or no asset.delete access`, including the originals
-that really are sitting in the trash and could have come back.
+Nothing to edit, and worth knowing before you need it. Until this release the command sent
+the source id of every completed job in a single `POST /trash/restore/assets`, and one id
+Immich no longer had refused the **whole** request — so on any deployment that had ever run
+stage 4 the rollback restored nothing at all, including the originals that really were
+sitting in the trash. Measured on 2026-08-23 against a live v3.1.0 instance: 46 of the 50
+ids had been force-deleted by an earlier stage-4 run, and the one recoverable original
+stayed trashed.
 
-Measured on 2026-08-23 against a live v3.1.0 instance: 46 of the 50 ids had been
-force-deleted by an earlier stage-4 run, and the one recoverable original stayed trashed.
+It now batches the selection and halves a refused batch until each unknown id stands alone,
+so a dead id costs only itself. What comes back is restored and counted by the server; what
+Immich no longer has is reported as a count on stderr, with the reason.
 
-Restore those one at a time instead — the per-asset form is unaffected:
-
-```bash
-immich-compressor jobs                       # the source ids this service trashed
-immich-compressor restore <assetId>
-```
+**The exit code changed.** A run that could not restore everything now exits **3** rather
+than **1**, and prints what it did restore. If a script of yours branches on `restore`
+failing, this is the line to look at: `0` every id came back, `3` some ids are no longer in
+Immich's database, `2` nothing was selected, `1` the call to Immich failed. The per-asset
+form `restore <assetId>` goes through the same path and gains the same codes.
 
 ### `backfill` has two phases now
 
