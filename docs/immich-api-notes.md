@@ -2,7 +2,7 @@
 
 **Everything on this page was checked against a running Immich v3.1.0 instance, not against
 documentation.** The captured webhook payloads are committed as test fixtures in
-`tests/fixtures/`. Last verified: **2026-08-19**, against **Immich v3.1.0**.
+`tests/fixtures/`. Last verified: **2026-08-23**, against **Immich v3.1.0**.
 
 If you are writing another Immich integration, this is the page worth reading. Several of
 these cost a full debugging round to find.
@@ -54,7 +54,8 @@ and an `exifInfo` object.
 | Duplicate upload returns `{"status":"duplicate","id":<existing>}` | ✅ |
 | `DELETE /assets` without `force` is a soft delete | ✅ (`isTrashed: true`, restorable) |
 | `DELETE /assets` with `force: true` is a *permanent* delete | ✅ — the spec only says "force delete even if in use", so this was measured: the asset answers HTTP 400 `Not found` afterwards, does not appear in the trash view, and its files are unlinked from the upload directory. It behaves the same on an asset already in the trash, which is why `POST /trash/empty` is never needed |
-| `POST /trash/restore/assets` on a force-deleted asset | HTTP 400 `Not found or no asset.delete access` — not a quiet no-op |
+| `POST /trash/restore/assets` on a force-deleted asset | HTTP 400 `Not found or no asset.delete access` — not a quiet no-op. **Re-confirmed 2026-08-23, and the whole batch fails with it:** a single unknown id in `{ids}` costs every other id in the same request, which is what `restore --all-pending` sends — see [safety.md](safety.md#rolling-back) |
+| `POST /trash/restore/assets` on an asset that is **not** trashed | HTTP 200 `{"count":1}` — a harmless no-op, and the asset stays `active`. Measured 2026-08-23 on an isolated pair: only ids the server cannot find *at all* are fatal, so `{active, gone}` answers 400 while `{active}` alone answers 200. The body carries the server's own `count`, so a caller never has to report the number it sent |
 | Negative-lookahead regex in `assetFileFilter` | ✅ works |
 | A compressed upload re-triggers the workflow | ✅ — loop protection is genuinely required |
 
@@ -72,7 +73,7 @@ and an `exifInfo` object.
 | Delete | `DELETE /assets` `{ids, force}` | `force: false` → trash |
 | Restore | `POST /trash/restore/assets` `{ids}` | |
 | Detail | `GET /assets/{id}` | For the people check, the checksum and the live field values |
-| Backfill | `POST /search/metadata` `{type, size, page, withExif}` | Optional, CLI only. A paged walk of the library, and the client trusts none of the three parameters — see [15](#15-post-searchlarge-assets-ignores-type-and-size) |
+| Backfill | `POST /search/metadata` `{type, size, page, withExif}` | Optional, CLI only. A paged walk of the library. All three parameters *are* applied, `size` caps at 1000, and `nextPage` arrives as a string — see [16](#16-post-searchmetadata-applies-type-size-and-page). The client re-checks type and repeated pages anyway, because [15](#15-post-searchlarge-assets-ignores-type-and-size) does not |
 
 ## API key permissions
 
@@ -256,7 +257,58 @@ library above, every one of them a video — so the stills half of a library can
 reached through it at all, whatever the caller filters afterwards. The backfill walks
 `POST /search/metadata` instead and keeps its own inventory of what it found.
 
-Whether v3.1.0 applies `type`, `size` and `page` to `/search/metadata` has **not** been
-measured here. The scanner is written so that the answer changes the number of requests and
-not the result: it filters by type itself, counts for itself, and stops when a page comes
-back with the same assets as the one before it.
+`/search/metadata` was the open question when this was written; it is
+[16](#16-post-searchmetadata-applies-type-size-and-page) now. It
+applies all three. The scanner keeps filtering by type and watching for a repeated page
+anyway — the defence costs one comparison per item, and the two endpoints in this family
+disagree with each other on exactly this point.
+
+### 16. `POST /search/metadata` applies `type`, `size` and `page`
+
+Measured on v3.1.0 on 2026-08-23, against a live library of 49 046 photos and 4 729 videos.
+This is the endpoint `backfill scan` walks, and it behaves the way
+[15](#15-post-searchlarge-assets-ignores-type-and-size) led nobody to expect.
+
+| Request | Answer |
+|---|---|
+| `{type: "IMAGE", size: 5, page: 1}` | 5 items, **all `IMAGE`** |
+| `{type: "VIDEO", size: 5, page: 1}` | 5 items, **all `VIDEO`** — zero id overlap with the `IMAGE` set |
+| `size: 1 / 5 / 17 / 100 / 250 / 1000` | exactly 1 / 5 / 17 / 100 / 250 / 1000 items |
+| `size: 1001` | **HTTP 400** `Validation failed`, `{"code": "too_big", "maximum": 1000, "inclusive": true}` |
+| `page: 1 / 2 / 3` | three different sets, zero id overlap between consecutive pages |
+| `nextPage` | a JSON **string** (`"2"`), and **`null`** on the last page |
+| `total` | the items on **this page**, not the library total |
+| Ordering | `fileCreatedAt` **descending** |
+
+Three things are worth spelling out.
+
+**`size` has a hard ceiling of 1000, and exceeding it is a 400, not a clamp.** So
+`DEFAULT_PAGE_SIZE = 1000` in `backfill.py` sits exactly on the maximum, and a walk of this
+library costs 50 requests for the stills and 5 for the videos — 9.42 s and 0.60 s of request
+time respectively, 16.5 s wall for a full `backfill scan` including the guard evaluation.
+
+**`total` does not mean what the name suggests.** It was 1000 on every full page and then
+729 on the last video page and 46 on the last image page — the size of the page, not the
+size of the library. Anything reading it as a library count is wrong; `AssetPage.total` is
+parsed but deliberately never used.
+
+**`nextPage` is a string.** `"2"`, not `2`, which is why `_as_page_number` normalises it.
+It goes to JSON `null` on the last page, so `paged` plus a null `nextPage` is a real
+end-of-library signal here — unlike `/search/large-assets`, which answers with a bare array
+and no envelope at all.
+
+The ordering is by `fileCreatedAt` descending: 3 000 items across three pages produced zero
+out-of-order transitions, and it is *not* size-ordered. `backfill run --order size` therefore
+sorts the inventory itself; there is no server-side order that would save it the work.
+
+**What did not change.** `/search/large-assets` was re-checked on the same instance the same
+day and [15](#15-post-searchlarge-assets-ignores-type-and-size) still holds exactly:
+`{minFileSize: 1048576, type: "VIDEO", size: 5}` and the same request with `type: "IMAGE"`
+both answer with the identical 250 videos. Two endpoints in one family, opposite behaviour
+on the same field name — which is the reason the client-side type filter and the
+repeated-page check stay where they are.
+
+**Fields this endpoint accepts and ignores.** `isTrashed` and `withDeleted` are both taken
+without complaint and neither selects trashed assets; a request carrying them returns the
+same live assets as one without. **`trashedAfter`** is the field that works — that is how
+the trash view was confirmed to hold a specific asset id.

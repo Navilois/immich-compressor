@@ -41,6 +41,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from queueing videos. The new scanner walks page by page and trusts none of the parameters
   it sends: it filters by type itself and stops when a page repeats the one before it.
 
+### Documentation
+
+- **`POST /search/metadata` is measured, not assumed.** Finding 16 in
+  [docs/immich-api-notes.md](docs/immich-api-notes.md) closes the gap finding 15 left open:
+  on v3.1.0 this endpoint *does* apply `type`, `size` and `page` — unlike
+  `/search/large-assets`, which was re-checked the same day and still ignores both `type` and
+  `size`. `size` caps at 1000 and answers HTTP 400 above it, `nextPage` is a string that goes
+  null on the last page, `total` counts the page rather than the library, and the order is
+  `fileCreatedAt` descending. The scanner's client-side type filter and repeated-page check
+  stay exactly where they are; what changes is that the cost of a walk is now known — 55
+  requests and 16.5 s for a 53 775-asset library.
+- **`restore --all-pending` stops working once `delete_mode: permanent` has run**, and
+  [docs/safety.md](docs/safety.md#rolling-back) now says so. It sends every completed job's
+  source id in one `POST /trash/restore/assets`, force-deleted originals are no longer in the
+  database, and one unknown id fails the whole batch with HTTP 400 — measured on a deployment
+  where 46 of 50 ids were already gone, and the one original that was genuinely in the trash
+  did not come back. `restore <assetId>` is unaffected and is the documented way out.
+
 ### Fixed
 
 - **The backfill asked the server for the wrong size threshold.** It sent

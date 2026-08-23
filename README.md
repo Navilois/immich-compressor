@@ -65,7 +65,9 @@ of artefacts. And every EXIF/GPS/XMP/IPTC tag is compared before and after: a ta
 not survive fails the job, with the original untouched.
 
 **You can undo it.** With the default `delete_mode: trash`, `immich-compressor restore
---all-pending` brings every original back. There is no telemetry, no phone-home, and no
+--all-pending` brings every original back — and `restore <assetId>` does it one at a time,
+which is the form to use if this deployment has ever run `delete_mode: permanent`
+(see [safety.md](docs/safety.md#rolling-back)). There is no telemetry, no phone-home, and no
 network traffic to anything but your own Immich server.
 
 **One thing to know before you go live:** Immich's `AssetMetadataExtraction` trigger fires

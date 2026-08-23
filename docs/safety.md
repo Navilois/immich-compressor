@@ -205,7 +205,9 @@ Grant `asset.delete` on the API key, then:
 
 Originals move to Immich's trash a week after they are replaced, and stay recoverable until
 the trash is emptied. `immich-compressor restore --all-pending` brings back everything this
-service trashed.
+service trashed — with one measured caveat if this deployment has ever run
+[stage 4](#stage-4--reclaim-the-space-irreversible), which the rollback section below spells
+out.
 
 **Disk space does not go down in this stage.** Until the trash is emptied you are using
 *more* space, not less. That is the price of the undo.
@@ -246,6 +248,27 @@ docker compose run --rm immich-compressor restore <assetId> <assetId>
 
 Equivalent to `POST /trash/restore/assets`, or Utilities → Trash → Restore in the UI.
 Verified: the asset comes back with `isTrashed: false`.
+
+> **`--all-pending` stops working once `delete_mode: permanent` has run.** Measured on
+> 2026-08-23 against a live v3.1.0 instance. `--all-pending` sends the source id of *every*
+> completed job in one `POST /trash/restore/assets` call, and originals removed with
+> `force: true` are gone from the database — so the request carries ids the server cannot
+> find, and it answers `HTTP 400 Not found or no asset.delete access` for the **whole
+> batch**. On the measured deployment 46 of the 50 ids had been force-deleted by an earlier
+> stage-4 run, and the one original that really was in the trash did not come back. The
+> command exits 1 and says the server refused; it does not say that dead ids are the reason,
+> because the message that explains force-deleted originals only prints while `delete_mode`
+> is *currently* `permanent`.
+>
+> **The per-asset form is unaffected** and is what to reach for on such a deployment:
+>
+> ```bash
+> docker compose run --rm immich-compressor restore <assetId>
+> ```
+>
+> Verified in the same run: `restored 1 asset(s) from the trash`, and the asset came back
+> with `isTrashed: false` and `deletedAt` null. Asset ids for the originals this service
+> trashed are in `immich-compressor jobs`.
 
 **3. Remove the replacements** (optional). They are identifiable three ways: the filename
 ends in `.cmp.<ext>`, the `compressor` metadata key is set, and its value carries

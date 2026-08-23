@@ -13,6 +13,25 @@ Job state lives in a volume and survives. Schema changes are applied automatical
 
 ## Unreleased
 
+### If this deployment has ever run `delete_mode: permanent`, use `restore <assetId>`
+
+Nothing to change, but worth knowing before you need it. `immich-compressor restore
+--all-pending` sends the source id of every completed job in a single
+`POST /trash/restore/assets`. Originals that stage 4 removed with `force: true` are gone from
+Immich's database, so that request carries ids the server cannot find — and it fails the
+**whole batch** with `HTTP 400 Not found or no asset.delete access`, including the originals
+that really are sitting in the trash and could have come back.
+
+Measured on 2026-08-23 against a live v3.1.0 instance: 46 of the 50 ids had been
+force-deleted by an earlier stage-4 run, and the one recoverable original stayed trashed.
+
+Restore those one at a time instead — the per-asset form is unaffected:
+
+```bash
+immich-compressor jobs                       # the source ids this service trashed
+immich-compressor restore <assetId>
+```
+
 ### `backfill` has two phases now
 
 Nothing to edit, and the command you know still works: `backfill --type VIDEO --limit 50
