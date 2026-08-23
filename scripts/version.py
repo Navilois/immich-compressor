@@ -383,6 +383,31 @@ def release_upgrading(upgrading: str, *, version: str, previous: str) -> str:
     return UPGRADING_UNRELEASED_RE.sub(f"## {previous} \u2192 {version}", upgrading, count=1)
 
 
+def regenerate_docs() -> None:
+    """Rebuild the generated documentation, which carries `__version__` in its header.
+
+    Without this the release commit fails the very CI it has to pass: `gen_docs.py --check`
+    compares `docs/configuration.md` against the settings model, and the header line reads
+    "Generated from the settings model of immich-compressor X.Y.Z".
+
+    Shelled out rather than imported. `version.py` imports nothing from the package on
+    purpose — that is what lets the `version` job in CI run with no install at all — and
+    `gen_docs` needs pydantic.
+    """
+    generated = subprocess.run(  # noqa: S603
+        [sys.executable, str(REPO / "scripts" / "gen_docs.py")],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if generated.returncode != 0:
+        detail = generated.stderr.strip() or generated.stdout.strip()
+        raise VersionError(
+            f"the version was written, but the generated documentation could not be rebuilt:\n  {detail}"
+        )
+
+
 def unified(before: str, after: str, name: str) -> str:
     return "".join(
         difflib.unified_diff(
@@ -503,16 +528,22 @@ def run_set(args: argparse.Namespace) -> int:
             if before != after:
                 print(unified(before, after, name), end="")
         sys.stdout.flush()
-        print(f"would release {version} ({today.isoformat()}), from {current}", file=sys.stderr)
+        print(
+            f"would release {version} ({today.isoformat()}), from {current}, "
+            f"and rebuild the generated documentation",
+            file=sys.stderr,
+        )
         return 0
 
     for name, (before, after) in written.items():
         if before != after:
             (REPO / name).write_text(after, encoding="utf-8")
+    regenerate_docs()
     unchanged = [name for name, (before, after) in written.items() if before == after]
     print(f"released {version} ({today.isoformat()}), from {current}")
     for name in unchanged:
         print(f"  {name} needed no change")
+    print("  generated documentation rebuilt")
     return 0
 
 
