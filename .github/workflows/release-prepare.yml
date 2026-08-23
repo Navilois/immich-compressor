@@ -30,14 +30,16 @@ jobs:
       # finding that out after the chore has run and a branch has been pushed is the worst
       # time to find it out. Checked first, before any work.
       #
-      # A refused read is not treated as a failure, and with the default token it is the
-      # expected outcome: the endpoint needs repository admin rights, and there is no
-      # `permissions:` scope that grants them to `GITHUB_TOKEN` — `administration: read` is
-      # not one, it is not a valid scope at all, and naming it made this whole file fail to
-      # parse, so `workflow_dispatch` answered HTTP 422 and the release could not be
-      # prepared by any means. Guessing from a refused read would turn a working release
-      # into a blocked one, so this step only fails on a definite `false`, which is what a
-      # PAT with admin rights in `GH_TOKEN` would return. The step that actually needs the
+      # The read needs no permissions of its own: `GITHUB_TOKEN` reaches this endpoint with
+      # the two scopes above and nothing else. Verified on run 32662877060, which read the
+      # setting, found it off, and stopped in nine seconds with the path to it. An earlier
+      # attempt to ask for `administration: read` here was worse than unnecessary — it is
+      # not a valid scope, so the whole file stopped parsing and `workflow_dispatch`
+      # answered HTTP 422. `scripts/check-workflows.py` now catches that.
+      #
+      # A refused read is still not treated as a failure: an organisation policy can narrow
+      # what the token sees, and guessing from a refusal would turn a working release into a
+      # blocked one. Only a definite `false` fails here. The step that actually needs the
       # setting reports it either way.
       - name: GitHub Actions is allowed to open pull requests
         env:
