@@ -1,0 +1,34 @@
+# Scopes this repository uses, one per line. CLAUDE.md: "Scopes come from what is already
+# in `git log`, not from invention" — this file is that list, and `scripts/check-commits.py`
+# enforces it.
+#
+# Adding a scope is a deliberate edit, in the same commit as the first change that needs
+# it. That is the whole point: a typo becomes a failing check rather than a new scope
+# nobody meant to create.
+#
+# Seeded from `git log` at 1.2.0, with one correction: `tests` is the spelling, and the
+# single historical `fix(test)` is not carried forward.
+
+backfill
+changelog
+ci
+cli
+compose
+compressor
+config
+deployment
+deps
+docker
+encoder
+hardware
+metrics
+observability
+pipeline
+port
+quickstart
+readme
+release
+safety
+setup
+startup
+tests

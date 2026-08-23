@@ -119,6 +119,24 @@ fix(config): reject a preset whose suffix has no dot
 docs: explain why the VAAPI preset drops subtitle tracks
 ```
 
+The type, the scope, the length and the imperative mood are checked, by `make commits` and
+by CI on every pull request. Scopes are not free text: `scripts/commit-scopes.txt` lists the
+ones this repository uses, and a new one is a deliberate line added to that file in the same
+commit as the change that needs it. `fix(test)` and `fix(tests)` are both in the history and
+were always the same scope — that is what the list prevents.
+
+Install the hook once and the check runs before the commit exists:
+
+```bash
+make hooks
+```
+
+That matters more than it sounds: a subject that only fails in CI can be fixed only by
+rewriting a branch that has already been pushed, and this project does not force-push.
+
+Commits by Dependabot are held to the grammar but not the prose rules — `chore(deps): Bump …`
+is what it writes, and rewriting that every week would cost a merge conflict per update.
+
 One branch per topic. Say in the pull request what you changed, why, and how you checked it.
 `make check` should be green before you open it.
 
