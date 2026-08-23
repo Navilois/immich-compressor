@@ -101,9 +101,16 @@ upcoming.
 
 ## Releases
 
-Bump `__version__`, rename the two `Unreleased` headings, merge, then tag `vX.Y.Z`. The
-tag is what publishes the image: `release.yml` triggers on `v*`, verifies that the tag
-matches `__version__`, and pushes to ghcr.io. Merging to `main` deploys nothing.
+`python scripts/version.py set auto` does the chore: it bumps `__version__`, dates the
+CHANGELOG section and opens an empty one, moves both compare links, renames the upgrading
+heading, and checks its own output. `auto` is what the conventional commits since the
+newest tag ask for; `next` prints that on its own, and `major`/`minor`/`patch`/`X.Y.Z`
+override it. It refuses when the `Unreleased` section is empty.
+
+Merge, then tag `vX.Y.Z`. The tag is what publishes the image: `release.yml` triggers on
+`v*`, verifies that the tag matches `__version__`, that every released section has a tag
+and that this tag is the newest one, then pushes to ghcr.io. Merging to `main` deploys
+nothing.
 
 ## Layout
 

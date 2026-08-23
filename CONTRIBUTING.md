@@ -124,13 +124,32 @@ One branch per topic. Say in the pull request what you changed, why, and how you
 
 ## Releasing (maintainers)
 
-1. Update `CHANGELOG.md` — move `Unreleased` into a dated version section.
-2. Bump `__version__` in `src/immich_compressor/__init__.py`. That is the only place.
+1. Write the `Unreleased` section of `CHANGELOG.md`, and the `Unreleased` section of
+   `docs/upgrading.md` if an operator has to do anything.
+2. Run the chore:
+
+```bash
+python scripts/version.py set auto --check    # what it would write
+python scripts/version.py set auto            # write it
+```
+
+`auto` is the version the conventional commits since the newest tag ask for — `feat` a
+minor, `fix` and `perf` a patch, a `!` or a `BREAKING CHANGE:` footer a major. `next` prints
+it on its own. Pass `major`, `minor`, `patch` or an explicit `X.Y.Z` to decide yourself.
+
+The chore bumps `__version__`, dates the CHANGELOG section and opens an empty one, moves
+both compare links, renames the upgrading heading to `<previous> → <new>`, and then checks
+its own output with `version.py check`. It refuses to run when the `Unreleased` section is
+empty, when the version does not come after the current one, or when that section already
+exists.
+
 3. Commit, tag `vX.Y.Z`, push the tag.
 
-The release workflow refuses to publish if the tag disagrees with `__version__` or the
-CHANGELOG has no section for it, then builds the multi-arch image, pushes it to ghcr.io with
-provenance and an SBOM, and creates the GitHub release from the CHANGELOG section.
+The release workflow refuses to publish if the tag disagrees with `__version__`, if the
+CHANGELOG has no section for it, if any released section has no tag, or if the tag is not
+the newest version — publishing an older one would move `latest` and the major tag
+backwards. It then builds the multi-arch image, pushes it to ghcr.io with provenance and an
+SBOM, and creates the GitHub release from the CHANGELOG section.
 
 [docs/maintainers/launch-checklist.md](docs/maintainers/launch-checklist.md) covers the
 parts no workflow can do: repository metadata, making the published package public, the
