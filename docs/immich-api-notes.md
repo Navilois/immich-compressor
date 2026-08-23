@@ -54,7 +54,7 @@ and an `exifInfo` object.
 | Duplicate upload returns `{"status":"duplicate","id":<existing>}` | ✅ |
 | `DELETE /assets` without `force` is a soft delete | ✅ (`isTrashed: true`, restorable) |
 | `DELETE /assets` with `force: true` is a *permanent* delete | ✅ — the spec only says "force delete even if in use", so this was measured: the asset answers HTTP 400 `Not found` afterwards, does not appear in the trash view, and its files are unlinked from the upload directory. It behaves the same on an asset already in the trash, which is why `POST /trash/empty` is never needed |
-| `POST /trash/restore/assets` on a force-deleted asset | HTTP 400 `Not found or no asset.delete access` — not a quiet no-op |
+| `POST /trash/restore/assets` on a force-deleted asset | HTTP 400 `Not found or no asset.delete access` — not a quiet no-op. **Re-confirmed 2026-08-23, and the whole batch fails with it:** a single unknown id in `{ids}` costs every other id in the same request, which is what `restore --all-pending` sends — see [safety.md](safety.md#rolling-back) |
 | Negative-lookahead regex in `assetFileFilter` | ✅ works |
 | A compressed upload re-triggers the workflow | ✅ — loop protection is genuinely required |
 
