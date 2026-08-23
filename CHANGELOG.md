@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **The `force: true` delete was re-verified against a live library**, on a real stage-4 run
+  rather than a throwaway asset. All three recorded consequences hold — HTTP 400 afterwards,
+  absent from the trash view, file unlinked from the upload directory — and two details are
+  now sharper in [docs/immich-api-notes.md](docs/immich-api-notes.md): the row leaves the
+  `asset` table entirely rather than being flagged, with no orphan left in `asset_exif`,
+  `asset_file` or `album_asset`; and the message is `Not found or no asset.read access`, the
+  same permission-shaped wording `/trash/restore/assets` answers with, not the bare
+  `Not found` recorded before.
+
 ## [1.3.0] - 2026-08-23
 
 ### Added
