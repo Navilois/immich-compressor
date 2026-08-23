@@ -278,10 +278,60 @@ def test_two_upgrading_unreleased_headings() -> None:
 # --- tags ---------------------------------------------------------------------------
 
 
-def test_missing_tags_reports_what_was_never_pushed() -> None:
-    """v1.0.0 and v1.1.0 date from when this repository was private."""
-    assert version_script.missing_tags(["1.2.0", "1.1.1", "1.1.0", "1.0.0"]) == ["v1.1.0", "v1.0.0"]
+ALL_TAGS = ["v1.0.0", "v1.1.0", "v1.1.1", "v1.2.0"]
+
+
+def test_missing_tags_names_what_was_never_pushed() -> None:
+    assert version_script.missing_tags(["1.2.0", "1.1.1", "1.1.0"], ["v1.2.0", "v1.1.1"]) == ["v1.1.0"]
 
 
 def test_missing_tags_is_quiet_when_they_all_exist() -> None:
-    assert version_script.missing_tags(["1.2.0", "1.1.1"]) == []
+    assert version_script.missing_tags(["1.2.0", "1.1.1"], ALL_TAGS) == []
+
+
+def test_this_repository_has_every_tag_its_changelog_names() -> None:
+    """v1.0.0 and v1.1.0 date from when this repository was private and were backfilled."""
+    changelog = (REPO / version_script.CHANGELOG).read_text(encoding="utf-8")
+    released = [s.version or "" for s in version_script.sections_of(changelog) if s.version]
+    assert version_script.missing_tags(released) == []
+
+
+# --- publishing an old tag ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected"),
+    [
+        pytest.param(ALL_TAGS, "v1.2.0", id="highest-wins"),
+        pytest.param(["v1.9.0", "v1.10.0"], "v1.10.0", id="not-lexicographic"),
+        pytest.param([*ALL_TAGS, "nightly", "v1"], "v1.2.0", id="ignores-non-versions"),
+        pytest.param(["v1.3.0-rc1", "v1.3.0"], "v1.3.0", id="release-beats-its-pre-release"),
+        pytest.param(["v1.2.0", "v1.3.0-rc1"], "v1.3.0-rc1", id="pre-release-beats-older-release"),
+        pytest.param([], None, id="none-at-all"),
+    ],
+)
+def test_newest_tag(tags: list[str], expected: str | None) -> None:
+    assert version_script.newest_tag(tags) == expected
+
+
+def test_the_newest_tag_may_publish() -> None:
+    assert version_script.stale_tag_problems("v1.2.0", ALL_TAGS) == []
+
+
+def test_a_tag_ahead_of_every_other_may_publish() -> None:
+    """The normal case: the tag has just been created and is the highest there is."""
+    assert version_script.stale_tag_problems("v1.3.0", ALL_TAGS) == []
+
+
+def test_republishing_an_old_tag_is_refused() -> None:
+    """Exactly what pushing the backfilled v1.1.0 set in motion: `latest` and the `1`
+    tag that docker-compose.yaml pins would both have moved back to 1.1.0."""
+    problems = version_script.stale_tag_problems("v1.1.0", ALL_TAGS)
+    assert problems == [
+        "v1.1.0 is not the newest tag (v1.2.0); publishing it would move `latest` and the major tag backwards"
+    ]
+
+
+@pytest.mark.parametrize("tag", ["1.2.0", "v1.2", "latest", "v1.2.0-", ""])
+def test_a_tag_that_is_not_a_version_is_refused(tag: str) -> None:
+    assert version_script.stale_tag_problems(tag, ALL_TAGS) == [f"{tag} is not a vX.Y.Z tag"]

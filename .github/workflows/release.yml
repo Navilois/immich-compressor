@@ -45,11 +45,17 @@ jobs:
           echo "version=$tag" >> "$GITHUB_OUTPUT"
       - name: The CHANGELOG has a section for it
         run: ./scripts/changelog-section.sh "${{ github.ref_name }}" > /dev/null
-      # The same guard CI runs, plus the tag requirement CI cannot make: by the time a
-      # release is building, every section named in the CHANGELOG must be reachable, or
-      # the compare links in the release notes point at nothing.
+      # The same guard CI runs, plus the two requirements CI cannot make:
+      #
+      #   --strict  every section named in the CHANGELOG has a tag, or the compare links
+      #             in the release notes point at nothing.
+      #   --tag     the tag being built is the newest one. The tag set below includes
+      #             `latest` and the bare major, and docker-compose.yaml pins the major,
+      #             so publishing an older tag would downgrade every deployment on its
+      #             next pull. Pushing a retroactively created v1.1.0 started this
+      #             workflow once and got as far as the image job.
       - name: The version, the CHANGELOG and the upgrading notes agree
-        run: python scripts/version.py check --strict
+        run: python scripts/version.py check --strict --tag "${{ github.ref_name }}"
       - name: Install and test
         run: |
           python -m pip install --upgrade pip

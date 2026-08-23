@@ -90,9 +90,11 @@ def sections_of(changelog: str) -> list[Section]:
     return found
 
 
-def sort_key(version: str) -> tuple[int, ...]:
-    """Order by the numeric core only. Pre-releases sort with the version they precede."""
-    return tuple(int(part) for part in version.split("-")[0].split("."))
+def sort_key(version: str) -> tuple[tuple[int, ...], int, str]:
+    """Semantic version order, including the rule that 1.3.0-rc1 comes before 1.3.0."""
+    core, _, pre = version.partition("-")
+    numbers = tuple(int(part) for part in core.split("."))
+    return (numbers, 0, pre) if pre else (numbers, 1, "")
 
 
 def source_url() -> str:
@@ -221,7 +223,7 @@ def _upgrading_problems(unreleased: list[Section], upgrading: str) -> list[str]:
     return problems
 
 
-def missing_tags(versions: list[str]) -> list[str]:
+def repository_tags() -> list[str]:
     listed = subprocess.run(
         ["git", "tag", "--list"],  # noqa: S607
         cwd=REPO,
@@ -229,8 +231,41 @@ def missing_tags(versions: list[str]) -> list[str]:
         text=True,
         check=True,
     )
-    tags = set(listed.stdout.split())
-    return [f"v{version}" for version in versions if f"v{version}" not in tags]
+    return listed.stdout.split()
+
+
+def missing_tags(versions: list[str], tags: list[str] | None = None) -> list[str]:
+    known = set(repository_tags() if tags is None else tags)
+    return [f"v{version}" for version in versions if f"v{version}" not in known]
+
+
+def newest_tag(tags: list[str]) -> str | None:
+    """The highest `vX.Y.Z` tag, in semantic version order."""
+    versions = [tag for tag in tags if re.fullmatch(rf"v{VERSION_PATTERN}", tag)]
+    return max(versions, key=lambda tag: sort_key(tag[1:]), default=None)
+
+
+def stale_tag_problems(tag: str, tags: list[str]) -> list[str]:
+    """Refuse to publish a tag that is not the newest version.
+
+    The release workflow's tag set includes `latest` and the bare major, and
+    docker-compose.yaml pins the major, so re-pushing an old tag would move both
+    backwards and downgrade every deployment on its next pull. This is demonstrated
+    rather than theorised: pushing a retroactively created v1.1.0 started the release
+    workflow, and only the cancel beat the image job to the registry.
+
+    When a maintenance branch for an older major becomes real, the fix is to make
+    `latest` and `{{major}}` conditional in the workflow, not to drop this check.
+    """
+    if not re.fullmatch(rf"v{VERSION_PATTERN}", tag):
+        return [f"{tag} is not a vX.Y.Z tag"]
+    newest = newest_tag([*tags, tag])
+    if newest is not None and tag != newest:
+        return [
+            f"{tag} is not the newest tag ({newest}); publishing it would move `latest` "
+            f"and the major tag backwards"
+        ]
+    return []
 
 
 def main() -> int:
@@ -241,6 +276,11 @@ def main() -> int:
         "--strict",
         action="store_true",
         help="also require a git tag for every released section",
+    )
+    checker.add_argument(
+        "--tag",
+        metavar="vX.Y.Z",
+        help="the tag being released; refuse if it is not the newest one",
     )
     args = parser.parse_args()
 
@@ -253,8 +293,12 @@ def main() -> int:
     )
 
     released = [section.version or "" for section in sections_of(changelog) if section.version]
-    if args.strict:
-        problems.extend(f"{CHANGELOG}: no git tag {tag}" for tag in missing_tags(released))
+    if args.strict or args.tag:
+        tags = repository_tags()
+        if args.strict:
+            problems.extend(f"{CHANGELOG}: no git tag {tag}" for tag in missing_tags(released, tags))
+        if args.tag:
+            problems.extend(stale_tag_problems(args.tag, tags))
 
     if problems:
         print(f"{len(problems)} version problem(s):")
