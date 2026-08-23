@@ -23,7 +23,6 @@ jobs:
     name: Open the release pull request
     runs-on: ubuntu-latest
     permissions:
-      administration: read  # read the setting the last step depends on
       contents: write       # push the release branch
       pull-requests: write  # open the pull request
     steps:
@@ -31,9 +30,15 @@ jobs:
       # finding that out after the chore has run and a branch has been pushed is the worst
       # time to find it out. Checked first, before any work.
       #
-      # A refused read is not treated as a failure: `administration: read` may be narrowed
-      # by an organisation policy, and guessing would turn a working release into a blocked
-      # one. The step that actually needs the setting reports it either way.
+      # A refused read is not treated as a failure, and with the default token it is the
+      # expected outcome: the endpoint needs repository admin rights, and there is no
+      # `permissions:` scope that grants them to `GITHUB_TOKEN` — `administration: read` is
+      # not one, it is not a valid scope at all, and naming it made this whole file fail to
+      # parse, so `workflow_dispatch` answered HTTP 422 and the release could not be
+      # prepared by any means. Guessing from a refused read would turn a working release
+      # into a blocked one, so this step only fails on a definite `false`, which is what a
+      # PAT with admin rights in `GH_TOKEN` would return. The step that actually needs the
+      # setting reports it either way.
       - name: GitHub Actions is allowed to open pull requests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

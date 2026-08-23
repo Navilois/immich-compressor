@@ -32,6 +32,7 @@ lint: $(PY)
 	$(PY) -m ruff format --check .
 	./scripts/check-language.sh
 	$(PY) scripts/check-links.py
+	$(PY) scripts/check-workflows.py
 	$(PY) scripts/version.py check
 
 # The prose guards on their own.
