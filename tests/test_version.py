@@ -7,6 +7,8 @@ already happened has its own test: `test_upgrading_heading_outliving_its_release
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import subprocess
 import sys
 from collections.abc import Sequence
 from datetime import date
@@ -87,6 +89,12 @@ def test_the_repository_itself_passes() -> None:
         )
         == []
     )
+
+
+def test_current_version_reads_the_dunder() -> None:
+    changelog = (REPO / version_script.CHANGELOG).read_text(encoding="utf-8")
+    newest = next(s.version for s in version_script.sections_of(changelog) if s.version)
+    assert version_script.current_version() == newest
 
 
 def test_source_url_comes_from_pyproject() -> None:
@@ -503,3 +511,51 @@ def test_the_version_line_is_rewritten_once() -> None:
     )
     assert '__version__ = "1.3.0"' in init_py
     assert init_py.count('"1.3.0"') == 1
+
+
+# --- the chore end to end -----------------------------------------------------------
+
+IGNORED = shutil.ignore_patterns(
+    ".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist", "*.egg-info"
+)
+
+
+def test_the_chore_leaves_a_tree_that_passes_the_checks_ci_runs(tmp_path: Path) -> None:
+    """A bump makes `docs/configuration.md` stale on its own.
+
+    The generated header reads "Generated from the settings model of immich-compressor
+    X.Y.Z", so before the chore rebuilt it, `version.py set` produced a release commit that
+    failed `gen_docs.py --check` — the very check it has to pass to be merged.
+
+    Run against a copy of the real tree, because that is the only way this is worth
+    asserting: the interaction is between two scripts and a generated file.
+    """
+    copy = tmp_path / "repo"
+    shutil.copytree(REPO, copy, ignore=IGNORED)
+
+    # Whatever the real CHANGELOG looks like today, give the copy something to release.
+    changelog = (copy / version_script.CHANGELOG).read_text(encoding="utf-8")
+    (copy / version_script.CHANGELOG).write_text(
+        changelog.replace("## [Unreleased]\n", "## [Unreleased]\n\n### Fixed\n\n- A thing.\n", 1),
+        encoding="utf-8",
+    )
+
+    # S603: this interpreter, running a script this test copied itself. No shell.
+    chore = subprocess.run(  # noqa: S603
+        [sys.executable, str(copy / "scripts" / "version.py"), "set", "patch"],
+        cwd=copy,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert chore.returncode == 0, chore.stderr
+
+    for script, argument in (("gen_docs.py", "--check"), ("version.py", "check")):
+        checked = subprocess.run(  # noqa: S603
+            [sys.executable, str(copy / "scripts" / script), argument],
+            cwd=copy,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert checked.returncode == 0, f"{script} {argument}: {checked.stdout}{checked.stderr}"

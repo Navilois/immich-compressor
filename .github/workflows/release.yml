@@ -1,15 +1,29 @@
 name: Release
 
+# Two ways in, on purpose.
+#
+#   push        a maintainer pushes a tag by hand. The escape hatch, and how every
+#               release before these workflows existed was made.
+#   call        `release-tag.yml` tags a merge to main and then calls this. It has to
+#               call rather than push, because a tag pushed with GITHUB_TOKEN does not
+#               trigger `on: push`, and a release that silently never runs is the worst
+#               failure this particular workflow could have.
 on:
   push:
     tags: ['v*']
+  workflow_call:
+    inputs:
+      tag:
+        description: The vX.Y.Z tag to publish
+        required: true
+        type: string
 
 # Nothing here is granted by default.
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -22,11 +36,17 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      # Every tag, not just the one being pushed: `version.py check --strict` asserts that
-      # each released CHANGELOG section has one, and a shallow checkout would see none.
+      # The tag, explicitly: when this workflow is called rather than triggered by a tag
+      # push, the default ref is the caller's branch, and every check below would run
+      # against main instead of the thing being released.
+      #
+      # Every tag too, not just this one: `version.py check --strict` asserts that each
+      # released CHANGELOG section has one, and a shallow checkout would see none.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
@@ -35,16 +55,19 @@ jobs:
       # about what is inside it. Fail before anything is built.
       - name: Compare the tag with __version__
         id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          code=$(python -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/immich_compressor/__init__.py').read_text()).group(1))")
-          if [ "$tag" != "$code" ]; then
-            echo "tag v$tag does not match __version__ $code" >&2
+          version="${RELEASE_TAG#v}"
+          code=$(python scripts/version.py current)
+          if [ "$version" != "$code" ]; then
+            echo "tag $RELEASE_TAG does not match __version__ $code" >&2
             exit 1
           fi
-          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
       - name: The CHANGELOG has a section for it
-        run: ./scripts/changelog-section.sh "${{ github.ref_name }}" > /dev/null
+        run: ./scripts/changelog-section.sh "${{ steps.version.outputs.tag }}" > /dev/null
       # The same guard CI runs, plus the two requirements CI cannot make:
       #
       #   --strict  every section named in the CHANGELOG has a tag, or the compare links
@@ -55,7 +78,7 @@ jobs:
       #             next pull. Pushing a retroactively created v1.1.0 started this
       #             workflow once and got as far as the image job.
       - name: The version, the CHANGELOG and the upgrading notes agree
-        run: python scripts/version.py check --strict --tag "${{ github.ref_name }}"
+        run: python scripts/version.py check --strict --tag "${{ steps.version.outputs.tag }}"
       - name: Install and test
         run: |
           python -m pip install --upgrade pip
@@ -75,6 +98,8 @@ jobs:
       attestations: write  # attach provenance and the SBOM to the package
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - name: Log in to ghcr.io
@@ -90,10 +115,12 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `value=` on every semver line: the ref this workflow runs on is the caller's
+          # branch when it is called, and the patterns would read main instead of the tag.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=semver,pattern={{version}},value=${{ needs.verify.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.verify.outputs.tag }}
+            type=semver,pattern={{major}},value=${{ needs.verify.outputs.tag }}
             type=raw,value=latest
       - name: Build and push
         id: build
@@ -124,13 +151,15 @@ jobs:
       contents: write  # create the release
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
       - name: Release notes from the CHANGELOG
-        run: ./scripts/changelog-section.sh "${{ github.ref_name }}" > release-notes.md
+        run: ./scripts/changelog-section.sh "${{ needs.verify.outputs.tag }}" > release-notes.md
       - name: Create the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
+          gh release create "${{ needs.verify.outputs.tag }}" \
+            --title "${{ needs.verify.outputs.tag }}" \
             --notes-file release-notes.md \
             --verify-tag

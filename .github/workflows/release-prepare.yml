@@ -1,0 +1,97 @@
+name: Prepare a release
+
+# Performs the release chore and opens it as a pull request. Merging that pull request is
+# the decision; `release-tag.yml` takes it from there.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to move
+        default: auto
+        type: choice
+        options: [auto, major, minor, patch]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-prepare
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Open the release pull request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # push the release branch
+      pull-requests: write  # open the pull request
+    steps:
+      # `next` reads the commits since the newest tag, so it needs them.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      # Refuses on its own if there is nothing under `## [Unreleased]`, and checks its own
+      # output before writing anything.
+      - name: Perform the chore
+        id: chore
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          python scripts/version.py set "$BUMP"
+          echo "version=$(python scripts/version.py current)" >> "$GITHUB_OUTPUT"
+      # A pull request opened with GITHUB_TOKEN does not trigger `on: pull_request`, so
+      # the release pull request arrives with no checks on it. Run the ones a version bump
+      # can actually break, here, before it exists. The unit suite is not among them: it
+      # passed on this exact tree when it was merged to main, and dating a heading cannot
+      # change that. Anyone who wants the full matrix anyway can close and reopen the pull
+      # request, which is a human action and does trigger it.
+      - name: The checks a version bump can break
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+          ./scripts/check-language.sh
+          python scripts/check-links.py
+          python scripts/gen_docs.py --check
+          python scripts/version.py check
+      - name: Commit it on a branch
+        env:
+          VERSION: ${{ steps.chore.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "chore/release-$VERSION"
+          git commit -aqm "chore(release): $VERSION"
+          git push -u origin "chore/release-$VERSION"
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.chore.outputs.version }}
+        run: |
+          {
+            echo "Performed by \`scripts/version.py set\`, from the \`workflow_dispatch\` input"
+            echo "\`${{ inputs.bump }}\`. Nothing here was written by hand."
+            echo
+            echo "Merging this is the release. \`release-tag.yml\` then tags main and publishes:"
+            echo "the multi-arch image to ghcr.io with provenance and an SBOM, and the GitHub"
+            echo "release from the CHANGELOG section below."
+            echo
+            echo "> [!NOTE]"
+            echo "> This pull request carries no checks. GitHub does not trigger \`on: pull_request\`"
+            echo "> for anything opened with \`GITHUB_TOKEN\`. Lint, the language, link, generated-doc"
+            echo "> and version guards all ran in the job that opened it. The unit suite is not"
+            echo "> repeated: it passed on this tree when it was merged to main, and dating a"
+            echo "> heading cannot change that. Close and reopen this pull request to run the full"
+            echo "> matrix — that is a human action, and it does trigger."
+            echo
+            echo "## What the release notes will say"
+            echo
+            ./scripts/changelog-section.sh "$VERSION"
+          } > body.md
+          gh pr create --base main --title "chore(release): $VERSION" --body-file body.md
