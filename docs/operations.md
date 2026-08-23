@@ -93,7 +93,7 @@ docker compose exec immich-compressor immich-compressor <command>
 | `jobs [--status S] [--limit N] [--json]` | list jobs and, for the failed ones, `last_error` |
 | `reprocess <assetId>` | re-queue one asset |
 | `requeue --reason <r> [--apply]` | re-queue everything skipped for one reason. Dry until `--apply` |
-| `backfill --type VIDEO --limit N [--apply]` | queue existing large assets. Dry until `--apply` |
+| `backfill [scan\|run\|status]` | work through the library that was there before this service. `run` is the default and is dry until `--apply` |
 | `resume [--apply]` | show why the surge breaker paused the service, and clear it. Reports until `--apply` |
 | `restore <assetId>… \| --all-pending` | pull originals back out of the trash |
 | `--version` | |
@@ -123,12 +123,63 @@ show up in `report` and `/stats`.
 ## Working through the existing library
 
 The webhook only fires for assets moving through Immich's pipeline. The backlog already in
-the library is invisible to it. `backfill` queues a batch whose size you choose:
+the library is invisible to it, and re-running metadata extraction is not a way in — see
+[the metadata-extraction trap](#the-metadata-extraction-trap) below. `backfill` is.
 
 ```bash
-immich-compressor backfill --type VIDEO --limit 50            # look first
-immich-compressor backfill --type VIDEO --limit 50 --apply
+immich-compressor backfill scan                     # what is in there?
+immich-compressor backfill status                   # how much of it is left?
+immich-compressor backfill run --limit 50           # what would the next 50 jobs be?
+immich-compressor backfill run --limit 50 --apply   # queue them
 ```
+
+**`scan`** walks the library once per enabled asset type and writes one row per asset into
+an inventory table in the job store, each with the verdict the *worker's own guards* reach
+from the payload: too small, unsupported format, external library, already compressed. It
+queues nothing and encodes nothing. The cursor lives in the database, so an interrupted walk
+resumes where it stopped instead of starting over, and running it again refreshes the
+inventory without forgetting what has already been queued.
+
+**`run`** takes candidates out of that inventory — biggest first, which is where the savings
+are — re-checks each one against the live server, and enqueues it as if a webhook had
+arrived for it. With no inventory yet, it scans first.
+
+**`status`** prints what the scan found per type: how much was scanned, how many candidates
+are waiting and how big they are, how many have been queued, and why the rest were rejected.
+
+| Flag | Command | What |
+|---|---|---|
+| `--type VIDEO\|IMAGE` | all | one lane only. Default: every type in `enabled_types` |
+| `--limit N` | `run` | how many **jobs to queue** (default 50) |
+| `--order size\|scanned` | `run` | biggest first (default), or the order the library came back in |
+| `--apply` | `run` | actually queue. Without it the run is a dry one and writes nothing |
+| `--no-verify` | `run` | skip the live re-check of each asset before it is queued |
+| `--rescan` | `scan` | drop the inventory for those types and walk the library again |
+| `--page-size N` | `scan` | assets per request (default 1000) |
+| `--json` | `status` | machine-readable |
+
+Four things worth knowing:
+
+- **`--limit` counts jobs, not search results.** An asset that was deleted, trashed or given
+  a named face between the scan and the run is recorded as such, and the run moves on to the
+  next candidate. Running it again continues rather than re-reading the same answer, so
+  working through a library is `run --apply`, wait, `run --apply`.
+- **The guards run twice, deliberately.** Once during the scan, from the payload, and again
+  in the worker. A backfilled job is an ordinary job: same guards, same sanity gate, same
+  [verification chain](safety.md#the-verification-chain) before anything is deleted. What
+  the scan buys is that fifty queued jobs are fifty jobs worth having.
+- **`dry_run: true` swallows the whole run.** Every job queued while the shipped default is
+  in place ends as `skipped: dry_run` — that is the point of
+  [stage 1](safety.md#stage-1--dry-run-the-default), but those jobs do not come back on their own after
+  going live: `immich-compressor requeue --reason dry_run --apply`. `run` says so before it
+  queues anything.
+- **A paused service still accepts a backfill.** The surge breaker never trips on one
+  (it counts webhooks only), but no worker will claim what a run queued until
+  `resume --apply`. `run` says that too.
+
+The inventory is one table in the same SQLite database as the jobs, deliberately separate
+from them: a job row is a decision this service has taken and is immune to replay forever,
+while an inventory row has to stay re-scannable. Dropping it costs nothing but a re-scan.
 
 ### The metadata-extraction trap
 

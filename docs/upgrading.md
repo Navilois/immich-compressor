@@ -13,6 +13,29 @@ Job state lives in a volume and survives. Schema changes are applied automatical
 
 ## Unreleased
 
+### `backfill` has two phases now
+
+Nothing to edit, and the command you know still works: `backfill --type VIDEO --limit 50
+--apply` is `backfill run`, which is the default mode. What is new is that a run works from
+an inventory the scan builds, so `--limit` counts jobs rather than search results and a
+second run continues instead of re-reading the same answer.
+
+```bash
+immich-compressor backfill scan      # inventory the library, queue nothing
+immich-compressor backfill status    # what is worth compressing, and what is left
+immich-compressor backfill run --limit 50 --apply
+```
+
+The inventory is a new table in the existing database and is created on open, like every
+other schema change. It holds no state you cannot throw away: `backfill scan --rescan`
+rebuilds it.
+
+**If you tried `backfill --type IMAGE` before and got nothing**, that was not your library.
+The endpoint it used answers with videos whatever you ask it for; the scan walks a different
+one. See [operations.md](operations.md#working-through-the-existing-library).
+
+## 1.1.0 → 1.1.1
+
 ### Breaking: `behavior.min_size_bytes` is now `behavior.min_savings_bytes`
 
 **This one needs an edit.** The old key guessed from the *input* size whether a job was

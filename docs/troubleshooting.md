@@ -112,6 +112,31 @@ Full explanation in [operations.md](operations.md#the-surge-breaker).
 Only possible with `max_asset_age_hours: null`, which turns the gate above off. Set it back
 to a number, then use `report` to see the extent.
 
+## `backfill` queues nothing
+
+```bash
+docker compose exec immich-compressor immich-compressor backfill status
+```
+
+The inventory answers this, per type. In order of how often it is the cause:
+
+- **`0 candidate(s)`, everything under `rejected:`** — the guards refused the library, and
+  the counts name the reason. `too_small` means the assets are below
+  `behavior.min_savings_bytes`; `unsupported_format` on stills means they are not JPEG
+  (RAW, HEIC, PNG, GIF, TIFF and WebP are all skipped by design); `wrong_type` means the
+  type is not in `behavior.enabled_types`.
+- **`not scanned yet`** — run `backfill scan`, or just `backfill run`, which scans first.
+- **`walk interrupted, resumes at page N`** — the last scan stopped early. Run it again; it
+  continues from there. If it says the server *does not apply `page`*, that Immich cannot be
+  walked page by page and only the first page is reachable.
+- **Everything already `queued`** — the assets are in the job store, not in the inventory
+  any more. `report` and `jobs` are where they show up now, and while `dry_run` is on they
+  all end as `skipped: dry_run`. `requeue --reason dry_run --apply` brings them back after
+  going live.
+
+`backfill run` also refuses to be quiet about two states that make a successful run look
+useless an hour later: `behavior.dry_run` being on, and the surge breaker being latched.
+
 ## Disk fills up
 
 Two different causes:

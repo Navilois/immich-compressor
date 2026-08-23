@@ -87,6 +87,30 @@ The lane is recorded in the job store's `asset_type` column, derived from the we
 payload at enqueue time. Rows written before that column existed carry `NULL` and stay
 claimable from *every* lane, so an upgrade never strands a job the previous version queued.
 
+## The backfill
+
+The webhook reaches new uploads only, so everything that was in the library before this
+service existed needs a second way in — and it must not be the same way, because the one
+trigger that fires for a whole library is refused at ingest on purpose.
+
+`backfill scan` walks `POST /search/metadata` page by page, runs the *same* `check_guards`
+the worker runs, and writes one row per asset into a `backfill_candidates` table: verdict,
+size, and — for the candidates only — the payload a job would be driven from. `backfill run`
+takes rows out of that table biggest first, re-checks each against the live server, and
+enqueues them through the same `ON CONFLICT DO NOTHING` a webhook goes through.
+
+Two properties come out of the split:
+
+- **`--limit` counts jobs**, so a run that meets deleted or trashed assets still delivers the
+  number asked for, and a second run continues instead of re-reading the same answer.
+- **The inventory is not the job store.** A job row is a decision this service has taken and
+  is immune to replay forever; an inventory row has to stay re-scannable, and dropping it
+  costs nothing but a walk. That is also why an ingest rejection writes no job row.
+
+The scan trusts none of the search parameters it sends — see
+[immich-api-notes.md](immich-api-notes.md#15-post-searchlarge-assets-ignores-type-and-size)
+for what an Immich search endpoint did with `type` and `size`.
+
 ## Hardware selection
 
 Collection and decision are separate. `collect_host_facts()` touches the machine — sysfs,
@@ -109,6 +133,7 @@ encode. See [hardware.md](hardware.md).
 | `store.py` | SQLite job store, WAL |
 | `encoder.py` | preset execution, exiftool, probes, the sanity gate |
 | `pipeline.py` | the ten steps, the worker loop, the trash sweeper |
+| `backfill.py` | the library scan, the candidate inventory, the queue run over it |
 | `server.py` | FastAPI endpoints |
 | `setup_cmd.py` | the guided `setup` command |
 | `__main__.py` | CLI |

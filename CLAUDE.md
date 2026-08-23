@@ -74,6 +74,7 @@ Conventional commits, English, imperative: `feat(hardware): …`, `fix(config): 
 | `src/immich_compressor/store.py` | SQLite job store (WAL) |
 | `src/immich_compressor/encoder.py` | preset execution, exiftool, sanity gate |
 | `src/immich_compressor/pipeline.py` | the ten steps, worker loop, trash sweeper |
+| `src/immich_compressor/backfill.py` | library scan, candidate inventory, queue run |
 | `src/immich_compressor/server.py` | FastAPI endpoints |
 | `src/immich_compressor/setup_cmd.py` | the guided `setup` command |
 | `docs/` | everything the README links to; `configuration.md` is generated |

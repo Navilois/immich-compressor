@@ -74,7 +74,8 @@ in bulk, so **Administration → Jobs → Extract Metadata** re-fires the workfl
 upload rather than the exposure, and `behavior.max_asset_age_hours` (24 h by default)
 refuses anything older than that — so the button is safe to press, and importing a thousand
 photos from 2009 still goes through. It is still not a way to reach a backlog: use
-`backfill --limit` for that —
+`backfill` for that — it inventories the library, tells you how much of it is worth
+compressing, and queues it in batches you choose, biggest first —
 [the details, and why](docs/operations.md#the-metadata-extraction-trap).
 
 Full detail, and the four stages of going live: **[docs/safety.md](docs/safety.md)**.

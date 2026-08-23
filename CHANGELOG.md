@@ -5,6 +5,51 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`backfill` works from an inventory.** `backfill scan` walks the library once per enabled
+  asset type, runs the *worker's own guards* over every asset it sees, and writes the verdict
+  into a new `backfill_candidates` table. `backfill run` queues candidates out of that table,
+  biggest first. `backfill status` says how many are waiting, how big they are, and why the
+  rest were refused. `backfill --type VIDEO --limit 50 --apply` still means exactly what it
+  did before — `run` is the default mode, so nothing anybody has in muscle memory moved.
+  - **`--limit` counts queued jobs**, not search results. An asset that was deleted, trashed
+    or given a named face between the scan and the run is recorded as such and the run moves
+    on to the next candidate, so fifty means fifty.
+  - **A second run makes progress.** The old one re-read the same answer from the server and
+    spent its limit on assets it had already queued; there is now a cursor, and `status`
+    reports what is left.
+  - **The scan is resumable.** Every page is committed before the cursor moves, so an
+    interrupted walk continues instead of starting over.
+  - **One live re-check per asset that is actually about to be queued** — bounded by
+    `--limit`, not by the size of the library. It catches the assets the inventory has
+    outlived: deleted, in the trash, or newly carrying a named face.
+  - **`run` says what would otherwise be invisible an hour later:** that `behavior.dry_run`
+    is on and every job it queues will end as `skipped: dry_run` (with the `requeue` command
+    that brings them back), and that a latched surge breaker means nothing will be claimed.
+- `report` grows one line for the inventory once a scan has run.
+
+### Changed
+
+- **The backfill reads `POST /search/metadata` instead of `POST /search/large-assets`.** The
+  old endpoint answers with one fixed set of results — 250 items on the measured library,
+  every one of them a video — which makes the stills half of a library unreachable through
+  it no matter what the client filters afterwards. **`backfill --type IMAGE` therefore
+  returned nothing usable on a video-heavy library**, even after the 1.2.0 fix stopped it
+  from queueing videos. The new scanner walks page by page and trusts none of the parameters
+  it sends: it filters by type itself and stops when a page repeats the one before it.
+
+### Fixed
+
+- **The backfill asked the server for the wrong size threshold.** It sent
+  `behavior.min_savings_bytes` as `minFileSize` while the guard that decides the same
+  question uses `preset.effective_min_savings_bytes()`, so a preset with its own override —
+  which is exactly what the stills presets have, because video and stills have opposite
+  economics — was scanned against a threshold nobody configured. The scan now runs the guard
+  itself, and the threshold is per preset by construction.
+
 ## [1.2.0] - 2026-08-21
 
 Everything here comes from one first-install audit against a live Immich v3.1.0 and a
