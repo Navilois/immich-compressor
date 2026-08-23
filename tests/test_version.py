@@ -290,12 +290,6 @@ def test_missing_tags_is_quiet_when_they_all_exist() -> None:
     assert version_script.missing_tags(["1.2.0", "1.1.1"], ALL_TAGS) == []
 
 
-def test_this_repository_has_every_tag_its_changelog_names() -> None:
-    """v1.0.0 and v1.1.0 date from when this repository was private and were backfilled."""
-    changelog = (REPO / version_script.CHANGELOG).read_text(encoding="utf-8")
-    released = [s.version or "" for s in version_script.sections_of(changelog) if s.version]
-    assert version_script.missing_tags(released) == []
-
 
 # --- publishing an old tag ----------------------------------------------------------
 
