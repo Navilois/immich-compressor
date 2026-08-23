@@ -173,12 +173,12 @@ Run **Prepare a release** from the Actions tab (`workflow_dispatch`), with `auto
 the failure names it: **Settings ▸ Actions ▸ General ▸ Workflow permissions ▸ "Allow GitHub
 Actions to create and approve pull requests"**. Without it every step succeeds and the last
 one fails with `GitHub Actions is not permitted to create or approve pull requests`, leaving
-a correct `chore/release-X.Y.Z` branch pushed and no pull request. The workflow asks for the
-setting before doing any work, but reading it needs repository admin rights that
-`GITHUB_TOKEN` does not have, so under the default token the pre-flight step reports that it
-could not read it and continues. What it does guarantee is the second half: the step that
-opens the pull request catches its own failure and prints the command that opens it by hand
-from the branch it already pushed. On a fork, this setting is the first thing to turn on.
+a correct `chore/release-X.Y.Z` branch pushed and no pull request. The workflow reads the
+setting before doing any work, and stops in seconds naming it — that is the first step, and
+it has been seen to do exactly this on a repository where the setting was off. If the read
+itself is refused, the run continues and the step that opens the pull request catches its
+own failure, printing the command that opens it by hand from the branch it already pushed.
+On a fork, this setting is the first thing to turn on.
 
 ```bash
 gh api repos/OWNER/REPO/actions/permissions/workflow --jq .can_approve_pull_request_reviews
