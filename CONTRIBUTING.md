@@ -163,6 +163,27 @@ exists.
 
 3. Commit, tag `vX.Y.Z`, push the tag.
 
+### Or let the workflow do all three
+
+Run **Prepare a release** from the Actions tab (`workflow_dispatch`), with `auto`, `major`,
+`minor` or `patch`. It runs the same chore, checks the result, and opens
+`chore(release): X.Y.Z` as a pull request with the release notes in the body.
+
+**Merging that pull request is the release.** `release-tag.yml` then notices a
+`__version__` on `main` that nothing has tagged, tags it, and calls `release.yml`.
+
+Two things about that pull request are worth knowing:
+
+- **It arrives with no checks.** GitHub does not trigger `on: pull_request` for anything
+  opened with `GITHUB_TOKEN`. The lint, language, link, generated-doc and version guards all
+  run in the job that opens it; the unit suite is not repeated, because it passed on that
+  exact tree when it was merged and dating a heading cannot change that. Closing and
+  reopening the pull request is a human action and does trigger the full matrix.
+- **The tag is pushed by the workflow, so it cannot trigger `release.yml` by itself** —
+  GitHub does not fire `on: push` for a `GITHUB_TOKEN` push. That is why `release-tag.yml`
+  calls `release.yml` through `workflow_call` instead of leaving it to a tag event that
+  would never arrive.
+
 The release workflow refuses to publish if the tag disagrees with `__version__`, if the
 CHANGELOG has no section for it, if any released section has no tag, or if the tag is not
 the newest version — publishing an older one would move `latest` and the major tag

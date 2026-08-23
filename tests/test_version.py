@@ -91,6 +91,12 @@ def test_the_repository_itself_passes() -> None:
     )
 
 
+def test_current_version_reads_the_dunder() -> None:
+    changelog = (REPO / version_script.CHANGELOG).read_text(encoding="utf-8")
+    newest = next(s.version for s in version_script.sections_of(changelog) if s.version)
+    assert version_script.current_version() == newest
+
+
 def test_source_url_comes_from_pyproject() -> None:
     assert version_script.source_url() == SOURCE
 

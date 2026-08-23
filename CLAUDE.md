@@ -110,16 +110,23 @@ upcoming.
 
 ## Releases
 
-`python scripts/version.py set auto` does the chore: it bumps `__version__`, dates the
-CHANGELOG section and opens an empty one, moves both compare links, renames the upgrading
-heading, and checks its own output. `auto` is what the conventional commits since the
-newest tag ask for; `next` prints that on its own, and `major`/`minor`/`patch`/`X.Y.Z`
-override it. It refuses when the `Unreleased` section is empty.
+Write the `Unreleased` sections first, then run the **Prepare a release** workflow
+(`workflow_dispatch`, input `auto`/`major`/`minor`/`patch`). It performs the chore with
+`version.py set` and opens `chore(release): X.Y.Z` as a pull request.
 
-Merge, then tag `vX.Y.Z`. The tag is what publishes the image: `release.yml` triggers on
-`v*`, verifies that the tag matches `__version__`, that every released section has a tag
-and that this tag is the newest one, then pushes to ghcr.io. Merging to `main` deploys
-nothing.
+**Merging that pull request is the release.** `release-tag.yml` sees a `__version__` on
+main that nothing has tagged, tags it, and calls `release.yml` to publish. Any other merge
+to `main` still deploys nothing.
+
+The chore itself — `python scripts/version.py set auto` — bumps `__version__`, dates the
+CHANGELOG section and opens an empty one, moves both compare links, renames the upgrading
+heading, rebuilds the generated docs, and checks its own output. `next` prints the derived
+version on its own. Running it by hand and pushing a tag still works and is the escape
+hatch; `release.yml` keeps its `on: push: tags` trigger for exactly that.
+
+`release.yml` refuses to publish a tag that disagrees with `__version__`, that has no
+CHANGELOG section, that leaves an earlier section untagged, or that is not the newest
+version.
 
 ## Layout
 

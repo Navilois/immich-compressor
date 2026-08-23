@@ -16,6 +16,7 @@ This is the structural check — offline, no network, no git unless asked:
 * `docs/upgrading.md` carries no `Unreleased` heading once the CHANGELOG's is empty,
   which is what a release chore renaming one file and forgetting the other looks like.
 
+    python scripts/version.py current           # 1.2.0
     python scripts/version.py check
     python scripts/version.py check --strict    # also: every version section has a tag
     python scripts/version.py next              # the version the commits since the tag ask for
@@ -426,6 +427,11 @@ def current_version() -> str:
     return found.group(1)
 
 
+def run_current(args: argparse.Namespace) -> int:
+    print(current_version())
+    return 0
+
+
 def run_check(args: argparse.Namespace) -> int:
     changelog = (REPO / CHANGELOG).read_text(encoding="utf-8")
     problems = audit(
@@ -550,6 +556,8 @@ def run_set(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("current", help="print __version__").set_defaults(run=run_current)
 
     checker = sub.add_parser("check", help="the version, the CHANGELOG and the upgrading notes agree")
     checker.add_argument(

@@ -1,0 +1,67 @@
+name: Tag a release
+
+# A merge to main that carries a version nothing has tagged yet is a release. The merge is
+# the human decision; everything after it is mechanical.
+#
+# The trigger is deliberately not the commit subject. This repository merges rather than
+# squashes, so the tip of main after a release pull request reads "Merge pull request #NN
+# from …" and the `chore(release): X.Y.Z` commit is inside the merge, not at the top.
+# `__version__` is the thing that actually changed, and `version.py check` already
+# guarantees it names a CHANGELOG section — so an untagged `__version__` is the signal.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag main if the version is new
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create and push the tag
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      # Every tag, so "does this one exist" is a question that can be answered.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Tag it, if it is new
+        id: tag
+        run: |
+          version=$(python scripts/version.py current)
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already tagged; nothing to release"
+            exit 0
+          fi
+          echo "::notice::tagging v$version"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "v$version" -m "v$version"
+          git push origin "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # Called, not triggered. Pushing the tag above with GITHUB_TOKEN does not fire
+  # `on: push: tags`, by design on GitHub's side — so the publish has to be invoked here
+  # rather than left to a tag event that will never arrive.
+  publish:
+    name: Publish
+    needs: tag
+    if: needs.tag.outputs.version != ''
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: v${{ needs.tag.outputs.version }}
+    permissions:
+      contents: write      # create the GitHub release
+      packages: write      # push to ghcr.io
+      id-token: write      # provenance attestation
+      attestations: write  # attach provenance and the SBOM
