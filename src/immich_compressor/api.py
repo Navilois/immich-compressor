@@ -32,6 +32,14 @@ VALID_RATINGS: frozenset[int] = frozenset({-1, 1, 2, 3, 4, 5})
 _RETRY_STATUS: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
 _ISO_MS = "%Y-%m-%dT%H:%M:%S.%f"
 
+# `POST /trash/restore/assets` refuses the *whole* request with HTTP 400 when a single id
+# is not in the database, and never says which id it was — measured on v3.1.0, see
+# docs/immich-api-notes.md. A refused batch therefore has to be split and re-sent until
+# every unknown id stands on its own. 100 is a client-side choice, not a measured server
+# limit: small enough that isolating one dead id stays cheap, large enough that a healthy
+# store is one request per hundred originals.
+_RESTORE_CHUNK = 100
+
 
 class ImmichError(RuntimeError):
     """Non-retryable API failure."""
@@ -53,6 +61,21 @@ def format_timestamp(value: datetime) -> str:
     return value.astimezone(UTC).strftime(_ISO_MS)[:-3] + "Z"
 
 
+def _restored_count(response: httpx.Response, sent: int) -> int:
+    """The server's own ``count`` for a restore, falling back to what we sent it.
+
+    v3.1.0 answers ``200 {"count": n}``. The fallback covers a ``204`` and any body that
+    is not the shape we measured — reporting the request size is still closer to the truth
+    than reporting nothing.
+    """
+    if response.status_code == 204 or not response.content:
+        return sent
+    try:
+        return int(response.json().get("count", sent))
+    except (AttributeError, TypeError, ValueError):
+        return sent
+
+
 @dataclass(slots=True)
 class AssetPage:
     """One page of search results, with whatever paging information came with it."""
@@ -66,6 +89,19 @@ class AssetPage:
     next_page: int | None = None
     total: int | None = None
     paged: bool = False
+
+
+@dataclass(slots=True)
+class RestoreOutcome:
+    """What a best-effort restore achieved, and what it could not.
+
+    ``restored`` is the server's own ``count``, summed over every request that was sent —
+    not the number of ids the caller handed over. ``missing`` holds the ids the server
+    refused because it no longer knows them at all.
+    """
+
+    restored: int = 0
+    missing: list[str] = field(default_factory=list)
 
 
 class ImmichClient:
@@ -341,11 +377,63 @@ class ImmichClient:
             expected=(200, 204),
         )
 
-    async def restore_assets(self, asset_ids: list[str]) -> None:
-        """Rollback helper — pull assets back out of the trash."""
+    async def restore_assets(self, asset_ids: list[str]) -> int:
+        """Rollback helper — pull assets back out of the trash. Returns the server's count.
+
+        One request, all or nothing: a single id the server cannot find fails every other
+        id in the same body. :meth:`restore_assets_best_effort` is the form to reach for
+        when the ids come out of the job store rather than from a user.
+        """
         if not asset_ids:
+            return 0
+        response = await self._request(
+            "POST", "/trash/restore/assets", json={"ids": asset_ids}, expected=(200, 204)
+        )
+        return _restored_count(response, len(asset_ids))
+
+    async def restore_assets_best_effort(
+        self, asset_ids: list[str], *, chunk_size: int = _RESTORE_CHUNK
+    ) -> RestoreOutcome:
+        """Restore everything the server still knows, and report the ids it does not.
+
+        The endpoint answers HTTP 400 for the whole request over one unknown id and does
+        not name it, so a refused batch is halved and re-sent until the unknown ids stand
+        alone. Restoring an asset that is not in the trash is a harmless no-op on v3.1.0,
+        which is what makes this safe: no caller has to know which originals were trashed
+        and which were kept.
+
+        Anything that is not that HTTP 400 — auth, transport, a server error that survived
+        the retries — is raised, because it says nothing about a single id.
+        """
+        outcome = RestoreOutcome()
+        index = 0
+        while index < len(asset_ids):
+            batch = asset_ids[index : index + chunk_size]
+            await self._restore_batch(batch, outcome)
+            index += len(batch)
+            # A deployment that has run `delete_mode: permanent` has more dead ids than
+            # live ones, and halving a batch in which everything is missing costs two
+            # requests per id. Once the store looks like that, send the rest one at a
+            # time: one request per id is the floor for isolating them anyway.
+            if chunk_size > 1 and len(outcome.missing) * 2 > index:
+                chunk_size = 1
+        return outcome
+
+    async def _restore_batch(self, batch: list[str], outcome: RestoreOutcome) -> None:
+        """Restore one batch, halving it around whichever ids the server cannot find."""
+        if not batch:
             return
-        await self._request("POST", "/trash/restore/assets", json={"ids": asset_ids}, expected=(200, 204))
+        try:
+            outcome.restored += await self.restore_assets(batch)
+        except ImmichError as exc:
+            if exc.status_code != 400:
+                raise
+            if len(batch) == 1:
+                outcome.missing.append(batch[0])
+                return
+            middle = len(batch) // 2
+            await self._restore_batch(batch[:middle], outcome)
+            await self._restore_batch(batch[middle:], outcome)
 
     async def search_assets(self, *, asset_type: str, page: int = 1, size: int = 1000) -> AssetPage:
         """``POST /search/metadata`` — one page of the library. Used by ``backfill scan``.

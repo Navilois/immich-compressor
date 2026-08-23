@@ -364,6 +364,21 @@ class JobStore:
             rows = await cursor.fetchall()
         return [_row_to_job(row) for row in rows]
 
+    async def replaced_source_asset_ids(self) -> list[str]:
+        """Every original this service replaced — the selection ``restore --all-pending`` uses.
+
+        Completed jobs that carry a replacement, oldest first. Deliberately unlimited and
+        deliberately narrow: a limit would leave the oldest originals sitting in the trash
+        without saying so, and any state short of ``done`` has not had its original
+        removed yet, so restoring it would touch an asset this service did not take away.
+        """
+        async with self._conn.execute(
+            "SELECT source_asset_id FROM jobs WHERE state = ? AND new_asset_id IS NOT NULL "
+            "ORDER BY updated_at ASC, source_asset_id ASC",
+            (JobState.DONE.value,),
+        ) as cursor:
+            return [row["source_asset_id"] for row in await cursor.fetchall()]
+
     async def skipped_asset_ids(self, reason: SkipReason) -> list[str]:
         """Every asset currently parked in ``skipped`` for one specific reason."""
         async with self._conn.execute(

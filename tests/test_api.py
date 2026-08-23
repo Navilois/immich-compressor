@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -279,3 +280,119 @@ async def test_search_assets_treats_an_unknown_shape_as_an_empty_page(client: Im
 
     assert page.items == []
     assert page.paged is False
+
+
+def _trash_restore(gone: set[str]) -> Callable[[httpx.Request], httpx.Response]:
+    """`POST /trash/restore/assets` as measured on v3.1.0.
+
+    One id the server cannot find refuses the whole request with HTTP 400, and the answer
+    never says which id it was. An id that is merely untrashed is a no-op that still
+    counts.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ids = json.loads(request.read())["ids"]
+        if any(asset_id in gone for asset_id in ids):
+            return httpx.Response(400, json={"message": "Not found or no asset.delete access"})
+        return httpx.Response(200, json={"count": len(ids)})
+
+    return handler
+
+
+@respx.mock
+async def test_restore_assets_returns_the_servers_own_count(client: ImmichClient) -> None:
+    """The caller's arithmetic is not the truth — only the server knows what it moved."""
+    respx.post(f"{BASE}/trash/restore/assets").mock(return_value=httpx.Response(200, json={"count": 2}))
+
+    assert await client.restore_assets(["a1", "a2", "a3"]) == 2
+
+
+@respx.mock
+async def test_restore_assets_falls_back_when_there_is_no_body(client: ImmichClient) -> None:
+    """A 204 is in `expected`, so it must not turn a successful restore into a zero."""
+    respx.post(f"{BASE}/trash/restore/assets").mock(return_value=httpx.Response(204))
+
+    assert await client.restore_assets(["a1", "a2"]) == 2
+
+
+@respx.mock
+async def test_best_effort_restore_sends_one_request_when_no_id_is_missing(client: ImmichClient) -> None:
+    """The healthy deployment must not pay for the broken one."""
+    route = respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore(set()))
+
+    outcome = await client.restore_assets_best_effort([f"a{index}" for index in range(8)])
+
+    assert (outcome.restored, outcome.missing) == (8, [])
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_best_effort_restore_isolates_the_ids_the_server_lost(client: ImmichClient) -> None:
+    """The bug this exists for: one force-deleted original used to cost the whole batch,
+    including the one asset that really was in the trash and could have come back."""
+    route = respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore({"a2", "a5"}))
+
+    outcome = await client.restore_assets_best_effort([f"a{index}" for index in range(8)])
+
+    assert outcome.restored == 6
+    assert sorted(outcome.missing) == ["a2", "a5"]
+    # Every id the server still knows was accepted, and no request carried a dead one twice.
+    accepted = [
+        asset_id
+        for call in route.calls
+        if call.response.status_code == 200
+        for asset_id in json.loads(call.request.read())["ids"]
+    ]
+    assert sorted(accepted) == ["a0", "a1", "a3", "a4", "a6", "a7"]
+
+
+@respx.mock
+async def test_best_effort_restore_when_every_id_is_gone(client: ImmichClient) -> None:
+    """A stage-4 deployment. Nothing comes back, and every id is named as gone rather
+    than the run failing on the first one."""
+    ids = [f"a{index}" for index in range(4)]
+    respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore(set(ids)))
+
+    outcome = await client.restore_assets_best_effort(ids)
+
+    assert outcome.restored == 0
+    assert sorted(outcome.missing) == ids
+
+
+@respx.mock
+async def test_best_effort_restore_of_nothing_stays_off_the_network(client: ImmichClient) -> None:
+    route = respx.post(f"{BASE}/trash/restore/assets")
+
+    outcome = await client.restore_assets_best_effort([])
+
+    assert (outcome.restored, outcome.missing) == (0, [])
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_best_effort_restore_raises_anything_that_is_not_a_missing_id(client: ImmichClient) -> None:
+    """A wrong API key is not evidence about a single asset, and swallowing it would
+    report "these originals are gone" about a library that is perfectly intact."""
+    respx.post(f"{BASE}/trash/restore/assets").mock(return_value=httpx.Response(401, json={"message": "no"}))
+
+    with pytest.raises(ImmichError) as failed:
+        await client.restore_assets_best_effort(["a1", "a2"])
+
+    assert failed.value.status_code == 401
+
+
+@respx.mock
+async def test_best_effort_restore_stops_halving_a_mostly_dead_store(client: ImmichClient) -> None:
+    """Halving costs two requests per id once everything in a batch is missing, which is
+    exactly what a deployment that has run `delete_mode: permanent` looks like. After the
+    first such chunk the rest goes out one id at a time — the floor for isolating them."""
+    ids = [f"a{index}" for index in range(12)]
+    route = respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore(set(ids)))
+
+    outcome = await client.restore_assets_best_effort(ids, chunk_size=4)
+
+    assert outcome.missing == ids
+    # 7 to take the first chunk of four apart (1 + 2 + 4), then 8 singletons. Halving all
+    # three chunks would have been 21.
+    assert route.call_count == 15
+    assert all(len(json.loads(call.request.read())["ids"]) == 1 for call in route.calls[-8:])

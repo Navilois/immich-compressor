@@ -205,9 +205,9 @@ Grant `asset.delete` on the API key, then:
 
 Originals move to Immich's trash a week after they are replaced, and stay recoverable until
 the trash is emptied. `immich-compressor restore --all-pending` brings back everything this
-service trashed — with one measured caveat if this deployment has ever run
-[stage 4](#stage-4--reclaim-the-space-irreversible), which the rollback section below spells
-out.
+service trashed — including on a deployment that has already run
+[stage 4](#stage-4--reclaim-the-space-irreversible), where the originals that stage removed
+are simply reported as gone instead of taking the rest of the rollback down with them.
 
 **Disk space does not go down in this stage.** Until the trash is emptied you are using
 *more* space, not less. That is the price of the undo.
@@ -239,7 +239,7 @@ curl -X PUT "$IMMICH_URL/api/workflows/$WORKFLOW_ID" \
 docker compose stop immich-compressor
 ```
 
-**2. Restore the trashed originals** (`delete_mode: trash` only):
+**2. Restore the trashed originals.** Only originals that reached the trash can come back:
 
 ```bash
 docker compose run --rm immich-compressor restore --all-pending
@@ -249,26 +249,37 @@ docker compose run --rm immich-compressor restore <assetId> <assetId>
 Equivalent to `POST /trash/restore/assets`, or Utilities → Trash → Restore in the UI.
 Verified: the asset comes back with `isTrashed: false`.
 
-> **`--all-pending` stops working once `delete_mode: permanent` has run.** Measured on
-> 2026-08-23 against a live v3.1.0 instance. `--all-pending` sends the source id of *every*
-> completed job in one `POST /trash/restore/assets` call, and originals removed with
-> `force: true` are gone from the database — so the request carries ids the server cannot
-> find, and it answers `HTTP 400 Not found or no asset.delete access` for the **whole
-> batch**. On the measured deployment 46 of the 50 ids had been force-deleted by an earlier
-> stage-4 run, and the one original that really was in the trash did not come back. The
-> command exits 1 and says the server refused; it does not say that dead ids are the reason,
-> because the message that explains force-deleted originals only prints while `delete_mode`
-> is *currently* `permanent`.
->
-> **The per-asset form is unaffected** and is what to reach for on such a deployment:
->
-> ```bash
-> docker compose run --rm immich-compressor restore <assetId>
-> ```
->
-> Verified in the same run: `restored 1 asset(s) from the trash`, and the asset came back
-> with `isTrashed: false` and `deletedAt` null. Asset ids for the originals this service
-> trashed are in `immich-compressor jobs`.
+`--all-pending` selects the source id of every completed job — every original this service
+replaced — and restores what Immich still has. Illustrative output; the fix was written
+without a live instance to re-run against, so this is the shape of the answer, not a
+capture:
+
+```
+restored 12 asset(s) from the trash
+38 of 50 id(s) are no longer in Immich's database and could not be restored
+```
+
+**A dead id costs only itself.** On a deployment that has ever run `delete_mode: permanent`
+the selection contains originals that were removed with `force: true` and are gone from
+Immich's database. `POST /trash/restore/assets` refuses its whole request over a single id
+it cannot find (measured on v3.1.0 — see
+[immich-api-notes.md](immich-api-notes.md#behaviour-table)) and never says which id it
+was, so the command sends the selection in batches and halves a refused batch until each
+unknown id stands on its own. The number it prints is the server's own `count`, not the
+number of ids it sent — restoring an asset that is not in the trash is a harmless no-op and
+does not count as a restoration.
+
+> **Before this fix it was broken in the worst direction.** The whole selection went out as
+> one request, so one force-deleted original meant *nothing* was restored. Measured on
+> 2026-08-23 against a live v3.1.0 instance: of the 50 ids it sent, 46 had been force-deleted
+> by an earlier stage-4 run, and the one original that really was in the trash did not come
+> back. `restore <assetId>` on that same id worked immediately — the batch was the problem,
+> not the asset.
+
+Exit codes, because a rollback's exit code ends up in somebody's script: **0** every id came
+back, **3** some ids are no longer in Immich's database, **2** nothing was selected, **1**
+the call to Immich failed. Asset ids for the originals this service trashed are in
+`immich-compressor jobs`.
 
 **3. Remove the replacements** (optional). They are identifiable three ways: the filename
 ends in `.cmp.<ext>`, the `compressor` metadata key is set, and its value carries
@@ -282,9 +293,10 @@ docker volume rm immich-compressor_compressor-state
 ```
 
 > **If the trash was already emptied, or `delete_mode: permanent` was in effect, the
-> original is gone.** There is no undo. `immich-compressor restore` answers
-> `HTTP 400 Not found` for the whole batch rather than silently doing nothing, and says why.
-> The only way back is a backup of Postgres *and* the upload directory from before the run.
+> original is gone.** There is no undo. `immich-compressor restore` names those ids and says
+> why rather than silently doing nothing, and restores everything around them. The only way
+> back for the named ones is a backup of Postgres *and* the upload directory from before the
+> run.
 
 ## Threat model
 

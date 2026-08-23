@@ -693,6 +693,12 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     )
 
 
+# What `restore` exits with. A rollback's exit code ends up in somebody's script, so a
+# rollback that could not roll everything back must not look like a clean success — and it
+# must not look like a failed call either, because the two ask for different reactions.
+RESTORE_INCOMPLETE = 3
+
+
 async def _restore(settings: Settings, asset_ids: list[str]) -> int:
     async with ImmichClient(
         settings.immich.base_url,
@@ -700,22 +706,33 @@ async def _restore(settings: Settings, asset_ids: list[str]) -> int:
         timeout_s=settings.immich.timeout_s,
     ) as client:
         try:
-            await client.restore_assets(asset_ids)
+            outcome = await client.restore_assets_best_effort(asset_ids)
         except ImmichError as exc:
-            # Verified on a live v3.1.0: restoring an asset that was force-deleted answers
-            # HTTP 400 "Not found", and the whole batch fails with it. Say why instead of
-            # letting the traceback out.
+            # Anything that reaches here is not a dead id — the client isolates those. It
+            # is auth, the network, or a server error that outlived the retries.
             print(f"restore failed: {exc}", file=sys.stderr)
-            if settings.behavior.delete_mode == "permanent":
-                print(
-                    "delete_mode is 'permanent' — these originals were deleted with "
-                    "force=true and never entered the trash. Nothing can restore them; "
-                    "the only rollback is a backup of Postgres and the upload directory.",
-                    file=sys.stderr,
-                )
             return 1
-    print(f"restored {len(asset_ids)} asset(s) from the trash")
-    return 0
+    # The server's own count, not len(asset_ids): ids it never had are not restorations,
+    # and this line is the only number the operator gets.
+    print(f"restored {outcome.restored} asset(s) from the trash")
+    if not outcome.missing:
+        return 0
+    print(
+        f"{len(outcome.missing)} of {len(asset_ids)} id(s) are no longer in Immich's "
+        "database and could not be restored",
+        file=sys.stderr,
+    )
+    # Gated on the server's answer, not on the current `delete_mode`. The mode that
+    # removed these originals is not necessarily the mode this deployment runs today —
+    # on the deployment where this was measured it was already back to 'trash'.
+    print(
+        "An id disappears from that database when the original was deleted with "
+        "force=true — a run with delete_mode: permanent — or when Immich's trash was "
+        "emptied. Neither is undoable here; the only rollback for those originals is a "
+        "backup of Postgres and the upload directory.",
+        file=sys.stderr,
+    )
+    return RESTORE_INCOMPLETE
 
 
 def cmd_restore(args: argparse.Namespace) -> int:
@@ -733,8 +750,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
         async def collect() -> list[str]:
             async with JobStore(settings.database_path) as store:
-                jobs = await store.list_jobs(state=JobState.DONE, limit=10_000)
-                return [job.source_asset_id for job in jobs if job.new_asset_id]
+                return await store.replaced_source_asset_ids()
 
         ids.extend(asyncio.run(collect()))
     if not ids:
@@ -872,7 +888,15 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_parser.add_argument("--json", action="store_true", help="status: machine-readable")
     backfill_parser.set_defaults(func=cmd_backfill)
 
-    restore_parser = sub.add_parser("restore", help="pull originals back out of the trash")
+    restore_parser = sub.add_parser(
+        "restore",
+        help="pull originals back out of the trash",
+        # A rollback's exit code ends up in a script, so it is part of the interface.
+        epilog=(
+            "exit codes: 0 every id came back, 3 some ids are no longer in Immich's "
+            "database, 2 nothing selected, 1 the call to Immich failed"
+        ),
+    )
     restore_parser.add_argument("asset_id", nargs="*")
     restore_parser.add_argument(
         "--all-pending", action="store_true", help="restore every original this service trashed"

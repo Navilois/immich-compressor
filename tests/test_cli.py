@@ -7,8 +7,10 @@ publishes a port — which is the default deployment. What they say is the produ
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -25,6 +27,7 @@ from immich_compressor.__main__ import (
     build_parser,
 )
 from immich_compressor.config import Settings
+from immich_compressor.models import JobState
 from immich_compressor.store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 BASE = "http://immich-test:2283/api"
@@ -299,3 +302,148 @@ async def test_jobs_clamps_its_limit_like_the_endpoint_does(
 
     assert await _jobs(settings, status=None, limit=-1, as_json=True) == 0
     assert len(json.loads(capsys.readouterr().out)) == 1
+
+
+def _restore_args(*asset_ids: str, all_pending: bool = False) -> argparse.Namespace:
+    return argparse.Namespace(config=None, asset_id=list(asset_ids), all_pending=all_pending)
+
+
+def _seed_done_jobs(settings: Settings, asset_ids: list[str]) -> None:
+    """Completed jobs whose originals `restore --all-pending` would pull back."""
+
+    async def seed() -> None:
+        async with JobStore(settings.database_path) as store:
+            for asset_id in asset_ids:
+                await store.enqueue(asset_id, {}, delay_seconds=0)
+                await store.update(asset_id, state=JobState.DONE, new_asset_id=f"copy-{asset_id}")
+
+    asyncio.run(seed())
+
+
+def _trash_restore(gone: set[str]) -> Callable[[httpx.Request], httpx.Response]:
+    """`POST /trash/restore/assets` as measured on v3.1.0: one id the server cannot find
+    refuses the whole request, and the answer never says which id it was."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ids = json.loads(request.read())["ids"]
+        if any(asset_id in gone for asset_id in ids):
+            return httpx.Response(400, json={"message": "Not found or no asset.delete access"})
+        return httpx.Response(200, json={"count": len(ids)})
+
+    return handler
+
+
+@respx.mock
+def test_restore_all_pending_brings_back_what_it_can(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The bug: on a deployment that has ever run `delete_mode: permanent`, one batch of
+    every completed job's source id carries ids the server no longer has, and the whole
+    request is refused — so the one original that really was in the trash stayed there.
+    """
+    _seed_done_jobs(settings, ["a0", "a1", "a2", "a3"])
+    monkeypatch.setattr(main, "_load", lambda *_, **__: settings)
+    respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore({"a0", "a1", "a2"}))
+    empty = respx.post(f"{BASE}/trash/empty")
+
+    assert main.cmd_restore(_restore_args(all_pending=True)) == main.RESTORE_INCOMPLETE
+
+    captured = capsys.readouterr()
+    assert "restored 1 asset(s) from the trash" in captured.out
+    assert "3 of 4 id(s) are no longer in Immich's database" in captured.err
+    # Never the nuclear option — that endpoint drops assets the user deleted by hand.
+    assert empty.call_count == 0
+
+
+@respx.mock
+def test_restore_explains_missing_ids_whatever_the_current_delete_mode_is(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The explanation used to be gated on `delete_mode == "permanent"` — the mode the
+    deployment is in *now*, not the one that removed the originals. On the deployment
+    where this was measured the mode was already back to `trash`, so the operator got a
+    bare HTTP 400 and no reason for it.
+    """
+    assert settings.behavior.delete_mode == "trash"
+    monkeypatch.setattr(main, "_load", lambda *_, **__: settings)
+    respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore({"gone"}))
+
+    assert main.cmd_restore(_restore_args("gone")) == main.RESTORE_INCOMPLETE
+
+    err = capsys.readouterr().err
+    assert "delete_mode: permanent" in err
+    assert "backup of Postgres" in err
+
+
+@respx.mock
+def test_restore_all_pending_when_every_original_is_gone(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stage-4 deployment. Nothing can come back, and the command says exactly that
+    instead of reporting a batch failure."""
+    _seed_done_jobs(settings, ["a0", "a1", "a2"])
+    monkeypatch.setattr(main, "_load", lambda *_, **__: settings)
+    respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore({"a0", "a1", "a2"}))
+
+    assert main.cmd_restore(_restore_args(all_pending=True)) == main.RESTORE_INCOMPLETE
+
+    captured = capsys.readouterr()
+    assert "restored 0 asset(s) from the trash" in captured.out
+    assert "3 of 3 id(s) are no longer in Immich's database" in captured.err
+
+
+@respx.mock
+def test_restore_all_pending_exits_clean_when_the_server_knows_every_id(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `delete_mode: trash` deployment, which is the default and the common case."""
+    _seed_done_jobs(settings, ["a0", "a1", "a2"])
+    monkeypatch.setattr(main, "_load", lambda *_, **__: settings)
+    respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore(set()))
+
+    assert main.cmd_restore(_restore_args(all_pending=True)) == 0
+
+    captured = capsys.readouterr()
+    assert "restored 3 asset(s) from the trash" in captured.out
+    assert captured.err == ""
+
+
+@respx.mock
+def test_restore_reports_the_servers_count_rather_than_its_own(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Restoring an asset that is not in the trash is a harmless no-op on v3.1.0, and the
+    server counts only what it moved. Printing the number we sent overstated the rollback.
+    """
+    monkeypatch.setattr(main, "_load", lambda *_, **__: settings)
+    respx.post(f"{BASE}/trash/restore/assets").mock(return_value=httpx.Response(200, json={"count": 1}))
+
+    assert main.cmd_restore(_restore_args("trashed", "never-trashed")) == 0
+    assert "restored 1 asset(s) from the trash" in capsys.readouterr().out
+
+
+def test_restore_all_pending_with_an_empty_job_store(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Nothing selected is not a rollback that failed, and it never reaches the network."""
+    monkeypatch.setattr(main, "_load", lambda *_, **__: settings)
+
+    assert main.cmd_restore(_restore_args(all_pending=True)) == 2
+    assert "nothing to restore" in capsys.readouterr().err
+
+
+@respx.mock
+def test_restore_still_fails_loudly_when_the_call_itself_fails(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A wrong API key says nothing about any single asset. Reporting those ids as gone
+    would claim a perfectly intact library had been force-deleted."""
+    _seed_done_jobs(settings, ["a0", "a1"])
+    monkeypatch.setattr(main, "_load", lambda *_, **__: settings)
+    respx.post(f"{BASE}/trash/restore/assets").mock(return_value=httpx.Response(401, json={"message": "no"}))
+
+    assert main.cmd_restore(_restore_args(all_pending=True)) == 1
+
+    err = capsys.readouterr().err
+    assert "restore failed:" in err
+    assert "no longer in Immich's database" not in err

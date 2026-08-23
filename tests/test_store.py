@@ -309,3 +309,33 @@ async def test_service_state_round_trips_json(tmp_path: Path) -> None:
         assert await store.get_state("backfill_scan:VIDEO") == {"next_page": 8}
         await store.clear_state("backfill_scan:VIDEO")
         assert await store.get_state("backfill_scan:VIDEO") is None
+
+
+async def test_replaced_source_asset_ids_lists_only_completed_replacements(tmp_path: Path) -> None:
+    """The selection behind `restore --all-pending`.
+
+    Only originals this service actually replaced and removed: a job still waiting on its
+    retention window has not had its original taken away, and restoring it would touch an
+    asset nobody trashed.
+    """
+    async with JobStore(tmp_path / "s.db") as store:
+        for asset_id in ("done-1", "done-2", "still-pending", "failed", "done-without-copy"):
+            await store.enqueue(asset_id, PAYLOAD, delay_seconds=0)
+        await store.update("done-1", state=JobState.DONE, new_asset_id="copy-1")
+        await store.update("done-2", state=JobState.DONE, new_asset_id="copy-2")
+        await store.update("still-pending", state=JobState.PENDING_DELETE, new_asset_id="copy-3")
+        await store.update("failed", state=JobState.FAILED)
+        await store.update("done-without-copy", state=JobState.DONE)
+
+        assert await store.replaced_source_asset_ids() == ["done-1", "done-2"]
+
+
+async def test_replaced_source_asset_ids_is_not_capped(tmp_path: Path) -> None:
+    """It used to run through `list_jobs(limit=10_000)`. A rollback that silently leaves
+    the oldest originals in the trash is the failure nobody would notice."""
+    async with JobStore(tmp_path / "s.db") as store:
+        for index in range(250):
+            await store.enqueue(f"a{index:03d}", PAYLOAD, delay_seconds=0)
+            await store.update(f"a{index:03d}", state=JobState.DONE, new_asset_id=f"c{index:03d}")
+
+        assert len(await store.replaced_source_asset_ids()) == 250
