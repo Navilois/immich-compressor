@@ -289,7 +289,6 @@ def test_missing_tags_is_quiet_when_they_all_exist() -> None:
     assert version_script.missing_tags(["1.2.0", "1.1.1"], ALL_TAGS) == []
 
 
-
 # --- publishing an old tag ----------------------------------------------------------
 
 
