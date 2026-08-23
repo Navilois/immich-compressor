@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`restore` no longer warns that it cannot do the thing it is doing.** Under
+  `delete_mode: permanent` the command opened with *"originals removed by this service were
+  not trashed and cannot be restored"* — printed before a single id had been tried, gated on
+  the mode the deployment is in *now* rather than the one that removed anything, and printed
+  by runs that then restored every original they were given. On a live stage-4 deployment
+  that meant a successful rollback announced itself as a refusal. The accurate version is
+  still there and unchanged: after the request, `restore` names how many ids the server no
+  longer has and why, from the server's own answer.
+
 ### Documentation
 
 - **The `force: true` delete was re-verified against a live library**, on a real stage-4 run

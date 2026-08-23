@@ -376,6 +376,52 @@ def test_restore_explains_missing_ids_whatever_the_current_delete_mode_is(
 
 
 @respx.mock
+def test_restore_under_permanent_says_nothing_when_every_id_comes_back(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`delete_mode: permanent` used to print a blanket warning before a single id had been
+    tried — "originals removed by this service were not trashed and cannot be restored" —
+    gated on the mode the deployment is in *now*. A run that then restored every original
+    printed it anyway, so a command that worked read like one that had refused. Measured on
+    a live stage-4 deployment on 2026-08-23, on the run that brought a trashed original back.
+
+    What is true in that warning is said by `_restore` afterwards, from the server's answer,
+    and only about ids the server actually refused.
+    """
+    settings.behavior.trash_original = True
+    settings.behavior.delete_mode = "permanent"
+    _seed_done_jobs(settings, ["a0", "a1"])
+    monkeypatch.setattr(main, "_load", lambda *_, **__: settings)
+    respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore(set()))
+
+    assert main.cmd_restore(_restore_args(all_pending=True)) == 0
+
+    captured = capsys.readouterr()
+    assert "restored 2 asset(s) from the trash" in captured.out
+    assert captured.err == ""
+
+
+@respx.mock
+def test_restore_under_permanent_still_explains_the_ids_that_are_gone(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Dropping the pre-emptive warning must not cost the accurate one: a stage-4
+    deployment that really has lost originals still gets told which ids and why."""
+    settings.behavior.trash_original = True
+    settings.behavior.delete_mode = "permanent"
+    _seed_done_jobs(settings, ["a0", "a1"])
+    monkeypatch.setattr(main, "_load", lambda *_, **__: settings)
+    respx.post(f"{BASE}/trash/restore/assets").mock(side_effect=_trash_restore({"a1"}))
+
+    assert main.cmd_restore(_restore_args(all_pending=True)) == main.RESTORE_INCOMPLETE
+
+    captured = capsys.readouterr()
+    assert "restored 1 asset(s) from the trash" in captured.out
+    assert "1 of 2 id(s) are no longer in Immich's database" in captured.err
+    assert "backup of Postgres" in captured.err
+
+
+@respx.mock
 def test_restore_all_pending_when_every_original_is_gone(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
