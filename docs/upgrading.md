@@ -11,7 +11,7 @@ and minor releases arrive that way and a breaking change never does. The
 
 Job state lives in a volume and survives. Schema changes are applied automatically on open.
 
-## Unreleased
+## 1.2.0 → 1.3.0
 
 ### `restore --all-pending` works on a deployment that has run `delete_mode: permanent`
 
