@@ -62,10 +62,19 @@ commit.
 
 Conventional commits, English, imperative: `feat(hardware): …`, `fix(config): …`,
 `docs: …`, `chore(ci): …`. One branch per topic, merged into `main`. Scopes come from what
-is already in `git log`, not from invention:
+is already in `git log`, not from invention — `scripts/commit-scopes.txt` is that list, and
+`scripts/check-commits.py` enforces it along with the type, the length and the imperative
+mood. `make commits` runs it over the branch; CI runs it on every pull request.
+
+A new scope is a deliberate line added to that file in the same commit as the change that
+needs it. That is the point: `fix(test)` and `fix(tests)` are both in this history, and
+they were always the same scope.
+
+Install the hook once, and the check runs before the commit exists rather than after it has
+been pushed:
 
 ```bash
-git log --pretty='%s' -200 | grep -oE '^[a-z]+\(([^)]+)\)' | sort | uniq -c | sort -rn
+make hooks
 ```
 
 Atomic commits: implementation and its test together, two unrelated changes in two

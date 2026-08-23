@@ -7,6 +7,7 @@
 #   make image   build the container image locally
 #   make docs    regenerate the generated documentation and the config JSON schema
 #   make check   everything CI runs, in one go
+#   make hooks   install the commit-msg hook that checks the subject convention
 
 PY      := .venv/bin/python
 VERSION := $(shell sed -n 's/^__version__ = "\(.*\)"$$/\1/p' src/immich_compressor/__init__.py)
@@ -14,7 +15,7 @@ IMAGE   ?= immich-compressor:$(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
 
 .DEFAULT_GOAL := help
-.PHONY: help dev lint language links version-check format test test-live image image-multiarch docs docs-check compose-check clean
+.PHONY: help dev lint language links version-check commits hooks format test test-live image image-multiarch docs docs-check compose-check clean
 
 help:
 	@sed -n 's/^#   //p' $(MAKEFILE_LIST) | head -8
@@ -43,6 +44,20 @@ links: $(PY)
 # __version__, the CHANGELOG sections and the upgrading notes still agree.
 version-check: $(PY)
 	$(PY) scripts/version.py check
+
+# The commit subjects on this branch. Empty, and so trivially green, on main.
+commits: $(PY)
+	$(PY) scripts/check-commits.py
+
+# The same check before the commit exists. Fixing a subject afterwards means rewriting a
+# branch that has already been pushed, and this project does not force-push — so the
+# useful place for this check is the commit itself, not the pull request.
+HOOK := $(shell git rev-parse --git-path hooks)/commit-msg
+
+hooks:
+	@printf '#!/bin/sh\nexec python3 "$$(git rev-parse --show-toplevel)/scripts/check-commits.py" --message "$$1"\n' > $(HOOK)
+	@chmod +x $(HOOK)
+	@echo "commit-msg hook installed at $(HOOK)"
 
 format: $(PY)
 	$(PY) -m ruff check --fix .
@@ -78,7 +93,7 @@ compose-check:
 	env $(COMPOSE_ENV) docker compose -f docker-compose.yaml -f docker-compose.gpu-nvidia.yaml config -q
 	env $(COMPOSE_ENV) docker compose -f docker-compose.yaml -f docker-compose.override.example.yaml config -q
 
-check: lint test docs-check compose-check
+check: lint test docs-check compose-check commits
 
 clean:
 	rm -rf .venv .pytest_cache .ruff_cache build dist src/*.egg-info
