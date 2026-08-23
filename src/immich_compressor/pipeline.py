@@ -223,6 +223,25 @@ def check_guards(asset: WebhookAsset, settings: Settings) -> None:
         )
 
 
+def preflight(asset: WebhookAsset, settings: Settings) -> SkipReason | None:
+    """The verdict :func:`check_guards` would reach, as a value instead of an exception.
+
+    The backfill asks about assets it is *considering*, which is the same question the
+    worker asks about a job — so it asks the same function. A second, "cheap" copy of the
+    guard list in the CLI is how a scanner and a worker end up disagreeing about what is
+    worth encoding, and the disagreement would show up as jobs skipped the moment they are
+    claimed.
+
+    Payload-decidable guards only, by construction: the named-people check and the
+    compressor marker each cost a request per asset and stay where they are.
+    """
+    try:
+        check_guards(asset, settings)
+    except SkipJob as skip:
+        return skip.reason
+    return None
+
+
 def build_marker(
     *,
     source_id: str,

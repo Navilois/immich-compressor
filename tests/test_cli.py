@@ -16,70 +16,125 @@ import pytest
 import respx
 
 import immich_compressor.__main__ as main
-from immich_compressor.__main__ import _backfill, _jobs, _report, _reprocess
+from immich_compressor.__main__ import (
+    _backfill_run,
+    _backfill_status,
+    _jobs,
+    _report,
+    _reprocess,
+    build_parser,
+)
 from immich_compressor.config import Settings
 from immich_compressor.store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 BASE = "http://immich-test:2283/api"
 
 
-def _asset(asset_id: str, asset_type: str, name: str) -> dict[str, Any]:
-    return {"id": asset_id, "type": asset_type, "originalFileName": name, "originalPath": f"/x/{name}"}
+def _search_item(asset_id: str, asset_type: str, name: str, size: int = 4_000_000_000) -> dict[str, Any]:
+    """One `POST /search/metadata` result, as the backfill scan sees it."""
+    return {
+        "id": asset_id,
+        "type": asset_type,
+        "originalFileName": name,
+        "originalPath": f"/x/{name}",
+        "createdAt": "2019-04-02T10:00:00.000Z",
+        "exifInfo": {"fileSizeInByte": size},
+    }
+
+
+def test_backfill_without_a_mode_still_means_run() -> None:
+    """`backfill --type VIDEO --limit 50 --apply` is in every doc and in muscle memory.
+
+    The inventory added `scan` and `status` next to it; it did not move the command
+    anybody already knows.
+    """
+    args = build_parser().parse_args(["backfill", "--type", "VIDEO", "--limit", "50", "--apply"])
+    assert (args.mode, args.type, args.limit, args.apply) == ("run", "VIDEO", 50, True)
+    assert build_parser().parse_args(["backfill", "scan", "--rescan"]).mode == "scan"
 
 
 @respx.mock
-async def test_backfill_queues_only_the_type_that_was_asked_for(
+async def test_backfill_run_scans_first_when_there_is_no_inventory(
     settings: Settings, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Immich ignores the `type` field of POST /search/large-assets.
-
-    Measured against a live v3.1.0: IMAGE and VIDEO answer with the identical set of
-    videos. Without the client-side check `backfill --type IMAGE` queues videos — invisible
-    while dry_run is on, and destructive from stage 3 on.
-    """
-    respx.post(f"{BASE}/search/large-assets").mock(
+    """Two phases are honest about the cost; nobody should have to read a manual for job one."""
+    respx.post(f"{BASE}/search/metadata").mock(
         return_value=httpx.Response(
             200,
-            json=[
-                _asset("v1", "VIDEO", "2022_06_28_07_25_25.mp4"),
-                _asset("i1", "IMAGE", "DSC_0001.jpg"),
-                _asset("v2", "VIDEO", "20231125_104744.mp4"),
-            ],
+            json={
+                "assets": {
+                    "items": [_search_item("v1", "VIDEO", "holiday.mp4")],
+                    "total": 1,
+                    "nextPage": None,
+                }
+            },
         )
     )
 
-    assert await _backfill(settings, "IMAGE", limit=5, apply=True) == 0
-
-    async with JobStore(settings.database_path) as store:
-        queued = {job.source_asset_id for job in await store.list_jobs()}
-    assert queued == {"i1"}
+    assert await _backfill_run(settings, "VIDEO", 10, "size", False, True, 1000) == 0
 
     out = capsys.readouterr().out
-    assert "scanned 1 assets, queued 1" in out
-    assert "ignored 2 result(s) that were not IMAGE" in out
+    assert "no inventory for VIDEO yet — scanning first" in out
+    assert "[dry] would queue v1" in out
+    assert "pass --apply" in out
 
 
 @respx.mock
-async def test_backfill_counts_only_what_it_looked_at(
+async def test_backfill_run_says_that_dry_run_will_swallow_the_jobs(
     settings: Settings, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`--limit 2` means two assets, and the closing line says two.
-
-    It used to say three: the counter was incremented once more to notice it had gone past
-    the limit, and then reported that number.
-    """
-    respx.post(f"{BASE}/search/large-assets").mock(
+    """Queueing 500 jobs that all end as `skipped: dry_run` looks like a working backfill
+    right up to the moment somebody reads the report."""
+    settings.behavior.dry_run = True
+    respx.post(f"{BASE}/search/metadata").mock(
         return_value=httpx.Response(
-            200, json=[_asset(f"v{index}", "VIDEO", f"clip{index}.mp4") for index in range(5)]
+            200,
+            json={"assets": {"items": [_search_item("v1", "VIDEO", "holiday.mp4")], "nextPage": None}},
         )
     )
 
-    assert await _backfill(settings, "VIDEO", limit=2, apply=False) == 0
+    assert await _backfill_run(settings, "VIDEO", 10, "size", False, True, 1000) == 0
 
     out = capsys.readouterr().out
-    assert "scanned 2 assets, queued 0 (dry run — pass --apply)" in out
-    assert out.count("[dry] would queue") == 2
-    assert "ignored" not in out
+    assert "behavior.dry_run is on" in out
+    assert "requeue --reason dry_run --apply" in out
+
+
+@respx.mock
+async def test_backfill_status_reports_what_is_left(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    respx.post(f"{BASE}/search/metadata").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "assets": {
+                    "items": [
+                        _search_item("v1", "VIDEO", "holiday.mp4"),
+                        _search_item("v2", "VIDEO", "tiny.mp4", 10),
+                    ],
+                    "nextPage": None,
+                }
+            },
+        )
+    )
+    assert await _backfill_run(settings, "VIDEO", 10, "size", False, True, 1000) == 0
+    capsys.readouterr()
+
+    assert await _backfill_status(settings, as_json=False) == 0
+
+    out = capsys.readouterr().out
+    assert "VIDEO: 2 scanned" in out
+    assert "1 candidate(s)" in out
+    assert "rejected: too_small 1" in out
+    assert "last complete walk" in out
+
+
+async def test_backfill_status_says_so_when_nothing_was_scanned(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert await _backfill_status(settings, as_json=False) == 0
+    assert "nothing scanned yet" in capsys.readouterr().out
 
 
 async def test_report_leads_with_the_webhook_counters(

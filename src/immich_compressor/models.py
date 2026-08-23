@@ -268,6 +268,23 @@ class RejectReason(StrEnum):
     PAUSED = "paused"
 
 
+class BackfillVerdict(StrEnum):
+    """Inventory verdicts that are *not* :class:`SkipReason`s.
+
+    The ``verdict`` column of ``backfill_candidates`` holds a :class:`SkipReason` for
+    everything the guards decide from the scanned payload, and one of these two for the
+    states that only exist between a scan and a queue run. Both are written by
+    ``backfill run``, never by the pipeline, and neither ever reaches a job row.
+    """
+
+    # Gone by the time the queue run looked: deleted, or replaced from the webhook side
+    # while the inventory sat there. An inventory is a snapshot, and this is how it ages.
+    MISSING = "missing"
+    # A job row already exists, so `store.enqueue` would be a no-op. Not an error — it is
+    # what a scan of a library that is already half worked through looks like.
+    ALREADY_KNOWN = "already_known"
+
+
 TERMINAL_STATES: frozenset[JobState] = frozenset({JobState.DONE, JobState.SKIPPED, JobState.FAILED})
 
 
@@ -308,6 +325,30 @@ class Job(BaseModel):
     updated_at: datetime
     run_after: datetime
     delete_after: datetime | None = None
+
+
+class BackfillCandidate(BaseModel):
+    """A row of the ``backfill_candidates`` table — one asset a scan looked at.
+
+    ``verdict`` is ``None`` exactly when the guards would let the asset through; that is
+    what makes a row a candidate. Rejected rows are kept because they are what
+    ``backfill status`` counts, but they carry no ``payload``: the payload is the only
+    expensive column and an asset the guards already refused is never enqueued.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    asset_type: str
+    size_bytes: int = 0
+    filename: str = ""
+    # A `SkipReason` or a `BackfillVerdict`, kept as a plain string: the two enums share
+    # this column and a row written by a newer version must not fail to load on an older
+    # one. Nothing branches on the value, it is counted and printed.
+    verdict: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    scanned_at: datetime
+    queued_at: datetime | None = None
 
 
 class UpdateAssetFields(BaseModel):

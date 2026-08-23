@@ -17,7 +17,7 @@ from typing import Any, Self
 
 import aiosqlite
 
-from .models import TERMINAL_STATES, Job, JobState, PauseState, SkipReason
+from .models import TERMINAL_STATES, BackfillCandidate, Job, JobState, PauseState, SkipReason
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,25 @@ CREATE TABLE IF NOT EXISTS counters (
     value      INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+
+-- What `backfill scan` found, so `backfill run` can queue from a plan instead of from
+-- whatever one search request happened to answer. Rows the guards already rejected are
+-- kept — they are what `backfill status` counts — but only candidates carry a payload.
+-- Not part of `jobs`: a job row is a decision this service has taken and is immune to
+-- replay forever, and an inventory entry must stay re-scannable and re-orderable.
+CREATE TABLE IF NOT EXISTS backfill_candidates (
+    asset_id   TEXT PRIMARY KEY,
+    asset_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    filename   TEXT NOT NULL DEFAULT '',
+    verdict    TEXT,
+    payload    TEXT NOT NULL DEFAULT '{}',
+    scanned_at TEXT NOT NULL,
+    queued_at  TEXT
+);
+-- Covers the one query that runs per queue run: candidates of a type, biggest first.
+CREATE INDEX IF NOT EXISTS idx_backfill_pick
+    ON backfill_candidates (asset_type, verdict, queued_at, size_bytes DESC);
 """
 
 # The single `service_state` key the surge breaker owns.
@@ -75,6 +94,8 @@ WEBHOOKS_REJECTED = "webhooks_rejected"
 _SCHEMA_POST_MIGRATION = """
 CREATE INDEX IF NOT EXISTS idx_jobs_lane ON jobs (state, asset_type, run_after);
 """
+
+_CANDIDATE_COLUMNS = "asset_id, asset_type, size_bytes, filename, verdict, payload, scanned_at, queued_at"
 
 _COLUMNS = (
     "source_asset_id, state, skip_reason, new_asset_id, new_checksum, orig_bytes, new_bytes, "
@@ -446,6 +467,174 @@ class JobStore:
             logger.warning("service_state.%s is unreadable; treating the service as paused", _PAUSE_KEY)
             return PauseState(reason="unreadable latch in the database", since=_now())
 
+    # ---------------------------------------------------- service state, generally
+
+    async def get_state(self, key: str) -> dict[str, Any] | None:
+        """Read one ``service_state`` row as JSON, or ``None`` when it is not set.
+
+        The table has held exactly one hand-written key since it was introduced; this is
+        the generic pair for everything that only needs a small JSON blob to outlive the
+        process — the backfill scan cursor being the first.
+        """
+        async with self._conn.execute("SELECT value FROM service_state WHERE key = ?", (key,)) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row["value"])
+        except ValueError:  # pragma: no cover - only a hand-edited database gets here
+            logger.warning("service_state.%s is unreadable; ignoring it", key)
+            return None
+        return value if isinstance(value, dict) else None
+
+    async def set_state(self, key: str, value: dict[str, Any]) -> None:
+        await self._conn.execute(
+            "INSERT INTO service_state (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, json.dumps(value, separators=(",", ":")), _iso(_now())),
+        )
+        await self._conn.commit()
+
+    async def clear_state(self, key: str) -> None:
+        await self._conn.execute("DELETE FROM service_state WHERE key = ?", (key,))
+        await self._conn.commit()
+
+    # --------------------------------------------------------- backfill inventory
+
+    async def record_candidates(self, candidates: Sequence[BackfillCandidate]) -> int:
+        """Upsert one scanned page. Returns how many rows were written.
+
+        ``queued_at`` is deliberately absent from the update list: a re-scan refreshes what
+        the server says about an asset, and must not forget that a queue run already
+        reached it.
+        """
+        if not candidates:
+            return 0
+        await self._conn.executemany(
+            f"INSERT INTO backfill_candidates ({_CANDIDATE_COLUMNS}) "  # noqa: S608 - module constant
+            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL) "
+            "ON CONFLICT(asset_id) DO UPDATE SET "
+            "asset_type = excluded.asset_type, size_bytes = excluded.size_bytes, "
+            "filename = excluded.filename, verdict = excluded.verdict, "
+            "payload = excluded.payload, scanned_at = excluded.scanned_at",
+            [
+                (
+                    candidate.asset_id,
+                    candidate.asset_type,
+                    candidate.size_bytes,
+                    candidate.filename,
+                    candidate.verdict,
+                    json.dumps(candidate.payload, separators=(",", ":")),
+                    _iso(candidate.scanned_at),
+                )
+                for candidate in candidates
+            ],
+        )
+        await self._conn.commit()
+        return len(candidates)
+
+    async def pick_candidates(
+        self,
+        *,
+        asset_types: Sequence[str] | None = None,
+        order: str = "size",
+        limit: int = 50,
+    ) -> list[BackfillCandidate]:
+        """The rows a queue run may enqueue: guards passed, not queued yet.
+
+        ``order`` is ``size`` (biggest first, which is where the savings are) or
+        ``scanned`` (the order the library came back in).
+        """
+        clauses = ["verdict IS NULL", "queued_at IS NULL"]
+        params: list[Any] = []
+        if asset_types:
+            clauses.append(f"asset_type IN ({', '.join('?' for _ in asset_types)})")
+            params.extend(asset_types)
+        ordering = "size_bytes DESC, asset_id" if order == "size" else "scanned_at ASC, asset_id"
+        params.append(max(limit, 0))
+        async with self._conn.execute(
+            f"SELECT {_CANDIDATE_COLUMNS} FROM backfill_candidates "  # noqa: S608 - generated from constants
+            f"WHERE {' AND '.join(clauses)} ORDER BY {ordering} LIMIT ?",
+            params,
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_candidate(row) for row in rows]
+
+    async def mark_candidate_queued(self, asset_id: str) -> None:
+        """Record that this asset made it into the job store."""
+        await self._conn.execute(
+            "UPDATE backfill_candidates SET queued_at = ? WHERE asset_id = ?",
+            (_iso(_now()), asset_id),
+        )
+        await self._conn.commit()
+
+    async def set_candidate_verdict(self, asset_id: str, verdict: str) -> None:
+        """Downgrade a candidate the live re-check refused. Also frees its payload.
+
+        Called when the world moved between the scan and the queue run — the asset is
+        gone, in the trash, or already has a job. The payload is dropped with it: nothing
+        will enqueue this row again, so keeping a kilobyte of JSON per asset would be
+        pure ballast in a database that lives next to the photos it processes.
+        """
+        await self._conn.execute(
+            "UPDATE backfill_candidates SET verdict = ?, payload = '{}' WHERE asset_id = ?",
+            (verdict, asset_id),
+        )
+        await self._conn.commit()
+
+    async def clear_inventory(self, asset_types: Sequence[str] | None = None) -> int:
+        """Drop the inventory, entirely or for one type. Returns the rows removed."""
+        if asset_types:
+            placeholders = ", ".join("?" for _ in asset_types)
+            cursor = await self._conn.execute(
+                f"DELETE FROM backfill_candidates WHERE asset_type IN ({placeholders})",  # noqa: S608
+                tuple(asset_types),
+            )
+        else:
+            cursor = await self._conn.execute("DELETE FROM backfill_candidates")
+        await self._conn.commit()
+        return cursor.rowcount
+
+    async def inventory_stats(self) -> dict[str, Any]:
+        """What the scan knows, per asset type, shaped for printing and for ``--json``."""
+        async with self._conn.execute(
+            "SELECT asset_type, COUNT(*) AS scanned, "
+            "COALESCE(SUM(size_bytes), 0) AS scanned_bytes, "
+            "COALESCE(SUM(verdict IS NULL AND queued_at IS NULL), 0) AS candidates, "
+            "COALESCE(SUM(CASE WHEN verdict IS NULL AND queued_at IS NULL THEN size_bytes ELSE 0 END), 0) "
+            "AS candidate_bytes, "
+            "COALESCE(SUM(queued_at IS NOT NULL), 0) AS queued, "
+            "MAX(scanned_at) AS last_scan "
+            "FROM backfill_candidates GROUP BY asset_type"
+        ) as cursor:
+            per_type = {
+                row["asset_type"]: {
+                    "scanned": int(row["scanned"]),
+                    "scanned_bytes": int(row["scanned_bytes"]),
+                    "candidates": int(row["candidates"]),
+                    "candidate_bytes": int(row["candidate_bytes"]),
+                    "queued": int(row["queued"]),
+                    "last_scan": row["last_scan"],
+                    "by_verdict": {},
+                }
+                for row in await cursor.fetchall()
+            }
+        async with self._conn.execute(
+            "SELECT asset_type, verdict, COUNT(*) AS n FROM backfill_candidates "
+            "WHERE verdict IS NOT NULL GROUP BY asset_type, verdict"
+        ) as cursor:
+            for row in await cursor.fetchall():
+                entry = per_type.get(row["asset_type"])
+                if entry is not None:
+                    entry["by_verdict"][row["verdict"]] = int(row["n"])
+        return {
+            "types": per_type,
+            "scanned": sum(entry["scanned"] for entry in per_type.values()),
+            "candidates": sum(entry["candidates"] for entry in per_type.values()),
+            "candidate_bytes": sum(entry["candidate_bytes"] for entry in per_type.values()),
+            "queued": sum(entry["queued"] for entry in per_type.values()),
+        }
+
     async def terminal_count(self) -> int:
         placeholders = ", ".join("?" for _ in TERMINAL_STATES)
         async with self._conn.execute(
@@ -461,6 +650,23 @@ def _asset_type_from_payload(payload: dict[str, Any]) -> str | None:
     asset = payload.get("data", {}).get("asset", {}) if isinstance(payload.get("data"), dict) else {}
     asset_type = asset.get("type") if isinstance(asset, dict) else None
     return asset_type if isinstance(asset_type, str) and asset_type else None
+
+
+def _row_to_candidate(row: aiosqlite.Row) -> BackfillCandidate:
+    try:
+        payload = json.loads(row["payload"])
+    except ValueError:  # pragma: no cover - only a hand-edited database gets here
+        payload = {}
+    return BackfillCandidate(
+        asset_id=row["asset_id"],
+        asset_type=row["asset_type"],
+        size_bytes=int(row["size_bytes"]),
+        filename=row["filename"],
+        verdict=row["verdict"],
+        payload=payload if isinstance(payload, dict) else {},
+        scanned_at=_parse(row["scanned_at"]) or _now(),
+        queued_at=_parse(row["queued_at"]),
+    )
 
 
 def _row_to_job(row: aiosqlite.Row) -> Job:

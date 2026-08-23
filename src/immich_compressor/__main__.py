@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__, backfill
 from .api import ImmichClient, ImmichError
 from .config import ConfigError, Settings, load_settings
 from .encoder import (
@@ -31,7 +31,7 @@ from .encoder import (
     verify_metadata,
 )
 from .hardware import HardwareReport, apply_to_settings, format_report
-from .models import JobState, SkipReason
+from .models import JobState, PauseState, SkipReason
 from .setup_cmd import (
     DEFAULT_BASE_URL,
     DEFAULT_NETWORK,
@@ -316,12 +316,14 @@ async def _report(settings: Settings, as_json: bool) -> int:
         jobs = await store.list_jobs(limit=1000)
         latched = await store.pause_state()
         counters = await store.counters()
+        inventory = await store.inventory_stats()
     if as_json:
         stats["paused"] = {"since": latched.since.isoformat(), "reason": latched.reason} if latched else None
         stats["webhooks"] = {
             "received": counters[WEBHOOKS_RECEIVED],
             "rejected": counters[WEBHOOKS_REJECTED],
         }
+        stats["backfill"] = inventory
         print(json.dumps(stats, indent=2))
         return 0
     print("=== immich-compressor report ===")
@@ -348,6 +350,14 @@ async def _report(settings: Settings, as_json: bool) -> int:
     # a word to show a user — least of all in the first command the quickstart runs.
     ratio = stats["average_ratio"]
     print(f"saved: {saved_mb:.1f} MiB (average ratio {ratio if ratio is not None else '—'})")
+    # Only once a scan has run: on an installation that has never backfilled, a line of
+    # zeroes would be one more number to explain rather than one fewer.
+    if inventory["scanned"]:
+        print(
+            f"backfill: {inventory['candidates']} candidate(s) waiting "
+            f"({_human_bytes(inventory['candidate_bytes'])}), {inventory['queued']} queued so far"
+            " — `immich-compressor backfill status`"
+        )
     failed = [job for job in jobs if job.state == JobState.FAILED]
     if failed:
         print(f"failed jobs ({len(failed)}):")
@@ -480,19 +490,50 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return asyncio.run(_resume(settings, args.apply))
 
 
-async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool) -> int:
-    """Queue existing large assets, as if a webhook had arrived for each.
+def _human_bytes(value: int) -> str:
+    """A byte count in the unit a person would use. Binary, like every other size here."""
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if abs(size) < 1024.0:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} TiB"
 
-    The type filter is applied here rather than trusted to the server. Measured against a
-    live v3.1.0: ``POST /search/large-assets`` ignores the ``type`` field in the request
-    body — ``IMAGE`` and ``VIDEO`` answer with the identical set of videos — and ignores
-    ``size`` as well. Without a client-side check the stills backfill is not merely broken
-    but unreachable, and anybody who thinks they are testing 50 photos re-encodes 50
-    videos instead. Harmless in stage 1; not harmless from stage 3 on.
+
+def _verdict_line(counts: dict[str, int]) -> str:
+    """`too_small 3401 · unsupported_format 402`, biggest group first."""
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return " · ".join(f"{name} {count}" for name, count in ordered)
+
+
+def _backfill_warnings(settings: Settings, latched: PauseState | None) -> list[str]:
+    """What a queue run has to say before it queues anything.
+
+    Both of these turn a successful-looking run into a confusing one an hour later: jobs
+    that all end up `skipped: dry_run`, or jobs that never move at all because the surge
+    breaker is latched.
     """
-    queued = 0
-    seen = 0
-    foreign = 0
+    lines: list[str] = []
+    if latched is not None:
+        lines.append(
+            f"the service is PAUSED since {latched.since.isoformat()} — queued jobs will "
+            "sit until `immich-compressor resume --apply`"
+        )
+    if settings.behavior.dry_run:
+        lines.append(
+            "behavior.dry_run is on: every job queued here ends as `skipped: dry_run`. "
+            "After going live, `immich-compressor requeue --reason dry_run --apply` "
+            "puts them back in the queue"
+        )
+    return lines
+
+
+async def _backfill_scan(settings: Settings, asset_type: str | None, rescan: bool, page_size: int) -> int:
+    """Walk the library and write down what could be compressed."""
+    types = backfill.resolve_types(settings, asset_type)
+    if not types:
+        print("no asset types are enabled — see behavior.enabled_types", file=sys.stderr)
+        return 1
     async with (
         ImmichClient(
             settings.immich.base_url,
@@ -501,45 +542,155 @@ async def _backfill(settings: Settings, asset_type: str, limit: int, apply: bool
         ) as client,
         JobStore(settings.database_path) as store,
     ):
-        async for item in client.search_large_assets(
-            min_file_size=settings.behavior.min_savings_bytes,
-            asset_type=asset_type,
-            size=min(limit, 200),
-        ):
-            if item.get("type") != asset_type:
-                foreign += 1
-                continue
-            if seen >= limit:
-                break
-            seen += 1
-            asset_id = item.get("id")
-            if not asset_id:
-                continue
-            if not apply:
-                print(f"[dry] would queue {asset_id} ({item.get('originalFileName')})")
-                continue
-            payload = {
-                "type": "AssetV1",
-                "trigger": "Backfill",
-                "data": {"asset": item},
-            }
-            if await store.enqueue(asset_id, payload, delay_seconds=0):
-                queued += 1
-    print(f"scanned {seen} assets, queued {queued}" + ("" if apply else " (dry run — pass --apply)"))
-    # Said out loud, because silence here looks like an empty library rather than a filter
-    # the server declined to apply.
-    if foreign:
-        print(
-            f"  ignored {foreign} result(s) that were not {asset_type}: this Immich answers "
-            "/search/large-assets without applying the type filter"
+        summaries = await backfill.scan(
+            client, store, settings, asset_types=types, page_size=page_size, rescan=rescan
         )
+    for summary in summaries:
+        if summary.resumed_from > 1:
+            print(f"{summary.asset_type}: resumed at page {summary.resumed_from}")
+        print(
+            f"{summary.asset_type}: {summary.seen} asset(s) in {summary.pages} page(s) — "
+            f"{summary.candidates} candidate(s) ({_human_bytes(summary.candidate_bytes)}), "
+            f"{summary.recorded - summary.candidates} rejected by the guards"
+        )
+        if summary.by_verdict:
+            print(f"  rejected: {_verdict_line(summary.by_verdict)}")
+        if summary.foreign:
+            print(
+                f"  ignored {summary.foreign} result(s) that were not {summary.asset_type}: "
+                "this Immich answers /search/metadata without applying the type filter"
+            )
+        if summary.stopped_because:
+            print(f"  incomplete: {summary.stopped_because}")
+        elif not summary.completed:  # pragma: no cover - every exit sets one or the other
+            print("  incomplete")
+    print("\nnext: `immich-compressor backfill run --limit 50` (dry) to see what it would queue")
+    return 0
+
+
+async def _backfill_run(
+    settings: Settings,
+    asset_type: str | None,
+    limit: int,
+    order: str,
+    apply: bool,
+    verify: bool,
+    page_size: int,
+) -> int:
+    """Queue candidates out of the inventory, scanning first when there is none."""
+    types = backfill.resolve_types(settings, asset_type)
+    if not types:
+        print("no asset types are enabled — see behavior.enabled_types", file=sys.stderr)
+        return 1
+    async with (
+        ImmichClient(
+            settings.immich.base_url,
+            settings.immich.api_key.get_secret_value(),
+            timeout_s=settings.immich.timeout_s,
+        ) as client,
+        JobStore(settings.database_path) as store,
+    ):
+        stats = await store.inventory_stats()
+        unscanned = [name for name in types if name not in stats["types"]]
+        if unscanned:
+            # The two-step is honest about what it costs, but nobody should have to read
+            # the manual to get the first job queued.
+            print(f"no inventory for {', '.join(unscanned)} yet — scanning first")
+            for summary in await backfill.scan(client, store, settings, asset_types=unscanned):
+                print(
+                    f"{summary.asset_type}: {summary.seen} asset(s) scanned, "
+                    f"{summary.candidates} candidate(s) ({_human_bytes(summary.candidate_bytes)})"
+                )
+        for line in _backfill_warnings(settings, await store.pause_state()):
+            print(f"note: {line}")
+        summary = await backfill.queue_candidates(
+            client,
+            store,
+            settings,
+            asset_types=types,
+            limit=limit,
+            order=order,
+            apply=apply,
+            verify=verify,
+        )
+        remaining = await store.inventory_stats()
+    left = sum(entry["candidates"] for name, entry in remaining["types"].items() if name in types)
+    for queued in summary.queued[:20]:
+        prefix = "queued" if apply else "[dry] would queue"
+        print(f"{prefix} {queued.asset_id}  {queued.filename}  {_human_bytes(queued.size_bytes)}")
+    if len(summary.queued) > 20:
+        print(f"  ... and {len(summary.queued) - 20} more")
+    if not summary.queued:
+        print("nothing to queue: no candidate is waiting for these types")
+        print("  `immich-compressor backfill status` says what the scan found, and why")
+        return 0
+    if apply:
+        print(
+            f"\nqueued {len(summary.queued)} job(s), {_human_bytes(summary.queued_bytes)} of "
+            f"originals — {left} candidate(s) left"
+        )
+    else:
+        print(f"\n{len(summary.queued)} job(s) would be queued out of {left} candidate(s) — pass --apply")
+    if summary.downgraded:
+        print(f"  dropped by the live re-check: {_verdict_line(summary.downgraded)}")
+    if summary.exhausted and apply:
+        print("  the inventory is empty for these types — `backfill scan` again for what is new")
+    return 0
+
+
+async def _backfill_status(settings: Settings, as_json: bool) -> int:
+    """What the scan found, per type, and how much of it is still waiting."""
+    async with JobStore(settings.database_path) as store:
+        stats = await store.inventory_stats()
+        cursors = {
+            asset_type: await store.get_state(backfill.scan_state_key(asset_type))
+            for asset_type in sorted(set(stats["types"]) | set(settings.behavior.enabled_types))
+        }
+    if as_json:
+        print(json.dumps({"inventory": stats, "scans": cursors}, indent=2))
+        return 0
+    print("=== backfill inventory ===")
+    print(f"database: {settings.database_path}")
+    if not stats["types"]:
+        print("nothing scanned yet — `immich-compressor backfill scan`")
+        return 0
+    for asset_type, entry in sorted(stats["types"].items()):
+        print(
+            f"{asset_type}: {entry['scanned']} scanned ({_human_bytes(entry['scanned_bytes'])}) · "
+            f"{entry['candidates']} candidate(s) ({_human_bytes(entry['candidate_bytes'])}) · "
+            f"{entry['queued']} queued"
+        )
+        cursor = cursors.get(asset_type) or {}
+        if cursor.get("completed_at"):
+            print(f"  last complete walk: {cursor['completed_at']}")
+        elif cursor.get("next_page"):
+            print(f"  walk interrupted, resumes at page {cursor['next_page']}")
+        if entry["by_verdict"]:
+            print(f"  rejected: {_verdict_line(entry['by_verdict'])}")
+    for asset_type in settings.behavior.enabled_types:
+        if asset_type not in stats["types"]:
+            print(f"{asset_type}: not scanned yet")
     return 0
 
 
 def cmd_backfill(args: argparse.Namespace) -> int:
     settings = _load(args)
-    _configure_logging(settings.log_level)
-    return asyncio.run(_backfill(settings, args.type, args.limit, args.apply))
+    _configure_logging(settings.log_level if args.mode != "status" else "WARNING")
+    if args.mode == "scan":
+        return asyncio.run(_backfill_scan(settings, args.type, args.rescan, args.page_size))
+    if args.mode == "status":
+        return asyncio.run(_backfill_status(settings, args.json))
+    return asyncio.run(
+        _backfill_run(
+            settings,
+            args.type,
+            args.limit,
+            args.order,
+            args.apply,
+            not args.no_verify,
+            args.page_size,
+        )
+    )
 
 
 async def _restore(settings: Settings, asset_ids: list[str]) -> int:
@@ -683,10 +834,42 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--apply", action="store_true", help="actually resume (default: report)")
     resume_parser.set_defaults(func=cmd_resume)
 
-    backfill_parser = sub.add_parser("backfill", help="queue existing large assets")
-    backfill_parser.add_argument("--type", default="VIDEO", choices=["VIDEO", "IMAGE"])
-    backfill_parser.add_argument("--limit", type=int, default=50)
-    backfill_parser.add_argument("--apply", action="store_true", help="actually queue (default: dry)")
+    backfill_parser = sub.add_parser(
+        "backfill", help="work through the assets that were in the library before this service"
+    )
+    # A positional mode rather than nested subparsers: a subparser parses into its own
+    # namespace and copies *its* defaults over the parent's, which would silently drop the
+    # `--limit` in `backfill --limit 10 run`. One parser has no such corner.
+    backfill_parser.add_argument(
+        "mode",
+        nargs="?",
+        default="run",
+        choices=["run", "scan", "status"],
+        help="scan: inventory the library. run (default): queue from that inventory. status: what is left",
+    )
+    backfill_parser.add_argument(
+        "--type", choices=["VIDEO", "IMAGE"], help="one lane only (default: every enabled type)"
+    )
+    backfill_parser.add_argument("--limit", type=int, default=50, help="run: how many jobs to queue")
+    backfill_parser.add_argument(
+        "--order",
+        default="size",
+        choices=["size", "scanned"],
+        help="run: biggest first (default), or the order the library came back in",
+    )
+    backfill_parser.add_argument("--apply", action="store_true", help="run: actually queue (default: dry)")
+    backfill_parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="run: skip the live re-check of each asset before it is queued",
+    )
+    backfill_parser.add_argument(
+        "--rescan", action="store_true", help="scan: drop the inventory and walk the library again"
+    )
+    backfill_parser.add_argument(
+        "--page-size", type=int, default=backfill.DEFAULT_PAGE_SIZE, help="scan: assets per request"
+    )
+    backfill_parser.add_argument("--json", action="store_true", help="status: machine-readable")
     backfill_parser.set_defaults(func=cmd_backfill)
 
     restore_parser = sub.add_parser("restore", help="pull originals back out of the trash")
