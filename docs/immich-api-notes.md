@@ -55,6 +55,7 @@ and an `exifInfo` object.
 | `DELETE /assets` without `force` is a soft delete | ✅ (`isTrashed: true`, restorable) |
 | `DELETE /assets` with `force: true` is a *permanent* delete | ✅ — the spec only says "force delete even if in use", so this was measured: the asset answers HTTP 400 `Not found` afterwards, does not appear in the trash view, and its files are unlinked from the upload directory. It behaves the same on an asset already in the trash, which is why `POST /trash/empty` is never needed |
 | `POST /trash/restore/assets` on a force-deleted asset | HTTP 400 `Not found or no asset.delete access` — not a quiet no-op. **Re-confirmed 2026-08-23, and the whole batch fails with it:** a single unknown id in `{ids}` costs every other id in the same request, which is what `restore --all-pending` sends — see [safety.md](safety.md#rolling-back) |
+| `POST /trash/restore/assets` on an asset that is **not** trashed | HTTP 200 `{"count":1}` — a harmless no-op, and the asset stays `active`. Measured 2026-08-23 on an isolated pair: only ids the server cannot find *at all* are fatal, so `{active, gone}` answers 400 while `{active}` alone answers 200. The body carries the server's own `count`, so a caller never has to report the number it sent |
 | Negative-lookahead regex in `assetFileFilter` | ✅ works |
 | A compressed upload re-triggers the workflow | ✅ — loop protection is genuinely required |
 
