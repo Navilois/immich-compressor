@@ -1,7 +1,7 @@
 # One obvious entry point for everything a contributor needs.
 #
 #   make dev     create .venv and install the project with its dev extras
-#   make lint    ruff check, ruff format --check, English-only and link guards
+#   make lint    ruff check, ruff format --check, English-only, link and version guards
 #   make format  apply ruff format and ruff's safe fixes
 #   make test    the unit suite (the live suite needs a real Immich, see CONTRIBUTING.md)
 #   make image   build the container image locally
@@ -14,7 +14,7 @@ IMAGE   ?= immich-compressor:$(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
 
 .DEFAULT_GOAL := help
-.PHONY: help dev lint language links format test test-live image image-multiarch docs docs-check compose-check clean
+.PHONY: help dev lint language links version-check format test test-live image image-multiarch docs docs-check compose-check clean
 
 help:
 	@sed -n 's/^#   //p' $(MAKEFILE_LIST) | head -8
@@ -31,6 +31,7 @@ lint: $(PY)
 	$(PY) -m ruff format --check .
 	./scripts/check-language.sh
 	$(PY) scripts/check-links.py
+	$(PY) scripts/version.py check
 
 # The prose guards on their own.
 language:
@@ -38,6 +39,10 @@ language:
 
 links: $(PY)
 	$(PY) scripts/check-links.py
+
+# __version__, the CHANGELOG sections and the upgrading notes still agree.
+version-check: $(PY)
+	$(PY) scripts/version.py check
 
 format: $(PY)
 	$(PY) -m ruff check --fix .

@@ -103,6 +103,24 @@ jobs:
       - name: Internal links resolve
         run: python scripts/check-links.py
 
+  version:
+    name: Version and CHANGELOG agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      # No install step: the guard is standard library only and reads four files. It is
+      # its own job rather than a step in `docs` because its failures are a different
+      # kind — a release chore half-applied, not a stale generated file.
+      #
+      # Deliberately not `--strict`, which also requires a tag per released section.
+      # v1.0.0 and v1.1.0 were never pushed, from when this repository was private, so
+      # that flag belongs in the release workflow once those two tags exist.
+      - name: version.py check
+        run: python scripts/version.py check
+
   compose:
     name: Compose files
     runs-on: ubuntu-latest
