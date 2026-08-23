@@ -32,6 +32,11 @@ jobs:
         run: python -m ruff check --output-format=github .
       - name: ruff format
         run: python -m ruff format --check .
+      # A workflow is validated when it is used, not when it is pushed: an invalid
+      # `permissions:` scope takes the whole file out, and the only symptom is a trigger
+      # that stops working. Cheap to check here, invisible otherwise.
+      - name: Workflows parse and name real permission scopes
+        run: python scripts/check-workflows.py
 
   language:
     name: English only

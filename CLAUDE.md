@@ -15,7 +15,7 @@ one-line shell command you can run by hand.
 ## The loop
 
 ```bash
-make lint     # ruff, the English-only guard, the link guard and the version guard
+make lint     # ruff, the English-only, link, workflow and version guards
 make test     # unit suite, mocked HTTP, no network and no GPU required
 make check    # everything CI runs
 ```
