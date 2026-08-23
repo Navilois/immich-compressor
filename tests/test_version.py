@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -335,3 +336,177 @@ def test_republishing_an_old_tag_is_refused() -> None:
 @pytest.mark.parametrize("tag", ["1.2.0", "v1.2", "latest", "v1.2.0-", ""])
 def test_a_tag_that_is_not_a_version_is_refused(tag: str) -> None:
     assert version_script.stale_tag_problems(tag, ALL_TAGS) == [f"{tag} is not a vX.Y.Z tag"]
+
+
+# --- deriving the next version ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        pytest.param("feat(cli): add a jobs subcommand", "minor", id="feat"),
+        pytest.param("fix(config): reject a bad preset", "patch", id="fix"),
+        pytest.param("perf(encoder): skip the second probe", "patch", id="perf"),
+        pytest.param("feat!: drop the v1 marker", "major", id="bang"),
+        pytest.param("fix(api)!: rename the field", "major", id="scoped-bang"),
+        pytest.param("feat: x\n\nBREAKING CHANGE: the key moved", "major", id="footer"),
+        pytest.param("feat: x\n\nBREAKING-CHANGE: the key moved", "major", id="footer-hyphen"),
+        pytest.param("docs: write down the shipping conventions", None, id="docs"),
+        pytest.param("chore(ci): bump the actions", None, id="chore"),
+        pytest.param("refactor(store): extract a helper", None, id="refactor"),
+        pytest.param("test(pipeline): cover the sweeper", None, id="test"),
+        pytest.param("Merge pull request #19 from Navilois/x", None, id="merge-subject"),
+        pytest.param("fixed the thing", None, id="not-conventional"),
+        pytest.param("fix stuff", None, id="no-colon"),
+        pytest.param("", None, id="empty"),
+    ],
+)
+def test_bump_of(message: str, expected: str | None) -> None:
+    assert version_script.bump_of(message) == expected
+
+
+def test_dependabot_commits_do_not_release() -> None:
+    """`chore(deps)` is the prefix .github/dependabot.yml is configured to use."""
+    assert version_script.bump_of("chore(deps): Bump pydantic from 2.13 to 2.14") is None
+
+
+def test_a_breaking_body_needs_the_footer_not_the_words() -> None:
+    """Prose about a breaking change is not a footer, and must not silently major-bump."""
+    assert version_script.bump_of("fix: x\n\nThis is a BREAKING CHANGE for anyone who...") == "patch"
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        pytest.param(["docs: a", "fix: b", "feat: c"], "minor", id="feat-wins-over-fix"),
+        pytest.param(["fix: a", "feat!: b"], "major", id="breaking-wins"),
+        pytest.param(["fix: a", "perf: b"], "patch", id="both-patch"),
+        pytest.param(["docs: a", "chore: b"], None, id="nothing-releasable"),
+        pytest.param([], None, id="no-commits"),
+    ],
+)
+def test_bump_from_commits(messages: list[str], expected: str | None) -> None:
+    assert version_script.bump_from_commits(messages)[0] == expected
+
+
+def test_only_releasing_commits_are_given_as_reasons() -> None:
+    _, reasons = version_script.bump_from_commits(["docs: a", "fix: b", "chore: c", "feat: d"])
+    assert reasons == [("patch", "fix: b"), ("minor", "feat: d")]
+
+
+@pytest.mark.parametrize(
+    ("current", "bump", "expected"),
+    [
+        pytest.param("1.2.0", "minor", "1.3.0", id="minor"),
+        pytest.param("1.2.0", "major", "2.0.0", id="major"),
+        pytest.param("1.2.3", "patch", "1.2.4", id="patch"),
+        pytest.param("1.2.3", "minor", "1.3.0", id="minor-resets-patch"),
+        pytest.param("1.2.3", "major", "2.0.0", id="major-resets-both"),
+        pytest.param("1.3.0-rc1", "patch", "1.3.1", id="from-a-pre-release"),
+        pytest.param("0.9.0", "minor", "0.10.0", id="ten-not-one"),
+    ],
+)
+def test_next_version(current: str, bump: str, expected: str) -> None:
+    assert version_script.next_version(current, bump) == expected
+
+
+# --- performing the release chore ---------------------------------------------------
+
+TODAY = date(2026, 8, 23)
+
+
+def release(
+    changelog: str, upgrading: str, init_py: str, version: str, previous: str
+) -> tuple[str, str, str]:
+    return (
+        version_script.release_changelog(
+            changelog, version=version, previous=previous, today=TODAY, source=SOURCE
+        ),
+        version_script.release_upgrading(upgrading, version=version, previous=previous),
+        version_script.release_init_py(init_py, version=version),
+    )
+
+
+@pytest.mark.parametrize("version", ["1.2.1", "1.3.0", "2.0.0"])
+def test_the_chore_produces_something_check_accepts(version: str) -> None:
+    """The property that matters: whatever `set` writes, `check` has to pass on it."""
+    changelog, upgrading, init_py = release(
+        build_changelog(),
+        "# Upgrading\n\n## Unreleased\n\nSomething operators must do.\n",
+        '__version__ = "1.2.0"\n',
+        version,
+        "1.2.0",
+    )
+    assert (
+        version_script.audit(changelog=changelog, upgrading=upgrading, init_py=init_py, source=SOURCE) == []
+    )
+
+
+def test_the_chore_dates_the_section_and_opens_an_empty_one() -> None:
+    changelog = version_script.release_changelog(
+        build_changelog(), version="1.3.0", previous="1.2.0", today=TODAY, source=SOURCE
+    )
+    assert "## [Unreleased]\n\n## [1.3.0] - 2026-08-23\n" in changelog
+    sections = version_script.sections_of(changelog)
+    assert sections[0].title == "[Unreleased]"
+    assert not sections[0].body.strip()
+    assert sections[1].version == "1.3.0"
+
+
+def test_the_chore_moves_the_links() -> None:
+    changelog = version_script.release_changelog(
+        build_changelog(), version="1.3.0", previous="1.2.0", today=TODAY, source=SOURCE
+    )
+    assert f"[Unreleased]: {SOURCE}/compare/v1.3.0...HEAD" in changelog
+    assert f"[1.3.0]: {SOURCE}/compare/v1.2.0...v1.3.0" in changelog
+    assert f"[Unreleased]: {SOURCE}/compare/v1.2.0...HEAD" not in changelog
+
+
+def test_the_chore_refuses_a_changelog_with_no_unreleased_heading() -> None:
+    without = build_changelog().replace("## [Unreleased]\n", "", 1)
+    with pytest.raises(version_script.VersionError, match="no `## \\[Unreleased\\]` heading"):
+        version_script.release_changelog(
+            without, version="1.3.0", previous="1.2.0", today=TODAY, source=SOURCE
+        )
+
+
+def test_the_chore_refuses_when_the_link_is_not_where_it_should_be() -> None:
+    """A hand-edited link means the file is not in the shape this rewrite assumes."""
+    stale = build_changelog().replace(
+        f"[Unreleased]: {SOURCE}/compare/v1.2.0...HEAD", "[Unreleased]: elsewhere"
+    )
+    with pytest.raises(version_script.VersionError, match="line to move"):
+        version_script.release_changelog(stale, version="1.3.0", previous="1.2.0", today=TODAY, source=SOURCE)
+
+
+def test_the_chore_renames_the_upgrading_heading() -> None:
+    upgrading = version_script.release_upgrading(
+        "# Upgrading\n\n## Unreleased\n\nDo the thing.\n", version="1.3.0", previous="1.2.0"
+    )
+    assert "## 1.2.0 → 1.3.0" in upgrading
+    assert "## Unreleased" not in upgrading
+
+
+def test_upgrading_notes_without_a_heading_are_left_alone() -> None:
+    before = "# Upgrading\n\n## 1.1.0 → 1.2.0\n\nOld news.\n"
+    assert version_script.release_upgrading(before, version="1.3.0", previous="1.2.0") == before
+
+
+def test_the_chore_only_touches_the_first_unreleased_heading() -> None:
+    """`## Unreleased` inside a code block or a quoted example is not the heading."""
+    upgrading = version_script.release_upgrading(
+        "# Upgrading\n\n## Unreleased\n\nText.\n\n## 1.0.0 → 1.1.0\n\nOlder.\n",
+        version="1.3.0",
+        previous="1.2.0",
+    )
+    assert upgrading.count("## 1.2.0 → 1.3.0") == 1
+    assert "## 1.0.0 → 1.1.0" in upgrading
+
+
+def test_the_version_line_is_rewritten_once() -> None:
+    init_py = version_script.release_init_py(
+        '"""Doc."""\n\n__version__ = "1.2.0"\n\nMARKER = \'__version__ = "1.2.0"\'\n',
+        version="1.3.0",
+    )
+    assert '__version__ = "1.3.0"' in init_py
+    assert init_py.count('"1.3.0"') == 1
