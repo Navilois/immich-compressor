@@ -17,7 +17,7 @@ bootstrap pip. `make dev` runs the same two commands. `make` itself is optional 
 target is a one-line shell command you can run by hand.
 
 ```bash
-make lint     # ruff check, ruff format --check, and the English-only guard
+make lint     # ruff, the English-only guard, the link guard and the version guard
 make test     # the unit suite: mocked HTTP, no network, no GPU
 make check    # everything CI runs
 ```
