@@ -13,6 +13,7 @@ from immich_compressor.encoder import (
     EncodeResult,
     MediaProbe,
     _trailer_bytes,
+    _values_match,
     check_sanity,
     compressed_filename,
     embedded_media_reason,
@@ -642,6 +643,43 @@ async def test_plain_still_is_not_flagged(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------- metadata verification
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        # Measured on a live library on 2026-08-24: EXIF:FocalPlaneYResolution failed 24 of
+        # 67 encoded images on this, a difference in the 8th significant digit.
+        ("6734.006734", "6734.006711"),
+        # The same class with a unit, from an earlier failure in the same store.
+        ("339.569 m", "339.5690021 m"),
+        (6734.006734, 6734.006711),
+        ("48.2082", "48.2082"),
+        ("Canon", "Canon"),
+    ],
+)
+def test_values_match_tolerates_re_approximation(before: object, after: object) -> None:
+    """The re-approximation the gate exists to survive, in its printed form."""
+    assert _values_match(before, after)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        # A real move, not arithmetic: ten metres up.
+        ("339.569 m", "350.0 m"),
+        # Same number, different unit — metres are not feet.
+        ("339.569 m", "339.569 ft"),
+        # Well outside the tolerance in the last digits that matter.
+        ("6734.006734", "6734.1"),
+        ("Canon", "Nikon"),
+        ("48.2082", ""),
+        (48.2082, "north"),
+    ],
+)
+def test_values_match_still_reports_a_real_difference(before: object, after: object) -> None:
+    """Tolerating arithmetic must not tolerate an edit, a unit change or free text."""
+    assert not _values_match(before, after)
 
 
 @needs_still_tools

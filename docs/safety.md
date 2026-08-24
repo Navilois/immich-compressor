@@ -131,6 +131,18 @@ floats rejected every geotagged photo — with `metadata_verify: strict` and
 small to alter the printed value cannot be seen here, which is the intended reading of "the
 metadata survived": the value a viewer is shown is the value that has to survive.
 
+That covers every tag exiftool formats before printing, but not one it prints as a raw
+decimal — there the drift reaches the printed string. Measured on a live library on
+2026-08-24, a backfill batch of the 150 largest JPEGs failed 24 of the 67 images that
+produced an encode, every one on `EXIF:FocalPlaneYResolution changed: 6734.006734 ->
+6734.006711`, a difference in the 8th significant digit; an earlier failure in the same
+store was `EXIF:GPSAltitude '339.569 m' -> '339.5690021 m'`. So values that are numbers on
+both sides — with an identical unit, if any — are compared with a **relative tolerance of
+1e-6**, two orders of magnitude above the largest drift measured and far below any change a
+viewer could be shown. Everything else is unchanged: a differing unit (`339.569 m` against
+`339.569 ft`) is a difference, non-numeric values compare character by character, and a tag
+that is gone is gone.
+
 Four kinds of tag are on the ignore list, and each one is earned rather than convenient:
 
 | Tag | Why |
