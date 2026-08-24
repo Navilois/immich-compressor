@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Every tracked document was read against the 1.3.1 source and corrected.** No behaviour
+  changed; what changed is that the documentation now describes what the code does.
+  - `docs/upgrading.md` gains the **1.3.0 → 1.3.1** section it never got — the release was a
+    change to what `restore` prints, and version-to-version notes with a gap in them are
+    read as "nothing happened".
+  - The `/metrics` sample in [docs/operations.md](docs/operations.md) advertised
+    `build_info{version="1.2.0"}` and listed three of the five `session_*` counters.
+  - `SECURITY.md` still supported **1.1.x**, and named `/webhook` and `/reprocess` as the
+    token-protected routes — `POST /resume`, which re-arms a service that deletes originals,
+    has needed the shared secret since 1.1.1 and was in neither list.
+  - The sanity gate was described as eight checks in the README and the FAQ. It is nine:
+    both lists left out `min_savings_bytes`, which is the one that decides whether a still
+    was worth re-encoding at all.
+  - [docs/architecture.md](docs/architecture.md) drew the endpoint map without `POST
+    /resume` or `PUT /webhook`, left `metrics.py` out of the module table, and pointed the
+    backfill's search-parameter note at finding 15 — the endpoint the scan does *not* use —
+    where finding 16 has measured the one it does since 1.3.0.
+  - [docs/safety.md](docs/safety.md) still called the `restore --all-pending` output
+    unmeasured. The fixed command has run against a live stage-4 deployment since, on
+    2026-08-23, and reported `restored 4 asset(s) from the trash`.
+  - The FAQ counted "eleven documented ways" this project has been wrong. Sixteen findings
+    are written down, and the FAQ now links to them.
+  - `serve` was missing from the command table, the two inventory-only backfill verdicts
+    (`missing`, `already_known`) were named nowhere, and `docs/hardware.md` introduced four
+    preset settings as three.
+  - **Release documentation follows the workflow, not the tag.** `CONTRIBUTING.md` and
+    [the launch checklist](docs/maintainers/launch-checklist.md) led with the hand-rolled
+    `git tag`, which has been the escape hatch since 1.3.0 shipped **Prepare a release**.
+    Section 1 of that checklist is also done: description, homepage, topics, Discussions
+    and private vulnerability reporting were all confirmed set on 2026-08-24, and the
+    checklist now carries the commands that read them back.
+
 ## [1.3.1] - 2026-08-23
 
 ### Fixed

@@ -11,7 +11,7 @@ and never delete one before its replacement has been verified.**
 
 An Immich workflow fires a webhook when an asset finishes metadata extraction. This service
 downloads the original, recompresses it — video with ffmpeg on whatever encoder your machine
-can actually run, JPEG stills with ImageMagick — checks the result eight ways, uploads it,
+can actually run, JPEG stills with ImageMagick — checks the result nine ways, uploads it,
 carries over everything that can be carried over, and proves the metadata survived. Only
 then, and only if you have asked it to, does it remove the original.
 
@@ -47,10 +47,10 @@ If any of them fails, **nothing is deleted** — the job waits an hour and tries
 chain runs in both delete modes, so a failing condition surfaces while the delete is still
 undoable.
 
-**Before anything is uploaded**, the encode has to pass a sanity gate: size ratio,
-decodability, rotation-aware display size, bit depth, HDR transfer function, duration drift,
-audio stream count and capture date. A 10-bit HDR source cannot be silently flattened to
-washed-out SDR, and a rotated portrait clip cannot come back sideways.
+**Before anything is uploaded**, the encode has to pass a sanity gate: size ratio, bytes
+saved, decodability, rotation-aware display size, bit depth, HDR transfer function, duration
+drift, audio stream count and capture date. A 10-bit HDR source cannot be silently flattened
+to washed-out SDR, and a rotated portrait clip cannot come back sideways.
 
 **It never touches** external libraries, live photos, edited assets, locked-folder assets,
 anything already in the trash, anything with manually named faces, or anything it has

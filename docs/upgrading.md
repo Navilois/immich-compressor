@@ -11,6 +11,22 @@ and minor releases arrive that way and a breaking change never does. The
 
 Job state lives in a volume and survives. Schema changes are applied automatically on open.
 
+## 1.3.0 → 1.3.1
+
+**Nothing to edit.** One line of output changed, on the command you reach for when something
+has already gone wrong.
+
+Under `delete_mode: permanent`, `restore` used to open with a warning that originals removed
+by this service *"were not trashed and cannot be restored"* — printed before a single id had
+been tried, gated on the mode the deployment is in *now* rather than on the mode that
+removed anything, and false for every original that really was sitting in the trash.
+Measured on a live stage-4 deployment on 2026-08-23: a run that went on to report
+`restored 4 asset(s) from the trash` printed that refusal directly above it.
+
+The line is gone. What stands in its place is the accurate version 1.3.0 already printed
+*after* the request — how many ids Immich no longer has, and why — which comes from the
+server's own answer rather than from local configuration. Exit codes are unchanged.
+
 ## 1.2.0 → 1.3.0
 
 ### `restore --all-pending` works on a deployment that has run `delete_mode: permanent`

@@ -4,9 +4,13 @@ Everything a human still has to do, in the order it makes sense to do it. Nothin
 be automated from inside the repository, which is why it is written down.
 
 Done so far, so nobody repeats it: the **repository is public** since 2026-08-22, the
-**ghcr.io package is public**, and **1.2.0 is released** — image and GitHub release both.
-Still open in section 1: the description below, the topics, the homepage, Discussions and
-private vulnerability reporting.
+**ghcr.io package is public**, and the newest release is **1.3.1**. **All of section 1 is
+done** — description, homepage, fourteen topics, Discussions and private vulnerability
+reporting were all confirmed set on 2026-08-24 with the probes below. The only item nobody
+can check from a terminal is the social preview, because GitHub exposes no API for it.
+
+Section 2 is the one that has changed since this page was written: releases now go through
+the **Prepare a release** workflow, and the hand-rolled tag is the escape hatch.
 
 ## 0. Make the repository public
 
@@ -64,14 +68,42 @@ Then, in the web UI (no CLI equivalent):
 - **Settings → Code security** — enable **private vulnerability reporting**, which is what
   `SECURITY.md` tells people to use.
 - **Settings → Actions → General** — confirm workflows may write packages, so the release
-  workflow can push to ghcr.io.
+  workflow can push to ghcr.io, and that **"Allow GitHub Actions to create and approve pull
+  requests"** is on, which is what the release workflow in section 2 needs.
+
+Everything but the social preview can be read back rather than trusted to the settings page:
+
+```bash
+gh repo view Navilois/immich-compressor --json description,homepageUrl,repositoryTopics,hasDiscussionsEnabled
+gh api repos/Navilois/immich-compressor/private-vulnerability-reporting
+gh api repos/Navilois/immich-compressor/actions/permissions/workflow --jq .can_approve_pull_request_reviews
+```
+
+All of them answered as they should on 2026-08-24.
 
 ## 2. Cutting a release
 
+Write the `Unreleased` section of `CHANGELOG.md` first, and the `Unreleased` section of
+`docs/upgrading.md` if an operator has to do anything. Then run **Prepare a release** from
+the Actions tab (`workflow_dispatch`, input `auto` / `major` / `minor` / `patch`). It runs
+the chore — `python scripts/version.py set auto`, which bumps `__version__`, dates the
+CHANGELOG section, opens an empty one, moves both compare links, renames the upgrading
+heading and rebuilds the generated docs — and opens `chore(release): X.Y.Z` as a pull
+request.
+
+**Merging that pull request is the release.** `release-tag.yml` sees a `__version__` on
+`main` that nothing has tagged, tags it, and calls `release.yml`. Any other merge to `main`
+deploys nothing. [CONTRIBUTING.md](../../CONTRIBUTING.md#releasing-maintainers) has the two
+surprises in that pull request — it arrives with no checks, and its tag is pushed by a
+workflow, which is why `release-tag.yml` calls `release.yml` rather than waiting for a tag
+event that never comes.
+
+By hand, when the workflow is unavailable. `release.yml` keeps its `on: push: tags` trigger
+for exactly this:
+
 ```bash
-# 1. The CHANGELOG's Unreleased section becomes a dated version section.
-# 2. Bump __version__ in src/immich_compressor/__init__.py. That is the only place.
-make check                      # lint, tests, generated docs, compose overlays
+python scripts/version.py set auto   # or major | minor | patch | X.Y.Z
+make check                           # lint, tests, generated docs, compose overlays
 git commit -am "chore(release): X.Y.Z"
 git push origin main
 
@@ -79,14 +111,15 @@ git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-Read the CHANGELOG section for the version once more before tagging.
+Read the CHANGELOG section for the version once more before merging or tagging.
 `scripts/changelog-section.sh` turns it into the body of the GitHub release, so anything
 wrong in it is published as the announcement rather than sitting in a file.
 
-The tag starts `release.yml`, which refuses to publish if the tag disagrees with
-`__version__` or the CHANGELOG has no section for it, then builds `linux/amd64` and
-`linux/arm64`, pushes to ghcr.io as `X.Y.Z` / `X.Y` / `X` / `latest` with provenance and an
-SBOM, and creates the GitHub release from the CHANGELOG section.
+Either way `release.yml` does the publishing. It refuses a tag that disagrees with
+`__version__`, that has no CHANGELOG section, that leaves an earlier section untagged, or
+that is not the newest version; then it builds `linux/amd64` and `linux/arm64`, pushes to
+ghcr.io as `X.Y.Z` / `X.Y` / `X` / `latest` with provenance and an SBOM, and creates the
+GitHub release from the CHANGELOG section.
 
 Afterwards, once — **already done for this package**: **Packages → immich-compressor →
 Package settings → Change visibility → Public**. A package created by Actions is private by
@@ -104,8 +137,8 @@ gh attestation verify oci://ghcr.io/navilois/immich-compressor:X.Y.Z --repo Navi
 ```
 
 The last command only has anything to verify from the first release cut **after** the
-repository went public: 1.1.1 and 1.2.0 carry no attestation, because the step that would
-have created it is the step that failed.
+repository went public, which is 1.3.0: 1.1.1 and 1.2.0 carry no attestation, because the
+step that would have created it is the step that failed.
 
 ## 3. Announce
 

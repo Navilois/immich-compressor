@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 1.1.x | ✅ |
-| 1.0.x | security fixes only |
+| 1.3.x | ✅ |
+| 1.2.x | security fixes only |
 
 Fixes are released as a new patch version. The compose file pins the major image tag, so a
 `docker compose pull` picks them up.
@@ -41,10 +41,11 @@ Compared with `hmac.compare_digest`, so a wrong token cannot be found by timing.
 request is logged at WARNING with the peer address — which matters, because **Immich ignores
 the response status and reports the workflow as successful either way**.
 
-`/webhook` and `/reprocess` require the secret. `/healthz`, `/stats`, `/metrics` and `/jobs`
-do not: they expose no asset content, only counts, states and asset ids. No port is
-published by default, and the compose file tells you to bind to `127.0.0.1` if you publish
-one.
+`/webhook`, `/reprocess` and `/resume` require the secret — `/resume` clears the surge
+breaker, which re-arms a service that deletes originals, so it is not an anonymous action.
+`/healthz`, `/stats`, `/metrics` and `/jobs` do not: they expose no asset content, only
+counts, states and asset ids. No port is published by default, and the compose file tells
+you to bind to `127.0.0.1` if you publish one.
 
 ### Encoder commands
 

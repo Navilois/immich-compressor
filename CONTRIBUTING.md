@@ -25,6 +25,11 @@ make check    # everything CI runs
 Install `ffmpeg`, `ffprobe`, `exiftool` and ImageMagick to unlock the encoder tests — about
 a quarter of the suite skips without them, and CI runs with them installed.
 
+`make check` is not quite everything: CI also runs the unit suite on **Python 3.12, 3.13 and
+3.14** — every interpreter `pyproject.toml` declares — builds the `linux/amd64` image and
+runs CodeQL. A pull request is ten check runs, and a suite that only passes on your own
+interpreter is not green.
+
 ## The live suite
 
 `tests/test_e2e_live.py` drives the whole pipeline against a real Immich. It is marked
@@ -144,30 +149,13 @@ One branch per topic. Say in the pull request what you changed, why, and how you
 
 1. Write the `Unreleased` section of `CHANGELOG.md`, and the `Unreleased` section of
    `docs/upgrading.md` if an operator has to do anything.
-2. Run the chore:
-
-```bash
-python scripts/version.py set auto --check    # what it would write
-python scripts/version.py set auto            # write it
-```
+2. Run **Prepare a release** from the Actions tab (`workflow_dispatch`), with `auto`,
+   `major`, `minor` or `patch`. It runs the chore, checks the result, and opens
+   `chore(release): X.Y.Z` as a pull request with the release notes in the body.
+3. Merge it.
 
 `auto` is the version the conventional commits since the newest tag ask for — `feat` a
-minor, `fix` and `perf` a patch, a `!` or a `BREAKING CHANGE:` footer a major. `next` prints
-it on its own. Pass `major`, `minor`, `patch` or an explicit `X.Y.Z` to decide yourself.
-
-The chore bumps `__version__`, dates the CHANGELOG section and opens an empty one, moves
-both compare links, renames the upgrading heading to `<previous> → <new>`, and then checks
-its own output with `version.py check`. It refuses to run when the `Unreleased` section is
-empty, when the version does not come after the current one, or when that section already
-exists.
-
-3. Commit, tag `vX.Y.Z`, push the tag.
-
-### Or let the workflow do all three
-
-Run **Prepare a release** from the Actions tab (`workflow_dispatch`), with `auto`, `major`,
-`minor` or `patch`. It runs the same chore, checks the result, and opens
-`chore(release): X.Y.Z` as a pull request with the release notes in the body.
+minor, `fix` and `perf` a patch, a `!` or a `BREAKING CHANGE:` footer a major.
 
 **It needs one repository setting**, off by default and easy to miss because nothing about
 the failure names it: **Settings ▸ Actions ▸ General ▸ Workflow permissions ▸ "Allow GitHub
@@ -198,6 +186,28 @@ Two things about that pull request are worth knowing:
   GitHub does not fire `on: push` for a `GITHUB_TOKEN` push. That is why `release-tag.yml`
   calls `release.yml` through `workflow_call` instead of leaving it to a tag event that
   would never arrive.
+
+### The chore, and doing it by hand
+
+`release.yml` keeps its `on: push: tags` trigger, so the whole thing still works from a
+terminal when the workflow is not available — that is the escape hatch, not the path:
+
+```bash
+python scripts/version.py set auto --check    # what it would write
+python scripts/version.py set auto            # write it
+make check
+git commit -am "chore(release): X.Y.Z" && git push origin main
+git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z
+```
+
+`next` prints the derived version on its own, and `major`, `minor`, `patch` or an explicit
+`X.Y.Z` decides it yourself. The chore bumps `__version__`, dates the CHANGELOG section and
+opens an empty one, moves both compare links, renames the upgrading heading to
+`<previous> → <new>`, rebuilds the generated docs — `docs/configuration.md` carries the
+version, so skipping that step fails the very CI the release commit has to pass — and then
+checks its own output with `version.py check`. It refuses to run when the `Unreleased`
+section is empty, when the version does not come after the current one, or when that
+section already exists.
 
 The release workflow refuses to publish if the tag disagrees with `__version__`, if the
 CHANGELOG has no section for it, if any released section has no tag, or if the tag is not

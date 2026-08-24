@@ -16,10 +16,10 @@ curl -X POST -H "X-Compressor-Token: $COMPRESSOR_TOKEN" localhost:8080/reprocess
 curl -X POST -H "X-Compressor-Token: $COMPRESSOR_TOKEN" localhost:8080/resume
 ```
 
-No port is published by default. `/stats`, `/metrics` and `/jobs` are unauthenticated; only
-`/webhook`, `/reprocess` and `/resume` require the shared secret — `/resume` re-arms a
-service that deletes originals, so it is not an anonymous action. Publish deliberately, and never on
-`0.0.0.0`:
+No port is published by default. `/healthz`, `/stats`, `/metrics` and `/jobs` are
+unauthenticated; only `/webhook`, `/reprocess` and `/resume` require the shared secret —
+`/resume` re-arms a service that deletes originals, so it is not an anonymous action.
+Publish deliberately, and never on `0.0.0.0`:
 
 ```yaml
 # docker-compose.override.yaml
@@ -35,7 +35,7 @@ Prometheus text exposition format, hand-rolled, no extra dependency. Every famil
 `HELP` and `TYPE`, and is emitted even when empty so a dashboard query never disappears:
 
 ```
-immich_compressor_build_info{version="1.2.0"} 1
+immich_compressor_build_info{version="1.3.1"} 1
 immich_compressor_jobs{state="done"} 2
 immich_compressor_jobs{state="failed"} 1
 immich_compressor_jobs_skipped{reason="no_gain"} 1
@@ -47,6 +47,8 @@ immich_compressor_saved_bytes 24024048
 immich_compressor_webhooks_received_total 12
 immich_compressor_webhooks_rejected_total 0
 immich_compressor_session_processed_total 2
+immich_compressor_session_skipped_total 2
+immich_compressor_session_failed_total 1
 immich_compressor_session_deleted_total 2
 immich_compressor_session_bytes_saved_total 24024048
 immich_compressor_encode_duration_seconds_bucket{le="60"} 3
@@ -85,6 +87,7 @@ docker compose exec immich-compressor immich-compressor <command>
 
 | Command | What it does |
 |---|---|
+| `serve` | run the webhook service. The image's own `CMD`, so the container already runs it |
 | `setup` | guided first-run setup; safe to re-run |
 | `hardware [--json]` | which encoder this machine gets, and why every other was rejected |
 | `check` | config, connectivity to Immich, and a real one-frame encode through the chosen encoder |
@@ -161,9 +164,13 @@ are waiting and how big they are, how many have been queued, and why the rest we
 Four things worth knowing:
 
 - **`--limit` counts jobs, not search results.** An asset that was deleted, trashed or given
-  a named face between the scan and the run is recorded as such, and the run moves on to the
-  next candidate. Running it again continues rather than re-reading the same answer, so
-  working through a library is `run --apply`, wait, `run --apply`.
+  a named face between the scan and the run is recorded as such — `missing`, `trashed` or
+  `named_people` — and the run moves on to the next candidate. Running it again continues
+  rather than re-reading the same answer, so working through a library is `run --apply`,
+  wait, `run --apply`. Two verdicts exist only in the inventory and never reach a job row:
+  `missing`, for an asset the server no longer has, and `already_known`, for one the job
+  store already holds — which is what a half-worked-through library looks like, not an
+  error.
 - **The guards run twice, deliberately.** Once during the scan, from the payload, and again
   in the worker. A backfilled job is an ordinary job: same guards, same sanity gate, same
   [verification chain](safety.md#the-verification-chain) before anything is deleted. What
