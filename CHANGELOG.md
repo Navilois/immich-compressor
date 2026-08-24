@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The metadata gate no longer fails a job on floating-point re-approximation.** Values
+  that are numbers on both sides — with an identical unit, if any — are now compared with a
+  relative tolerance of 1e-6 instead of character by character. Copying an EXIF rational
+  re-approximates the fraction, and for tags that exiftool prints as a raw decimal that drift
+  reached the printed value the gate compares. Measured on a live library on 2026-08-24, a
+  backfill batch of the 150 largest JPEGs failed 24 of the 67 images that produced an encode,
+  every one of them on `EXIF:FocalPlaneYResolution` moving `6734.006734` -> `6734.006711` — a
+  difference in the 8th significant digit. Nothing was lost in any of them; a failed job
+  leaves the original untouched. A tag that is lost, a value that really changed, and a unit
+  that changed (`339.569 m` against `339.569 ft`) are all still reported, and non-numeric
+  values still compare exactly.
+
 ### Documentation
 
 - **Every tracked document was read against the 1.3.1 source and corrected.** No behaviour

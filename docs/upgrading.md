@@ -11,6 +11,28 @@ and minor releases arrive that way and a breaking change never does. The
 
 Job state lives in a volume and survives. Schema changes are applied automatically on open.
 
+## Unreleased
+
+### The metadata gate stops failing jobs on arithmetic
+
+**Nothing to edit**, and it changes when the gate fires. With
+`behavior.metadata_verify: strict` — the default — a job failed when any tag differed
+between the original and the re-encode, compared as text. Two tags in the wild print as a
+raw decimal long enough to show the re-approximation that copying an EXIF rational always
+performs, and those jobs failed on it. Measured on a live library on 2026-08-24: a backfill
+batch of the 150 largest JPEGs failed 24 of the 67 images that produced an encode, all on
+`EXIF:FocalPlaneYResolution changed: 6734.006734 -> 6734.006711`, and an earlier failure in
+the same store was `EXIF:GPSAltitude '339.569 m' -> '339.5690021 m'`.
+
+Numbers are now compared within a relative tolerance of 1e-6, so those pass. Nothing else
+loosens: a tag that is missing from the output is still a finding, a value that really moved
+is still a finding, a differing unit (`339.569 m` against `339.569 ft`) is still a finding,
+and text tags such as `Make` and `Model` still have to match exactly.
+
+Assets that already failed this way stay `failed` — the fix does not requeue anything. There
+is no bulk retry for failed jobs, so they come back one id at a time with
+`reprocess <asset_id>`.
+
 ## 1.3.0 → 1.3.1
 
 **Nothing to edit.** One line of output changed, on the command you reach for when something

@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import mmap
 import re
 import shutil
@@ -69,6 +70,60 @@ _METADATA_IGNORED: frozenset[str] = frozenset(
         "EXIF:StripOffsets",
     }
 )
+
+# Relative tolerance for the metadata gate's numeric comparison. exiftool prints most
+# rationals in a form the re-approximation cannot reach (1/100, 48 deg 18' 16.32" N), but a
+# tag that prints as a raw decimal carries the drift into the printed string: measured on a
+# live library on 2026-08-24, EXIF:FocalPlaneYResolution moved 6734.006734 -> 6734.006711
+# (~3.4e-9 relative) on 24 of 67 encoded images, and EXIF:GPSAltitude '339.569 m' ->
+# '339.5690021 m' (~6.2e-9) on another. 1e-6 clears the largest of those by two orders of
+# magnitude and is still far below a difference any viewer could be shown: it is a change in
+# the 7th significant digit, which no EXIF value is meaningful to.
+_METADATA_REL_TOL = 1e-6
+
+# A number, optionally followed by a unit ("339.569 m"). Deliberately strict: digits are
+# required, so "inf" and "nan" are not numbers here, and the unit is whatever follows —
+# "1/100" parses as 1 with the unit "/100", which keeps fractions comparing by their
+# printed form.
+_NUMBER_WITH_UNIT = re.compile(r"([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(.*)")
+
+
+def _as_number(value: object) -> tuple[float, str] | None:
+    """``value`` as a (number, unit) pair, or ``None`` if it is not a number at all."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value), ""
+    if not isinstance(value, str):
+        return None
+    match = _NUMBER_WITH_UNIT.fullmatch(value.strip())
+    if match is None:
+        return None
+    return float(match.group(1)), match.group(2).strip()
+
+
+def _values_match(before: object, after: object) -> bool:
+    """Whether two exiftool values mean the same thing.
+
+    Exact for everything that is not a number, so ``Make``, ``Model`` and any free text keep
+    comparing character by character, and a differing unit ('339.569 m' against
+    '339.569 ft') is a difference like any other. Two numbers with the same unit are
+    compared within :data:`_METADATA_REL_TOL`, because a tag whose printed form is a raw
+    decimal shows the rational re-approximation that :func:`verify_metadata` exists to
+    tolerate everywhere else.
+    """
+    if before == after:
+        return True
+    before_number = _as_number(before)
+    after_number = _as_number(after)
+    if before_number is None or after_number is None:
+        return False
+    before_value, before_unit = before_number
+    after_value, after_unit = after_number
+    if before_unit != after_unit:
+        return False
+    return math.isclose(before_value, after_value, rel_tol=_METADATA_REL_TOL, abs_tol=0.0)
+
 
 # How many bytes may follow the JPEG's end-of-image marker before we call it a payload.
 # Some encoders leave a handful of padding bytes; a motion photo leaves megabytes.
@@ -450,6 +505,14 @@ async def verify_metadata(source: Path, target: Path, *, timeout_s: float = 120.
     exact comparison rejected every geotagged photo — with `metadata_verify: strict` and
     `delete_mode: permanent` that is a gate no image can pass.
 
+    That covers every tag exiftool formats before printing, but not one that prints as a raw
+    decimal: measured on a live library on 2026-08-24, ``FocalPlaneYResolution`` came back
+    6734.006734 -> 6734.006711 and failed 24 of 67 encoded images on a difference in the 8th
+    significant digit. So values that are numbers on both sides — with an identical unit, if
+    any — are compared within :data:`_METADATA_REL_TOL` by :func:`_values_match`. Everything
+    else, including a differing unit, still has to match exactly, and a tag that is gone is
+    still gone.
+
     The cost of comparing the printed form is that a change too small to alter the printed
     value cannot be seen here. That is the intended reading of "the metadata survived": the
     value a viewer is shown is the value that has to survive.
@@ -480,7 +543,7 @@ async def verify_metadata(source: Path, target: Path, *, timeout_s: float = 120.
             continue
         if key not in after:
             differences.append(f"{key} lost")
-        elif after[key] != value:
+        elif not _values_match(value, after[key]):
             differences.append(f"{key} changed: {value!r} -> {after[key]!r}")
     return differences
 
