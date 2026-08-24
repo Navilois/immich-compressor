@@ -5,12 +5,12 @@ Immich  (Workflow: AssetMetadataExtraction -> filters -> webhook)
    |  POST /webhook   {type, trigger, data.asset}   header: X-Compressor-Token
    v
 immich-compressor (FastAPI, one process, one container)
-   POST /webhook  -> verify secret, persist job, 202 Accepted    (must return instantly)
+   POST|PUT /webhook -> verify secret, persist job, 202 Accepted  (must return instantly)
    worker (asyncio, one lane per enabled asset type)
        guard -> download -> encode -> metadata gate -> sanity gate -> upload
              -> copy -> tags/fields -> markers -> (deferred) remove original
    GET  /healthz  /stats  /metrics  /jobs[?status=]  /jobs/{id}
-   POST /reprocess/{assetId}
+   POST /reprocess/{assetId}  /resume        (both need the shared secret)
 ```
 
 ## Why a separate service
@@ -32,7 +32,7 @@ shared secret, writes one row, and answers `202` — everything else is the work
 | # | Step | Notes |
 |---|---|---|
 | 1 | Delay | `initial_delay_seconds` (300) so Immich's own thumbnail, ML and OCR jobs finish first |
-| 2 | Guards | external library, edited, live photo, locked, trashed, wrong type, unsupported format, too small, existing marker, named people |
+| 2 | Guards | external library, edited, live photo, locked, trashed, wrong type, no preset, unsupported format, too small, existing marker, named people |
 | 3 | Download | `GET /assets/{id}/original`, streamed to a temp file; free space checked first |
 | 3b | Still guards | stills only: an appended payload (motion photo) or a source already at or below `min_source_quality` stops the job here, before the encode — see [safety.md](safety.md#what-it-never-touches) |
 | 4 | Encode | the preset command, without a shell; `exiftool -TagsFromFile` for stills, with orientation normalised |
@@ -107,9 +107,11 @@ Two properties come out of the split:
   is immune to replay forever; an inventory row has to stay re-scannable, and dropping it
   costs nothing but a walk. That is also why an ingest rejection writes no job row.
 
-The scan trusts none of the search parameters it sends — see
-[immich-api-notes.md](immich-api-notes.md#15-post-searchlarge-assets-ignores-type-and-size)
-for what an Immich search endpoint did with `type` and `size`.
+`POST /search/metadata` does apply `type`, `size` and `page` — measured, see
+[finding 16](immich-api-notes.md#16-post-searchmetadata-applies-type-size-and-page). The scan
+re-checks the type of every item and watches for a repeated page anyway, because the sibling
+endpoint in the same family
+[accepts both fields and applies neither](immich-api-notes.md#15-post-searchlarge-assets-ignores-type-and-size).
 
 ## Hardware selection
 
@@ -131,6 +133,7 @@ encode. See [hardware.md](hardware.md).
 | `models.py` | webhook payload and REST DTOs, all explicitly null-tolerant |
 | `api.py` | typed async Immich client, retries on transport errors and 5xx |
 | `store.py` | SQLite job store, WAL |
+| `metrics.py` | the Prometheus exposition `/metrics` answers with, hand-rolled |
 | `encoder.py` | preset execution, exiftool, probes, the sanity gate |
 | `pipeline.py` | the ten steps, the worker loop, the trash sweeper |
 | `backfill.py` | the library scan, the candidate inventory, the queue run over it |

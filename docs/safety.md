@@ -250,9 +250,10 @@ Equivalent to `POST /trash/restore/assets`, or Utilities → Trash → Restore i
 Verified: the asset comes back with `isTrashed: false`.
 
 `--all-pending` selects the source id of every completed job — every original this service
-replaced — and restores what Immich still has. Illustrative output; the fix was written
-without a live instance to re-run against, so this is the shape of the answer, not a
-capture:
+replaced — and restores what Immich still has. The numbers below are illustrative, the shape
+of the answer rather than a capture; the command itself has since been run against a live
+stage-4 deployment, on 2026-08-23, where it reported `restored 4 asset(s) from the trash`
+out of a selection whose other originals earlier runs had force-deleted:
 
 ```
 restored 12 asset(s) from the trash

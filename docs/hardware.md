@@ -144,7 +144,7 @@ magick {input} -auto-orient -quality 82 -interlace Plane {output}
 | no `-sampling-factor` | ImageMagick then *inherits* the source's chroma subsampling (verified: a 4:4:4 source stays 4:4:4 even at q82). Forcing `4:2:0` would halve chroma resolution on every 4:4:4 source — visible on saturated edges, and invisible to every sanity check. |
 | no `-strip` | The metadata copy restores tags afterwards, but keeping the ICC profile through the encode gives better colour. |
 
-Three preset-level settings come with it, all of them consequences of a still being cheap to
+Four preset-level settings come with it, all of them consequences of a still being cheap to
 encode and small to store:
 
 | Setting | Value | Why |

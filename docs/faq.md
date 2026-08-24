@@ -12,13 +12,14 @@ safe on a photo library is the interesting part:
 | Album, tags, rating, description, GPS | re-implement `PUT /assets/copy`, then discover it does not copy tags | done, and the [gaps are documented](immich-api-notes.md#2-put-assetscopy-moves-tags-description-rating-and-gps--but-through-the-sidecar) |
 | Rotated video | 1920x1080+rot90 silently becomes 1080x1920 | `-noautorotate`, and a gate that compares display size |
 | HDR | flattened to washed-out SDR without a warning | rejected by the gate |
-| Knowing the encode is good | file size | ratio, decodability, display size, bit depth, HDR transfer, duration, audio streams, capture date |
+| Knowing the encode is good | file size | ratio, bytes saved, decodability, display size, bit depth, HDR transfer, duration, audio streams, capture date |
 | Deleting the original | `rm`, and hope | a four-step chain against the live server, with a retry instead of a delete when anything is off |
 | Which encoder your box can run | you read a table and edit flags | a real one-frame encode picks it, and explains the ones it rejected |
 | When it goes wrong at 3am | you find out later | job states, `/stats`, `/metrics`, a `restore` command |
 
-The honest summary: this is a script that has already been wrong in eleven documented ways
-and been fixed each time. That is its whole value.
+The honest summary: this is a script that has already been wrong in sixteen documented ways
+and been fixed each time. That is its whole value — the list is
+[immich-api-notes.md](immich-api-notes.md#where-the-original-plan-was-wrong).
 
 ## Why not use Immich's own transcoding?
 

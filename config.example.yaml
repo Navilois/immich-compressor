@@ -100,6 +100,6 @@ log_level: INFO
 #   with the stills preset and the reason for every flag in it.
 #
 #   The stills preset carries a format allowlist (`match.extensions`), and it is not
-#   optional: Immich files RAW, PNG, GIF, TIFF and WebP under type IMAGE exactly like
+#   optional: Immich files RAW, HEIC, PNG, GIF, TIFF and WebP under type IMAGE exactly like
 #   JPEG, and ImageMagick reads DNG/CR2/CR3/NEF/ARW through libraw. Without the list a RAW
 #   would be developed into an 8-bit JPEG, pass every sanity check, and lose its original.

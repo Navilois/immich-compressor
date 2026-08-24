@@ -136,7 +136,8 @@ version.
 | `src/immich_compressor/hardware.py` | device detection, preset catalog, CPU budget |
 | `src/immich_compressor/models.py` | webhook payload and REST DTOs |
 | `src/immich_compressor/api.py` | typed async Immich client |
-| `src/immich_compressor/store.py` | SQLite job store (WAL) |
+| `src/immich_compressor/store.py` | SQLite job store (WAL), plus the backfill inventory |
+| `src/immich_compressor/metrics.py` | the Prometheus exposition behind `/metrics` |
 | `src/immich_compressor/encoder.py` | preset execution, exiftool, sanity gate |
 | `src/immich_compressor/pipeline.py` | the ten steps, worker loop, trash sweeper |
 | `src/immich_compressor/backfill.py` | library scan, candidate inventory, queue run |
