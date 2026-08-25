@@ -331,6 +331,12 @@ class Job(BaseModel):
     # would describe is already gone. See `JobStore.find_replaced_original`.
     source_checksum: str | None = None
     owner_id: str | None = None
+    # When the original stopped existing on the server, so its checksum can no longer be
+    # held by any client's mirror. NULL until then, and that NULL is a gate: the shim may
+    # only hand the original's checksum to the replacement once this is set, because the
+    # mobile mirror allows exactly one row per (owner, checksum). Set by the pipeline in
+    # `permanent` mode, and by the shim when it sees the purge go past in `trash` mode.
+    original_freed_at: datetime | None = None
     orig_bytes: int | None = None
     new_bytes: int | None = None
     ratio: float | None = None
@@ -341,6 +347,33 @@ class Job(BaseModel):
     updated_at: datetime
     run_after: datetime
     delete_after: datetime | None = None
+
+
+class LedgerEntry(BaseModel):
+    """One replacement, in the shape the shim's translation maps need.
+
+    A narrow projection of ``jobs`` rather than a whole ``Job``: the shim rebuilds these
+    every minute and holds them all in memory, and none of the rest of a job row means
+    anything to a checksum lookup.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_asset_id: str
+    new_asset_id: str
+    source_checksum: str
+    owner_id: str
+    new_checksum: str | None = None
+    original_freed_at: datetime | None = None
+
+    @property
+    def gate_is_open(self) -> bool:
+        """Whether the replacement may carry the original's checksum yet.
+
+        Closed means the original may still exist somewhere as a row holding that
+        checksum, and writing it onto the replacement would collide.
+        """
+        return self.original_freed_at is not None
 
 
 class BackfillCandidate(BaseModel):

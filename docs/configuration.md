@@ -56,6 +56,21 @@ Which encoder to use. The default is to work it out — see [hardware.md](hardwa
 | `mode` | `auto` \| `cpu` \| `qsv` \| `vaapi` \| `nvenc` | `auto` | `auto` detects and confirms the best encoder this machine can actually run. `cpu` never considers a GPU. `qsv`, `vaapi` and `nvenc` pin one hardware encoder — and still fall back to the CPU preset if it fails its one-frame test encode, because a pinned GPU is a preference, not a promise the machine can keep. |
 | `render_node` | string | `auto` | `auto`, or a specific node such as `/dev/dri/renderD129` on a box with more than one GPU. `immich-compressor hardware` lists what is present. |
 
+## `shim`
+
+The checksum-translation shim, which stops a phone re-uploading an original after its compressed replacement took over. Off by default and inert until a reverse proxy routes two paths here — see [shim.md](shim.md).
+
+| Option | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Master switch. Off ships inert: the two proxied routes are not mounted at all, and nothing about what a client sees changes. |
+| `upstream_url` | string | `http://immich-server:2283` | The Immich **origin**, without the `/api` suffix — this is not `immich.base_url`. The shim forwards the client's whole path, which already begins with `/api`, so a value ending in `/api` is rejected at startup rather than producing 404s from a server that is plainly up. |
+| `rewrite_sync_stream` | boolean | `true` | Translate `POST /api/sync/stream`. This is the direction that reaches the mobile app, and the one that actually stops a re-upload. |
+| `rewrite_upload_check` | boolean | `true` | Translate `POST /api/assets/bulk-upload-check`. The mobile app does not use this route; the CLI, `immich-go` and the web uploader do. |
+| `watch_deletes` | boolean | `true` | Watch the sync stream for the purge of an original this service replaced, and open that row's gate when it goes past. With `delete_mode: trash` this is the only way the service ever learns the retention window expired — the deletion happens inside Immich, up to a month later, and nothing reports it. |
+| `log_only` | boolean | `false` | Count what would change and change nothing. The first rollout step: it proves the ledger matches real traffic before a single byte is altered. |
+| `ledger_refresh_seconds` | number | `60.0` | How often the translation maps are rebuilt from the job store. (> 0) |
+| `connect_timeout_s` | number | `10.0` | Connection timeout for the proxied requests. There is deliberately no read timeout on the sync stream, which is long-lived by design. (> 0) |
+
 ## `behavior`
 
 Everything that decides whether and how an asset gets touched. The three that matter most are `dry_run`, `trash_original` and `delete_mode`; [safety.md](safety.md) explains them in order.

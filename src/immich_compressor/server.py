@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import hmac
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -31,6 +33,7 @@ from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from .metrics import render as render_metrics
 from .models import JobState, RejectReason, WebhookPayload
 from .pipeline import SurgeDetector, WebhookRejected, Worker, check_ingest_guards
+from .shim import ChecksumLedger, OwnerResolver, ShimDeps, build_router, describe
 from .store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 logger = logging.getLogger(__name__)
@@ -130,13 +133,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 latched.since.isoformat(),
                 latched.reason,
             )
+        if shim_deps is not None:
+            # Filled in here rather than at import time: the store, the Immich client and
+            # the proxy's connection pool all belong to the running process, not to the
+            # app object. ASGI startup completes before the first request arrives, so the
+            # routes never see a half-built dependency.
+            shim_deps.client = httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=resolved.shim.connect_timeout_s, read=60.0, write=60.0, pool=None
+                ),
+                follow_redirects=False,
+            )
+            shim_deps.store = store
+            shim_deps.ledger = ChecksumLedger(
+                store, resolved.shim.ledger_refresh_seconds, clock=time.monotonic
+            )
+            shim_deps.owners = OwnerResolver(
+                resolved.shim.upstream_url, shim_deps.client, 300.0, time.monotonic
+            )
+            shim_deps.touch = client.touch_asset
+            logger.info("%s", describe(resolved.shim))
         await worker.start()
         try:
             yield
         finally:
             await worker.stop()
+            if shim_deps is not None and shim_deps.client is not None:
+                await shim_deps.client.aclose()
             await client.aclose()
             await store.close()
+
+    # Built before the app so the routes exist in the table FastAPI compiles at startup;
+    # its fields are populated by the lifespan above. `None` means the shim is off, and
+    # then nothing is mounted at all — the two proxied paths simply do not exist here.
+    shim_deps: ShimDeps | None = (
+        ShimDeps(
+            upstream_url=resolved.shim.upstream_url,
+            rewrite_sync_stream=resolved.shim.rewrite_sync_stream,
+            rewrite_upload_check=resolved.shim.rewrite_upload_check,
+            watch_deletes=resolved.shim.watch_deletes,
+            log_only=resolved.shim.log_only,
+        )
+        if resolved.shim.enabled
+        else None
+    )
 
     app = FastAPI(
         title="immich-compressor",
@@ -144,6 +184,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="Out-of-band recompression for Immich assets, driven by a workflow webhook.",
         lifespan=lifespan,
     )
+
+    if shim_deps is not None:
+        app.include_router(build_router(shim_deps))
 
     @app.exception_handler(RequestValidationError)
     async def log_validation_errors(request: Request, exc: RequestValidationError) -> JSONResponse:

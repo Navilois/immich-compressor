@@ -92,6 +92,52 @@ class WebhookSettings(BaseModel):
     header_name: str = "X-Compressor-Token"
 
 
+class ShimSettings(BaseModel):
+    """The checksum-translation shim: two Immich routes proxied through this service.
+
+    Off by default, like everything here that can change what a client sees. When it is
+    on, the phone is told that a replacement carries the checksum its original had, so the
+    local file it still holds matches something in its mirror and is never queued for
+    backup again. Nothing in Immich is altered; the deception is confined to two response
+    fields and is documented in ``docs/shim.md``.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    # The Immich *origin*, not `immich.base_url` — that one already ends in `/api`, and
+    # the shim appends the client's full path including the `/api` prefix. Getting this
+    # wrong produces 404s from a server that is up, which is a miserable thing to debug,
+    # so it is rejected outright below.
+    upstream_url: str = "http://immich-server:2283"
+    rewrite_sync_stream: bool = True
+    rewrite_upload_check: bool = True
+    # Watch the sync stream for the purge of an original this service replaced, and open
+    # that row's gate when it goes past. This is the only way `delete_mode: trash` ever
+    # learns that the retention window expired — the deletion happens inside Immich, up to
+    # 30 days later, and nothing tells this service about it.
+    watch_deletes: bool = True
+    # Count what would change and change nothing. The first rollout stage: it proves the
+    # ledger matches real traffic before a single byte is altered. Suppresses the rewrite
+    # and the touch alike.
+    log_only: bool = False
+    ledger_refresh_seconds: float = Field(default=60.0, gt=0)
+    connect_timeout_s: float = Field(default=10.0, gt=0)
+
+    @model_validator(mode="after")
+    def _normalise(self) -> Self:
+        url = self.upstream_url.rstrip("/")
+        if url.endswith("/api"):
+            raise ConfigError(
+                "shim.upstream_url must be the Immich origin without the /api suffix "
+                f"(got {self.upstream_url!r}; use {url.removesuffix('/api')!r}). "
+                "It is not immich.base_url — the shim forwards the client's full path, "
+                "which already begins with /api."
+            )
+        object.__setattr__(self, "upstream_url", url)
+        return self
+
+
 class BehaviorSettings(BaseModel):
     """Everything that decides whether and how an asset gets touched."""
 
@@ -435,6 +481,7 @@ class Settings(BaseSettings):
 
     immich: ImmichSettings = Field(default_factory=ImmichSettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
+    shim: ShimSettings = Field(default_factory=ShimSettings)
     behavior: BehaviorSettings = Field(default_factory=BehaviorSettings)
     hardware: HardwareSettings = Field(default_factory=HardwareSettings)
     # Written by hand, this always wins. Left empty, the presets are generated from

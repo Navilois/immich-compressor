@@ -17,7 +17,7 @@ from typing import Any, Self
 
 import aiosqlite
 
-from .models import TERMINAL_STATES, BackfillCandidate, Job, JobState, PauseState, SkipReason
+from .models import TERMINAL_STATES, BackfillCandidate, Job, JobState, LedgerEntry, PauseState, SkipReason
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     delete_after    TEXT,
     asset_type      TEXT,
     source_checksum TEXT,
-    owner_id        TEXT
+    owner_id        TEXT,
+    original_freed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state_runafter ON jobs (state, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_delete_after   ON jobs (delete_after);
@@ -91,6 +92,25 @@ _PAUSE_KEY = "paused"
 WEBHOOKS_RECEIVED = "webhooks_received"
 WEBHOOKS_REJECTED = "webhooks_rejected"
 
+# Shim counters. Same reasoning as the webhook pair: the shim runs inside `serve`, and
+# `report` and `check` read it from a different process, so an in-memory number would be
+# invisible exactly where somebody looks for it.
+SHIM_REQUESTS = "shim_requests"
+SHIM_LINES_REWRITTEN = "shim_lines_rewritten"
+SHIM_HASHES_TRANSLATED = "shim_hashes_translated"
+SHIM_GATES_OPENED = "shim_gates_opened"
+SHIM_TOUCHES = "shim_touches"
+SHIM_PASSTHROUGH_ERRORS = "shim_passthrough_errors"
+
+SHIM_COUNTERS: tuple[str, ...] = (
+    SHIM_REQUESTS,
+    SHIM_LINES_REWRITTEN,
+    SHIM_HASHES_TRANSLATED,
+    SHIM_GATES_OPENED,
+    SHIM_TOUCHES,
+    SHIM_PASSTHROUGH_ERRORS,
+)
+
 # Indexes over columns from `_ADDED_COLUMNS`. They have to run *after* the migration:
 # on a database created before that column existed, `CREATE INDEX` would fail here.
 _SCHEMA_POST_MIGRATION = """
@@ -106,7 +126,7 @@ _CANDIDATE_COLUMNS = "asset_id, asset_type, size_bytes, filename, verdict, paylo
 _COLUMNS = (
     "source_asset_id, state, skip_reason, new_asset_id, new_checksum, orig_bytes, new_bytes, "
     "ratio, attempts, last_error, payload, created_at, updated_at, run_after, delete_after, "
-    "asset_type, source_checksum, owner_id"
+    "asset_type, source_checksum, owner_id, original_freed_at"
 )
 
 # Columns added after the first release. `CREATE TABLE IF NOT EXISTS` cannot add them to a
@@ -120,6 +140,9 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     # back as a new asset can be recognised instead of compressed a second time.
     ("source_checksum", "TEXT"),
     ("owner_id", "TEXT"),
+    # The shim's gate. Set once, when the original stops existing on the server; until
+    # then the replacement must not be handed the original's checksum. See `LedgerEntry`.
+    ("original_freed_at", "TEXT"),
 )
 
 # States a worker is allowed to pick up and (re)drive.
@@ -217,7 +240,7 @@ class JobStore:
         run_after = now + timedelta(seconds=delay_seconds)
         cursor = await self._conn.execute(
             f"INSERT INTO jobs ({_COLUMNS}) VALUES "  # noqa: S608 - _COLUMNS is a module constant
-            "(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, NULL, ?, NULL, NULL) "
+            "(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL) "
             "ON CONFLICT(source_asset_id) DO NOTHING",
             (
                 source_asset_id,
@@ -407,6 +430,58 @@ class JobStore:
             row = await cursor.fetchone()
         return _row_to_job(row) if row else None
 
+    # The predicate `ledger_entries` shares with `find_replaced_original`. Written once so
+    # the two can never drift: the guard and the shim must agree on what "this service
+    # replaced that" means, or the shim translates a checksum the guard would not
+    # recognise coming back.
+    _LEDGER_PREDICATE = "source_checksum IS NOT NULL AND owner_id IS NOT NULL AND new_asset_id IS NOT NULL"
+
+    async def ledger_entries(self) -> list[LedgerEntry]:
+        """Every replacement this service made, for the shim's translation maps.
+
+        Deliberately unfiltered by job state and by the gate: the shim needs the closed
+        rows too, because an ``AssetDeleteV1`` for one of their originals is exactly what
+        opens them. Rows from before the ledger existed carry no checksum and no owner and
+        are excluded here for the same reason `find_replaced_original` ignores them —
+        there is nothing left to identify the original by.
+        """
+        query = (
+            "SELECT source_asset_id, new_asset_id, source_checksum, owner_id, new_checksum, "  # noqa: S608 - a class constant, never caller input
+            f"original_freed_at FROM jobs WHERE {self._LEDGER_PREDICATE}"
+        )
+        async with self._conn.execute(query) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            LedgerEntry(
+                source_asset_id=row["source_asset_id"],
+                new_asset_id=row["new_asset_id"],
+                source_checksum=row["source_checksum"],
+                owner_id=row["owner_id"],
+                new_checksum=row["new_checksum"],
+                original_freed_at=_parse(row["original_freed_at"]),
+            )
+            for row in rows
+        ]
+
+    async def mark_original_freed(self, source_asset_id: str, *, when: datetime | None = None) -> bool:
+        """Open the gate for one replacement. Returns ``False`` when it already was.
+
+        First write wins. The two callers reach this from opposite directions — the
+        pipeline right after a ``permanent`` delete it performed itself, the shim when it
+        sees the purge for a trashed original go past on the sync stream — and on a
+        deployment that switched ``delete_mode`` both can fire for the same row. The
+        timestamp is only ever read as "is this set", so the earlier one is the honest one
+        to keep.
+        """
+        async with self._conn.execute(
+            "UPDATE jobs SET original_freed_at = ?, updated_at = ? "
+            "WHERE source_asset_id = ? AND original_freed_at IS NULL",
+            (_iso(when or _now()), _iso(_now()), source_asset_id),
+        ) as cursor:
+            changed = cursor.rowcount > 0
+        await self._conn.commit()
+        return changed
+
     async def replaced_source_asset_ids(self) -> list[str]:
         """Every original this service replaced — the selection ``restore --all-pending`` uses.
 
@@ -484,6 +559,7 @@ class JobStore:
         cannot be read off a row that does not exist yet.
         """
         values = {WEBHOOKS_RECEIVED: 0, WEBHOOKS_REJECTED: 0}
+        values.update(dict.fromkeys(SHIM_COUNTERS, 0))
         async with self._conn.execute("SELECT name, value FROM counters") as cursor:
             values.update({row["name"]: int(row["value"]) for row in await cursor.fetchall()})
         return values
@@ -737,6 +813,7 @@ def _row_to_job(row: aiosqlite.Row) -> Job:
         new_checksum=row["new_checksum"],
         source_checksum=row["source_checksum"],
         owner_id=row["owner_id"],
+        original_freed_at=_parse(row["original_freed_at"]),
         orig_bytes=row["orig_bytes"],
         new_bytes=row["new_bytes"],
         ratio=row["ratio"],

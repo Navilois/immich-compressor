@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from immich_compressor.config import ConfigError, Preset, load_settings
+from immich_compressor.config import ConfigError, Preset, Settings, ShimSettings, load_settings
 
 _PRESETS = """
 presets:
@@ -441,3 +442,35 @@ def test_the_old_min_size_bytes_key_names_its_replacement(
     body = "\nbehavior:\n  min_size_bytes: 20971520\n" + _PRESETS
     with pytest.raises(ConfigError, match="min_savings_bytes"):
         load_settings(_write(tmp_path, body))
+
+
+# ---------------------------------------------------------------------------- the shim
+
+
+def test_shim_ships_inert() -> None:
+    """Same rule as dry_run: nothing that changes what a client sees is on by default."""
+    settings = Settings()
+    assert settings.shim.enabled is False
+    assert settings.shim.log_only is False
+
+
+def test_shim_rejects_an_upstream_url_with_the_api_suffix() -> None:
+    """The one mistake this setting invites, and it fails silently at runtime.
+
+    `immich.base_url` ends in `/api` and this one must not: the shim forwards the client's
+    whole path, which already begins with `/api`. Getting it wrong yields 404s from a
+    server that is demonstrably up.
+    """
+    with pytest.raises(ConfigError, match="without the /api suffix"):
+        ShimSettings(upstream_url="http://immich-server:2283/api")
+
+
+def test_shim_normalises_a_trailing_slash() -> None:
+    assert ShimSettings(upstream_url="http://immich-server:2283/").upstream_url == (
+        "http://immich-server:2283"
+    )
+
+
+def test_shim_rejects_unknown_keys() -> None:
+    with pytest.raises(ValidationError):
+        ShimSettings(rewrite_everything=True)

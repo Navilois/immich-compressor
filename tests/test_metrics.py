@@ -150,3 +150,19 @@ def test_the_endpoint_needs_no_secret_and_exposes_no_asset_ids(settings: Setting
         body = client.get("/metrics").text
     # A uuid anywhere in here would mean an asset id leaked into an unauthenticated page.
     assert not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}", body)
+
+
+def test_shim_counters_are_exposed() -> None:
+    """Zero is a reading, not an absence: a silent shim and an unrouted one look alike."""
+    text = render(
+        store_stats={},
+        counters={"shim_requests": 12, "shim_lines_rewritten": 3},
+        session={},
+        encode_seconds=Histogram(),
+        config={},
+        version="1.3.1",
+    )
+    assert "immich_compressor_shim_requests_total 12" in text
+    assert "immich_compressor_shim_lines_rewritten_total 3" in text
+    assert "immich_compressor_shim_gates_opened_total 0" in text
+    assert "# TYPE immich_compressor_shim_touches_total counter" in text

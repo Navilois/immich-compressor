@@ -30,5 +30,6 @@ readme
 release
 safety
 setup
+shim
 startup
 tests
