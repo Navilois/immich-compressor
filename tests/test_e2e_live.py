@@ -26,7 +26,7 @@ import pytest
 from immich_compressor.api import ImmichClient, ImmichError
 from immich_compressor.config import Preset, Settings
 from immich_compressor.encoder import run_command
-from immich_compressor.models import JobState
+from immich_compressor.models import JobState, UpdateAssetFields
 from immich_compressor.pipeline import Pipeline
 from immich_compressor.store import JobStore
 
@@ -426,3 +426,118 @@ async def test_live_dry_run_changes_nothing(
         assert await api.has_metadata_key(source_id, "compressor") is None
     finally:
         await raw.request("DELETE", "/assets", json={"ids": [source_id], "force": True})
+
+
+async def _read_sync_stream(raw: httpx.AsyncClient, types: list[str]) -> list[dict[str, object]]:
+    """One pass of `POST /sync/stream`, acking every batch as a real client would.
+
+    Returns the parsed lines. Acking matters: the point of every assertion below is what
+    the *next* pass contains, and that is decided entirely by the checkpoint this one
+    leaves behind.
+    """
+    lines: list[dict[str, object]] = []
+    async with raw.stream("POST", "/sync/stream", json={"types": types}) as response:
+        if response.status_code != 200:
+            await response.aread()
+            pytest.skip(f"this server/credential cannot open a sync session: {response.status_code}")
+        async for line in response.aiter_lines():
+            if line.strip():
+                lines.append(json.loads(line))
+    if lines:
+        ack = await raw.post("/sync/ack", json={"acks": [lines[-1]["ack"]]})
+        ack.raise_for_status()
+    return lines
+
+
+async def test_live_touch_makes_the_sync_stream_reoffer_an_asset(
+    tmp_path: Path, api: ImmichClient, raw: httpx.AsyncClient
+) -> None:
+    """The one link in the shim's chain that source reading cannot settle.
+
+    The shim can only rewrite a line the server actually sends, and the sync stream only
+    offers assets whose `updateId` is newer than the client's checkpoint. Nothing changes
+    about a replacement after it is created, so without a deliberate no-op update it would
+    never be sent again and the translation would be armed but never delivered.
+
+    Two halves, and the control is the important one:
+
+    * after acking everything, a second pass must **not** contain the asset — otherwise the
+      test proves nothing, because every pass would contain it;
+    * after `touch_asset`, the next pass must contain it.
+
+    That the trigger fires on a value-identical UPDATE was measured directly against
+    PostgreSQL 16; this asserts the whole path through Immich's own API and query.
+    """
+    clip = await _make_fat_clip(tmp_path / f"{MARKER}-touch.mp4")
+    stamp = datetime.now(UTC).strftime("%H%M%S%f")
+    upload = await raw.post(
+        "/assets",
+        files={"assetData": (f"{MARKER}-{stamp}.mp4", clip.read_bytes(), "video/mp4")},
+        data={
+            "fileCreatedAt": "2024-06-15T12:30:00.000Z",
+            "fileModifiedAt": "2024-06-15T12:30:00.000Z",
+            "filename": f"{MARKER}-{stamp}.mp4",
+            "duration": "6000",
+        },
+    )
+    assert upload.status_code in (200, 201), upload.text
+    asset_id: str = upload.json()["id"]
+
+    try:
+        await api.wait_for_metadata_extraction(asset_id, timeout_s=60)
+
+        # Drain to a checkpoint. Two passes because metadata extraction keeps updating the
+        # row for a moment after the upload, and the first drain can race it.
+        await _read_sync_stream(raw, ["AssetsV2"])
+        await _read_sync_stream(raw, ["AssetsV2"])
+
+        def offered(lines: list[dict[str, object]]) -> set[str]:
+            return {
+                str(item["data"]["id"])  # type: ignore[index]
+                for item in lines
+                if isinstance(item.get("data"), dict) and "id" in item["data"]  # type: ignore[operator]
+            }
+
+        # The control. If this fails, every pass contains everything and the assertion
+        # below would pass for the wrong reason.
+        assert asset_id not in offered(await _read_sync_stream(raw, ["AssetsV2"]))
+
+        await api.touch_asset(asset_id)
+
+        assert asset_id in offered(await _read_sync_stream(raw, ["AssetsV2"]))
+    finally:
+        await raw.request("DELETE", "/assets", json={"ids": [asset_id], "force": True})
+
+
+async def test_live_touch_changes_nothing_a_user_would_see(
+    tmp_path: Path, api: ImmichClient, raw: httpx.AsyncClient
+) -> None:
+    """It writes back the value it read. `isFavorite` must survive in both states."""
+    clip = await _make_fat_clip(tmp_path / f"{MARKER}-touch-noop.mp4")
+    stamp = datetime.now(UTC).strftime("%H%M%S%f")
+    upload = await raw.post(
+        "/assets",
+        files={"assetData": (f"{MARKER}-{stamp}.mp4", clip.read_bytes(), "video/mp4")},
+        data={
+            "fileCreatedAt": "2024-06-15T12:30:00.000Z",
+            "fileModifiedAt": "2024-06-15T12:30:00.000Z",
+            "filename": f"{MARKER}-{stamp}.mp4",
+            "duration": "6000",
+        },
+    )
+    assert upload.status_code in (200, 201), upload.text
+    asset_id: str = upload.json()["id"]
+
+    try:
+        await api.wait_for_metadata_extraction(asset_id, timeout_s=60)
+        for favorite in (False, True):
+            await api.update_asset(asset_id, UpdateAssetFields(is_favorite=favorite))
+            before = (await raw.get(f"/assets/{asset_id}")).json()
+            await api.touch_asset(asset_id)
+            after = (await raw.get(f"/assets/{asset_id}")).json()
+
+            assert after["isFavorite"] is favorite
+            assert after["checksum"] == before["checksum"]
+            assert after["originalFileName"] == before["originalFileName"]
+    finally:
+        await raw.request("DELETE", "/assets", json={"ids": [asset_id], "force": True})

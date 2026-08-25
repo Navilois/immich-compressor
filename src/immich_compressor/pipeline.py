@@ -38,7 +38,7 @@ from .models import (
     WebhookAsset,
     WebhookPayload,
 )
-from .store import JobStore
+from .store import SHIM_TOUCHES, JobStore
 
 logger = logging.getLogger(__name__)
 
@@ -682,7 +682,44 @@ class Pipeline:
             "permanently deleted — not recoverable" if permanent else "moved to trash",
             new_asset_id,
         )
+        if permanent:
+            await self._free_original_checksum(job, new_asset_id)
         return True
+
+    async def _free_original_checksum(self, job: Job, new_asset_id: str) -> None:
+        """Record that the original's checksum is nobody's any more, and get it handed over.
+
+        Only after a *permanent* delete, which is the one case this service witnesses. In
+        ``trash`` mode the row survives, holding its checksum, until Immich's retention
+        expires up to a month later — an event that happens entirely inside Immich and is
+        never reported here. The shim watches the sync stream for it instead.
+
+        The gate is recorded whether or not the shim is running: it is a fact about the
+        server, it costs one UPDATE, and a deployment that turns the shim on later wants
+        the history. The touch is a write against the library, so it is only worth making
+        when something is actually listening for the result.
+        """
+        if not (job.source_checksum and job.owner_id):
+            return  # A job from before the ledger existed. Nothing to translate to.
+        if not await self._store.mark_original_freed(job.source_asset_id):
+            return
+        shim = self._settings.shim
+        if not shim.enabled or shim.log_only or not shim.rewrite_sync_stream:
+            return
+        try:
+            await self._client.touch_asset(new_asset_id)
+        except ImmichError as exc:
+            # The gate is open and the ledger is correct; only the re-offer is missing, and
+            # the next change to that asset supplies it. Never worth failing a finished job.
+            logger.warning(
+                "could not touch %s to have it re-sent to clients: %s. The checksum "
+                "translation is armed but may not reach a device until that asset changes "
+                "for another reason",
+                new_asset_id,
+                exc,
+            )
+            return
+        await self._store.bump_counter(SHIM_TOUCHES)
 
     async def _verify_replacement(self, new_asset_id: str, expected_checksum: str | None) -> str | None:
         """The gate in front of the delete. Returns the first failure, or ``None``.

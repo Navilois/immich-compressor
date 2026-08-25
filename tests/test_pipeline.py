@@ -31,7 +31,7 @@ from immich_compressor.pipeline import (
     marker_blocks_reprocessing,
 )
 from immich_compressor.server import create_app
-from immich_compressor.store import JobStore
+from immich_compressor.store import SHIM_TOUCHES, JobStore
 
 BASE = "http://immich-test:2283/api"
 
@@ -1130,3 +1130,166 @@ def test_startup_prints_the_pattern_the_workflow_has_to_carry(
         pass
 
     assert r"^(?!.*\.cmp\.).*$" in caplog.text
+
+
+# ------------------------------------------------ the shim's gate, opened by the delete
+
+
+ORIGINAL_HASH = "02MpaJkpzGHNbGwxWtencVNK7uY="
+OWNER_ID = "11111111-1111-4111-8111-111111111111"
+REPLACEMENT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+def _mock_verified_replacement(new_id: str, checksum: str, *, favorite: bool = False) -> None:
+    """Everything `_verify_replacement` asks about the replacement, all answers good."""
+    respx.get(f"{BASE}/assets/{new_id}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": new_id,
+                "type": "VIDEO",
+                "ownerId": OWNER_ID,
+                "isFavorite": favorite,
+                "isTrashed": False,
+                "checksum": checksum,
+                "originalFileName": "clip.cmp.mp4",
+                "exifInfo": {"dateTimeOriginal": "2024-06-15T12:30:00.000Z"},
+            },
+        )
+    )
+    respx.get(f"{BASE}/assets/{new_id}/metadata").mock(
+        return_value=httpx.Response(200, json=[{"key": "compressor", "value": {"v": 1}}])
+    )
+
+
+async def _finalize(
+    settings: Settings, store: JobStore, *, checksum: str | None = ORIGINAL_HASH
+) -> Job | None:
+    """Seed a replaced job at the point just before its original is removed."""
+    asset_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    await store.enqueue(asset_id, {"data": {"asset": {"id": asset_id, "type": "VIDEO"}}}, delay_seconds=0)
+    await store.update(
+        asset_id,
+        new_asset_id=REPLACEMENT_ID,
+        new_checksum="replacement-hash=",
+        source_checksum=checksum,
+        owner_id=OWNER_ID if checksum else None,
+    )
+    job = await store.get(asset_id)
+    assert job is not None
+    client = ImmichClient(BASE, "k")
+    try:
+        await Pipeline(settings, client, store).finalize_original(job, REPLACEMENT_ID, "replacement-hash=")
+    finally:
+        await client.aclose()
+    return await store.get(asset_id)
+
+
+@respx.mock
+async def test_permanent_delete_opens_the_gate_and_touches_the_replacement(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """The only moment this service ever witnesses an original ceasing to exist."""
+    settings.behavior.delete_mode = "permanent"
+    settings.shim.enabled = True
+    _mock_verified_replacement(REPLACEMENT_ID, "replacement-hash=")
+    respx.delete(f"{BASE}/assets").mock(return_value=httpx.Response(204))
+    touch = respx.put(f"{BASE}/assets/{REPLACEMENT_ID}").mock(return_value=httpx.Response(204))
+
+    async with JobStore(settings.database_path) as store:
+        job = await _finalize(settings, store)
+        assert job is not None
+        assert job.state is JobState.DONE
+        assert job.original_freed_at is not None
+        assert (await store.counters())[SHIM_TOUCHES] == 1
+
+    assert touch.call_count == 1
+    # The body must carry a field: an empty PUT is a plain read upstream and bumps no
+    # `updateId`, so the replacement would never be re-offered to the phone.
+    assert json.loads(touch.calls.last.request.content) == {"isFavorite": False}
+
+
+@respx.mock
+async def test_the_touch_writes_back_the_value_it_read(settings: Settings, tmp_path: Path) -> None:
+    """A favourited replacement must not be un-favourited by being re-offered."""
+    settings.behavior.delete_mode = "permanent"
+    settings.shim.enabled = True
+    _mock_verified_replacement(REPLACEMENT_ID, "replacement-hash=", favorite=True)
+    respx.delete(f"{BASE}/assets").mock(return_value=httpx.Response(204))
+    touch = respx.put(f"{BASE}/assets/{REPLACEMENT_ID}").mock(return_value=httpx.Response(204))
+
+    async with JobStore(settings.database_path) as store:
+        await _finalize(settings, store)
+
+    assert json.loads(touch.calls.last.request.content) == {"isFavorite": True}
+
+
+@respx.mock
+async def test_trash_mode_leaves_the_gate_closed(settings: Settings, tmp_path: Path) -> None:
+    """The original still exists, holding its checksum. Only the purge frees it, and that
+    happens inside Immich up to a month later — the shim watches for it instead."""
+    settings.behavior.delete_mode = "trash"
+    settings.shim.enabled = True
+    _mock_verified_replacement(REPLACEMENT_ID, "replacement-hash=")
+    respx.delete(f"{BASE}/assets").mock(return_value=httpx.Response(204))
+    touch = respx.put(f"{BASE}/assets/{REPLACEMENT_ID}").mock(return_value=httpx.Response(204))
+
+    async with JobStore(settings.database_path) as store:
+        job = await _finalize(settings, store)
+        assert job is not None and job.original_freed_at is None
+
+    assert touch.call_count == 0
+
+
+@respx.mock
+async def test_the_gate_is_recorded_even_with_the_shim_off(settings: Settings, tmp_path: Path) -> None:
+    """It is a fact about the server, not about this service's configuration.
+
+    Only the touch is conditional: it is a write, and worth making only when something is
+    listening for the result.
+    """
+    settings.behavior.delete_mode = "permanent"
+    settings.shim.enabled = False
+    _mock_verified_replacement(REPLACEMENT_ID, "replacement-hash=")
+    respx.delete(f"{BASE}/assets").mock(return_value=httpx.Response(204))
+    touch = respx.put(f"{BASE}/assets/{REPLACEMENT_ID}").mock(return_value=httpx.Response(204))
+
+    async with JobStore(settings.database_path) as store:
+        job = await _finalize(settings, store)
+        assert job is not None and job.original_freed_at is not None
+
+    assert touch.call_count == 0
+
+
+@respx.mock
+async def test_a_pre_ledger_job_opens_no_gate(settings: Settings, tmp_path: Path) -> None:
+    """No checksum was ever recorded, so there is nothing to translate to."""
+    settings.behavior.delete_mode = "permanent"
+    settings.shim.enabled = True
+    _mock_verified_replacement(REPLACEMENT_ID, "replacement-hash=")
+    respx.delete(f"{BASE}/assets").mock(return_value=httpx.Response(204))
+    touch = respx.put(f"{BASE}/assets/{REPLACEMENT_ID}").mock(return_value=httpx.Response(204))
+
+    async with JobStore(settings.database_path) as store:
+        job = await _finalize(settings, store, checksum=None)
+        assert job is not None and job.original_freed_at is None
+
+    assert touch.call_count == 0
+
+
+@respx.mock
+async def test_a_failing_touch_does_not_fail_the_job(settings: Settings, tmp_path: Path) -> None:
+    """The original is already gone; the job is finished. Only the re-offer is missing."""
+    settings.behavior.delete_mode = "permanent"
+    settings.shim.enabled = True
+    _mock_verified_replacement(REPLACEMENT_ID, "replacement-hash=")
+    respx.delete(f"{BASE}/assets").mock(return_value=httpx.Response(204))
+    respx.put(f"{BASE}/assets/{REPLACEMENT_ID}").mock(return_value=httpx.Response(500))
+
+    async with JobStore(settings.database_path) as store:
+        job = await _finalize(settings, store)
+        assert job is not None
+        assert job.state is JobState.DONE
+        # Still recorded: the ledger is right, so a later change to the asset re-offers it.
+        assert job.original_freed_at is not None
+        assert (await store.counters())[SHIM_TOUCHES] == 0
