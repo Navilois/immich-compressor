@@ -364,6 +364,13 @@ class Pipeline:
         detail = await self._client.get_asset(asset_id)
         if detail.is_trashed:
             raise SkipJob(SkipReason.TRASHED, "asset is in the trash")
+
+        # The ledger, written before anything mutating: what this asset hashed to and who
+        # owns it. Once the original is deleted the server forgets its checksum, so this
+        # row is the only remaining way to recognise the same bytes coming back.
+        await self._store.update(asset_id, source_checksum=detail.checksum, owner_id=detail.owner_id)
+        await self._check_re_upload(asset_id, detail)
+
         if behavior.skip_if_named_people:
             named = detail.named_people()
             if named:
@@ -556,6 +563,40 @@ class Pipeline:
             asset_id,
             behavior.delete_mode,
             delete_after.isoformat(),
+        )
+
+    # ------------------------------------------------------------ ledger guard
+
+    async def _check_re_upload(self, asset_id: str, detail: AssetDetail) -> None:
+        """Recognise an original this service already replaced, arriving a second time.
+
+        A device that still holds the file has no way to know the server ever had it: the
+        app decides what to back up by joining its local checksums against the assets it
+        has mirrored, and a deleted asset leaves no trace in that mirror. So the same bytes
+        come back as a *new* asset, with a new id and no compressor marker, and the loop
+        guard in step 2 cannot see it. This can.
+
+        It never deletes and never touches the asset. The job stops at ``re_uploaded``,
+        which is the whole point — the operator learns that a device is re-uploading, and
+        the file is not put through a second generation of the same encode.
+
+        The verdict is stable: ``reprocess`` and ``requeue`` both re-run this check and
+        reach it again, exactly as they do for an asset carrying a compressor marker. The
+        bytes have been compressed once; wanting them compressed twice is not a state the
+        pipeline offers.
+        """
+        earlier = await self._store.find_replaced_original(
+            checksum=detail.checksum,
+            owner_id=detail.owner_id,
+            exclude_asset_id=asset_id,
+        )
+        if earlier is None:
+            return
+        raise SkipJob(
+            SkipReason.RE_UPLOADED,
+            f"same bytes as {earlier.source_asset_id}, replaced by "
+            f"{earlier.new_asset_id} on {earlier.updated_at.date().isoformat()} — a device "
+            f"still holding the original has uploaded it again",
         )
 
     # -------------------------------------------------------------- still guards

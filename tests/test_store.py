@@ -339,3 +339,110 @@ async def test_replaced_source_asset_ids_is_not_capped(tmp_path: Path) -> None:
             await store.update(f"a{index:03d}", state=JobState.DONE, new_asset_id=f"c{index:03d}")
 
         assert len(await store.replaced_source_asset_ids()) == 250
+
+
+# --------------------------------------------------------------------- the ledger
+
+
+async def test_find_replaced_original_recognises_the_same_bytes(tmp_path: Path) -> None:
+    """The re-upload case: same checksum, same owner, a brand-new asset id."""
+    async with JobStore(tmp_path / "s.db") as store:
+        await store.enqueue("original", PAYLOAD, delay_seconds=0)
+        await store.update(
+            "original",
+            state=JobState.DONE,
+            new_asset_id="replacement",
+            source_checksum="c3Vt",
+            owner_id="user-1",
+        )
+        await store.enqueue("re-uploaded", PAYLOAD, delay_seconds=0)
+
+        found = await store.find_replaced_original(
+            checksum="c3Vt", owner_id="user-1", exclude_asset_id="re-uploaded"
+        )
+        assert found is not None
+        assert found.source_asset_id == "original"
+        assert found.new_asset_id == "replacement"
+
+
+async def test_find_replaced_original_is_scoped_to_the_owner(tmp_path: Path) -> None:
+    """Immich's uniqueness constraint is (ownerId, checksum). Two users owning the same
+    photo are two assets, and neither is evidence about the other."""
+    async with JobStore(tmp_path / "s.db") as store:
+        await store.enqueue("hers", PAYLOAD, delay_seconds=0)
+        await store.update(
+            "hers", state=JobState.DONE, new_asset_id="copy", source_checksum="c3Vt", owner_id="user-1"
+        )
+
+        assert (
+            await store.find_replaced_original(checksum="c3Vt", owner_id="user-2", exclude_asset_id="theirs")
+            is None
+        )
+
+
+async def test_find_replaced_original_ignores_jobs_that_replaced_nothing(tmp_path: Path) -> None:
+    """A skipped or failed job left its original in place, so its checksum is still the
+    server's. Matching on it would skip an asset that was never compressed."""
+    async with JobStore(tmp_path / "s.db") as store:
+        await store.enqueue("skipped", PAYLOAD, delay_seconds=0)
+        await store.update("skipped", source_checksum="c3Vt", owner_id="user-1")
+        await store.mark_skipped("skipped", SkipReason.NO_GAIN)
+
+        assert (
+            await store.find_replaced_original(checksum="c3Vt", owner_id="user-1", exclude_asset_id="other")
+            is None
+        )
+
+
+async def test_find_replaced_original_never_matches_the_job_asking(tmp_path: Path) -> None:
+    """A retry re-reads the same asset and must not recognise itself as its own re-upload."""
+    async with JobStore(tmp_path / "s.db") as store:
+        await store.enqueue("asset-1", PAYLOAD, delay_seconds=0)
+        await store.update(
+            "asset-1", state=JobState.DONE, new_asset_id="copy", source_checksum="c3Vt", owner_id="user-1"
+        )
+
+        assert (
+            await store.find_replaced_original(checksum="c3Vt", owner_id="user-1", exclude_asset_id="asset-1")
+            is None
+        )
+
+
+async def test_find_replaced_original_needs_both_halves(tmp_path: Path) -> None:
+    """Rows from before the ledger existed carry neither, and a partial match is a guess."""
+    async with JobStore(tmp_path / "s.db") as store:
+        await store.enqueue("legacy", PAYLOAD, delay_seconds=0)
+        await store.update("legacy", state=JobState.DONE, new_asset_id="copy")
+        job = await store.get("legacy")
+        assert job is not None and job.source_checksum is None and job.owner_id is None
+
+        for checksum, owner in (("c3Vt", None), (None, "user-1"), (None, None)):
+            assert (
+                await store.find_replaced_original(
+                    checksum=checksum, owner_id=owner, exclude_asset_id="other"
+                )
+                is None
+            )
+
+
+async def test_ledger_columns_are_added_to_an_existing_database(tmp_path: Path) -> None:
+    """A store created before the ledger existed opens, migrates and keeps its rows."""
+    import aiosqlite
+
+    path = tmp_path / "old.db"
+    async with JobStore(path) as store:
+        await store.enqueue("asset-1", PAYLOAD, delay_seconds=0)
+
+    # Rebuild `jobs` without the two ledger columns, exactly as 1.3.1 wrote it.
+    async with aiosqlite.connect(path) as db:
+        await db.execute("DROP INDEX IF EXISTS idx_jobs_ledger")
+        await db.execute("ALTER TABLE jobs DROP COLUMN source_checksum")
+        await db.execute("ALTER TABLE jobs DROP COLUMN owner_id")
+        await db.commit()
+
+    async with JobStore(path) as store:
+        job = await store.get("asset-1")
+        assert job is not None
+        assert job.source_checksum is None and job.owner_id is None
+        await store.update("asset-1", source_checksum="c3Vt", owner_id="user-1")
+        assert (await store.get("asset-1")).source_checksum == "c3Vt"  # type: ignore[union-attr]

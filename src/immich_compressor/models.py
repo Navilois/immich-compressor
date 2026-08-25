@@ -191,6 +191,10 @@ class AssetDetail(BaseModel):
 
     id: str
     type: str
+    # Immich declares `ownerId` as a required uuid, but it is read defensively: the ledger
+    # only matches when it is present, so a server that ever omits it costs a recognition,
+    # never a wrong one.
+    owner_id: str | None = Field(default=None, alias="ownerId")
     is_favorite: NullableBool = Field(default=False, alias="isFavorite")
     is_trashed: NullableBool = Field(default=False, alias="isTrashed")
     visibility: str | None = None
@@ -248,6 +252,10 @@ class SkipReason(StrEnum):
     # The source is already compressed at or below the preset's target quality, so a
     # re-encode would cost a generation of quantisation error for no gain.
     SOURCE_QUALITY = "source_quality"
+    # A file this service has already replaced once has arrived again as a new asset —
+    # same checksum, same owner, different id. Recognition only: nothing is deleted, and
+    # the asset stays exactly as the client uploaded it.
+    RE_UPLOADED = "re_uploaded"
 
 
 class RejectReason(StrEnum):
@@ -315,6 +323,14 @@ class Job(BaseModel):
     # Base64 SHA-1 of the file we uploaded, kept so the sweeper can still verify the
     # replacement hours later, long after the local output file is gone.
     new_checksum: str | None = None
+    # Base64 SHA-1 the server reported for the *original*, and the user it belonged to.
+    # Together they are the ledger: after the original is gone the same bytes can come back
+    # from a device that still holds them, and this pair is the only way left to recognise
+    # them. Recorded before anything mutating, so a job that fails still carries them. NULL
+    # on rows written before the columns existed, and unrecoverable there: the original they
+    # would describe is already gone. See `JobStore.find_replaced_original`.
+    source_checksum: str | None = None
+    owner_id: str | None = None
     orig_bytes: int | None = None
     new_bytes: int | None = None
     ratio: float | None = None

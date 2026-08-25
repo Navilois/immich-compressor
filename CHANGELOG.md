@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A re-uploaded original is recognised instead of compressed a second time.** Every job
+  now records the checksum and owner id the server reported for the original, before
+  anything mutating happens. An asset that later arrives carrying the checksum of an
+  original this service has already replaced is skipped as the new `re_uploaded` reason,
+  naming the earlier asset, its replacement and the date in the log. Nothing is downloaded,
+  encoded, uploaded or deleted — this recognises the situation, it does not act on it.
+
+  The situation it recognises: the Immich mobile app decides what to back up by joining the
+  checksums of the files on the device against the assets it has mirrored from the server
+  (`BackupRepository.getCandidates`, verified against `immich-app/immich@fbd5dc2`). A
+  deleted asset leaves no row in that mirror, so a device that still holds the file uploads
+  it again — as a new asset, with a new id and no compressor marker, which is why the
+  existing loop guard cannot see it.
+
+  Two columns, `source_checksum` and `owner_id`, are added to the `jobs` table and applied
+  automatically on open. They are empty for jobs that ran before this release and cannot be
+  backfilled: the original they would describe is already gone. Recognition is therefore
+  complete only from this version onwards.
+
 ### Fixed
+
+- **`docs/faq.md` no longer claims that `delete_mode: trash` avoids the re-upload.** It
+  delays it. Immich's own trash retention defaults to 30 days (`trash: { enabled: true,
+  days: 30 }`, verified against `immich-app/immich@fbd5dc2`); when the scheduled purge
+  hard-deletes the original its checksum stops being known and the re-upload becomes
+  possible, exactly as it would after a `force` delete. The answer now describes the
+  mechanism, the 30-day reprieve and what `re_uploaded` does about it.
 
 - **The metadata gate no longer fails a job on floating-point re-approximation.** Values
   that are numbers on both sides — with an identical unit, if any — are now compared with a

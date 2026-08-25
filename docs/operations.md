@@ -112,10 +112,15 @@ crash between upload and linking resumes rather than duplicating work.
 
 Skip reasons: `already_compressed`, `too_small`, `wrong_type`, `unsupported_format`,
 `embedded_media`, `source_quality`, `no_gain`, `duplicate`, `named_people`, `edited`,
-`external_library`, `live_photo`, `locked`, `trashed`, `no_preset`, `dry_run`. The three
-stills-only ones — a format that is not JPEG, a motion photo, and a source already at or
-below the preset's quality target — are explained in
+`external_library`, `live_photo`, `locked`, `trashed`, `re_uploaded`, `no_preset`,
+`dry_run`. The three stills-only ones — a format that is not JPEG, a motion photo, and a
+source already at or below the preset's quality target — are explained in
 [troubleshooting.md](troubleshooting.md#everything-is-skipped).
+
+`re_uploaded` is the one worth watching: it means a device put an original this service had
+already replaced back onto the server. A steady trickle is one phone that has not caught
+up; a burst is a reinstall or a second client. Neither is something this service can fix
+from its side — see [the FAQ](faq.md#will-my-phone-just-re-upload-the-original).
 
 Jobs are claimed by a worker lane, one per entry in `enabled_types`, so a long video job
 never blocks a queue of image jobs.

@@ -100,13 +100,24 @@ def _mock_extracted(asset_id: str) -> None:
     )
 
 
-def _mock_asset_detail(asset_id: str, people: list[dict[str, str]] | None = None) -> None:
-    respx.get(f"{BASE}/assets/{asset_id}").mock(
-        return_value=httpx.Response(
-            200,
-            json={"id": asset_id, "type": "VIDEO", "isTrashed": False, "people": people or []},
-        )
-    )
+def _mock_asset_detail(
+    asset_id: str,
+    people: list[dict[str, str]] | None = None,
+    *,
+    checksum: str | None = None,
+    owner_id: str | None = None,
+) -> None:
+    body: dict[str, Any] = {
+        "id": asset_id,
+        "type": "VIDEO",
+        "isTrashed": False,
+        "people": people or [],
+    }
+    if checksum is not None:
+        body["checksum"] = checksum
+    if owner_id is not None:
+        body["ownerId"] = owner_id
+    respx.get(f"{BASE}/assets/{asset_id}").mock(return_value=httpx.Response(200, json=body))
 
 
 # ------------------------------------------------------------------------- dry run
@@ -237,6 +248,114 @@ async def test_named_people_are_left_alone(settings: Settings, video_payload_raw
     assert job is not None
     assert job.skip_reason is SkipReason.NAMED_PEOPLE
     assert download.call_count == 0
+
+
+# ------------------------------------------------------------------- the ledger
+
+
+@respx.mock
+async def test_a_re_uploaded_original_is_recognised_not_recompressed(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    """The gap upstream leaves open: a device that still holds the file uploads it again.
+
+    It arrives as a new asset — new id, no compressor marker — so the loop guard cannot
+    see it. The ledger can, and it stops the job before the download.
+    """
+    settings.behavior.dry_run = False
+    asset_id = video_payload_raw["data"]["asset"]["id"]
+    _mock_no_marker(asset_id)
+    _mock_asset_detail(asset_id, checksum="c3Vt", owner_id="user-1")
+    download = respx.get(f"{BASE}/assets/{asset_id}/original")
+    delete = respx.delete(f"{BASE}/assets")
+
+    async with JobStore(settings.database_path) as store:
+        # An original this service replaced, whose bytes are now back under a new id.
+        await store.enqueue("earlier-original", {"type": "AssetV1", "data": {}}, delay_seconds=0)
+        await store.update(
+            "earlier-original",
+            state=JobState.DONE,
+            new_asset_id="replacement",
+            source_checksum="c3Vt",
+            owner_id="user-1",
+        )
+
+        client = ImmichClient(BASE, "k")
+        pipeline = Pipeline(settings, client, store)
+        await pipeline.run_job(await _seed(store, video_payload_raw))
+        job = await store.get(asset_id)
+
+        assert job is not None
+        assert job.state is JobState.SKIPPED
+        assert job.skip_reason is SkipReason.RE_UPLOADED
+
+        # And the verdict is stable: `reprocess` re-runs the check and reaches it again,
+        # exactly as it does for an asset that carries a compressor marker.
+        await store.reset(asset_id)
+        claimed = await store.claim_next()
+        assert claimed is not None
+        await pipeline.run_job(claimed)
+        await client.aclose()
+        again = await store.get(asset_id)
+
+    assert again is not None
+    assert again.skip_reason is SkipReason.RE_UPLOADED
+    # Recognition only. Nothing was downloaded, encoded, uploaded or removed.
+    assert download.call_count == 0
+    assert delete.call_count == 0
+
+
+@respx.mock
+async def test_the_ledger_is_recorded_before_anything_mutating(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    """A dry run stops before the first mutating request, and still leaves the ledger
+    behind — the checksum is unrecoverable once the original is gone, so it cannot wait
+    for a later step."""
+    settings.behavior.dry_run = True
+    asset_id = video_payload_raw["data"]["asset"]["id"]
+    _mock_no_marker(asset_id)
+    _mock_asset_detail(asset_id, checksum="c3Vt", owner_id="user-1")
+
+    async with JobStore(settings.database_path) as store:
+        client = ImmichClient(BASE, "k")
+        await Pipeline(settings, client, store).run_job(await _seed(store, video_payload_raw))
+        await client.aclose()
+        job = await store.get(asset_id)
+
+    assert job is not None
+    assert job.skip_reason is SkipReason.DRY_RUN
+    assert job.source_checksum == "c3Vt"
+    assert job.owner_id == "user-1"
+
+
+@respx.mock
+async def test_an_unrelated_asset_is_not_taken_for_a_re_upload(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    """Different bytes, same owner. The guard must stay out of the way."""
+    settings.behavior.dry_run = True
+    asset_id = video_payload_raw["data"]["asset"]["id"]
+    _mock_no_marker(asset_id)
+    _mock_asset_detail(asset_id, checksum="b3RoZXI=", owner_id="user-1")
+
+    async with JobStore(settings.database_path) as store:
+        await store.enqueue("earlier-original", {"type": "AssetV1", "data": {}}, delay_seconds=0)
+        await store.update(
+            "earlier-original",
+            state=JobState.DONE,
+            new_asset_id="replacement",
+            source_checksum="c3Vt",
+            owner_id="user-1",
+        )
+
+        client = ImmichClient(BASE, "k")
+        await Pipeline(settings, client, store).run_job(await _seed(store, video_payload_raw))
+        await client.aclose()
+        job = await store.get(asset_id)
+
+    assert job is not None
+    assert job.skip_reason is SkipReason.DRY_RUN
 
 
 # ------------------------------------------------------------------- happy path

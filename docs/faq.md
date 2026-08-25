@@ -66,13 +66,37 @@ compressed version is a new asset with a new id.
 
 ## Will my phone just re-upload the original?
 
-Possibly. The Immich app deduplicates by checksum (`POST /assets/bulk-upload-check`). Once
-the original is **permanently** deleted, a device that still holds the file can upload it
-again, and the service will compress it again — the marker does not help, because it is a
-new asset.
+Possibly, and `delete_mode: trash` only delays it. The Immich app decides what to back up
+by checksum: it joins the hashes of the files on the device against the assets it has
+mirrored from the server. A deleted asset leaves nothing in that mirror, so the file looks
+like it was never uploaded and goes up again — as a **new** asset, with a new id and no
+compressor marker.
 
-Watch for this during the rollout with a real device. There is no clean fix from this side.
-With `delete_mode: trash` the checksum is still known to the server, so it does not arise.
+**`trash` is a 30-day reprieve, not a fix.** Immich's own trash retention defaults to 30
+days (`trash.days` in the server settings). While the original sits in the trash its
+checksum is still known and the device stays quiet. When the scheduled purge hard-deletes
+it, the checksum stops being known and the re-upload becomes possible — from the phone's
+point of view a purge and a `force` delete are the same event.
+
+**What this service does about it.** It cannot stop the upload — that decision is made on
+the device, before any request reaches Immich. What it does is refuse to compress the same
+bytes twice. Every job records the checksum and owner of the original before anything is
+touched, and an asset that arrives carrying the checksum of an original this service has
+already replaced is skipped as `re_uploaded`, naming the earlier asset and its replacement
+in the log. Nothing is downloaded, nothing is encoded and nothing is deleted.
+
+Two limits worth knowing:
+
+- The ledger only covers jobs that ran **after** the version that introduced it. For an
+  original deleted before that, the checksum is gone from both sides and cannot be
+  recovered.
+- Recognition is not prevention. The duplicate is on the server and stays there until you
+  remove it; `report` counts the `re_uploaded` skips so a device that keeps doing it is
+  visible rather than silent.
+
+If the re-uploads keep coming, the cause is on the device — an app that has not synced, a
+second device, or a folder-sync client such as `immich-go` pointed at the same files, none
+of which this service can see.
 
 ## Can it compress photos too?
 
