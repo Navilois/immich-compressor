@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at      TEXT NOT NULL,
     run_after       TEXT NOT NULL,
     delete_after    TEXT,
-    asset_type      TEXT
+    asset_type      TEXT,
+    source_checksum TEXT,
+    owner_id        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state_runafter ON jobs (state, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_delete_after   ON jobs (delete_after);
@@ -93,6 +95,10 @@ WEBHOOKS_REJECTED = "webhooks_rejected"
 # on a database created before that column existed, `CREATE INDEX` would fail here.
 _SCHEMA_POST_MIGRATION = """
 CREATE INDEX IF NOT EXISTS idx_jobs_lane ON jobs (state, asset_type, run_after);
+-- The ledger lookup that runs once per job, before the download. Partial: only rows that
+-- actually replaced something can answer it, which on a real store is a small minority.
+CREATE INDEX IF NOT EXISTS idx_jobs_ledger ON jobs (source_checksum, owner_id)
+    WHERE source_checksum IS NOT NULL AND new_asset_id IS NOT NULL;
 """
 
 _CANDIDATE_COLUMNS = "asset_id, asset_type, size_bytes, filename, verdict, payload, scanned_at, queued_at"
@@ -100,7 +106,7 @@ _CANDIDATE_COLUMNS = "asset_id, asset_type, size_bytes, filename, verdict, paylo
 _COLUMNS = (
     "source_asset_id, state, skip_reason, new_asset_id, new_checksum, orig_bytes, new_bytes, "
     "ratio, attempts, last_error, payload, created_at, updated_at, run_after, delete_after, "
-    "asset_type"
+    "asset_type, source_checksum, owner_id"
 )
 
 # Columns added after the first release. `CREATE TABLE IF NOT EXISTS` cannot add them to a
@@ -110,6 +116,10 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     # Lets a worker claim only its own kind of job. Without it a single two-hour video
     # holds the queue and every one-second image job waits behind it.
     ("asset_type", "TEXT"),
+    # The ledger. What the *original* hashed to and who owned it, so the same bytes coming
+    # back as a new asset can be recognised instead of compressed a second time.
+    ("source_checksum", "TEXT"),
+    ("owner_id", "TEXT"),
 )
 
 # States a worker is allowed to pick up and (re)drive.
@@ -207,7 +217,7 @@ class JobStore:
         run_after = now + timedelta(seconds=delay_seconds)
         cursor = await self._conn.execute(
             f"INSERT INTO jobs ({_COLUMNS}) VALUES "  # noqa: S608 - _COLUMNS is a module constant
-            "(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, NULL, ?) "
+            "(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, NULL, ?, NULL, NULL) "
             "ON CONFLICT(source_asset_id) DO NOTHING",
             (
                 source_asset_id,
@@ -272,6 +282,8 @@ class JobStore:
             "last_error",
             "delete_after",
             "run_after",
+            "source_checksum",
+            "owner_id",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -363,6 +375,37 @@ class JobStore:
         async with self._conn.execute(query, params) as cursor:
             rows = await cursor.fetchall()
         return [_row_to_job(row) for row in rows]
+
+    async def find_replaced_original(
+        self,
+        *,
+        checksum: str | None,
+        owner_id: str | None,
+        exclude_asset_id: str,
+    ) -> Job | None:
+        """The earlier job whose *original* had exactly these bytes, if there is one.
+
+        This is the ledger read: an asset that arrives carrying the checksum of an original
+        this service already replaced is that original, uploaded again by a device that
+        still held the file. Immich's own uniqueness constraint is ``(ownerId, checksum)``,
+        so the match is scoped the same way — two users owning the same photo are two
+        assets, and neither is evidence about the other.
+
+        Both halves must be present. A row from before the ledger existed carries neither
+        and can never match, which is the correct outcome: silence, not a guess. The excess
+        of caution is deliberate — a false negative costs one wasted re-encode, exactly
+        what happens today, while a false positive would skip an asset that deserved work.
+        """
+        if not checksum or not owner_id:
+            return None
+        async with self._conn.execute(
+            f"SELECT {_COLUMNS} FROM jobs "  # noqa: S608 - _COLUMNS is a module constant
+            "WHERE source_checksum = ? AND owner_id = ? AND new_asset_id IS NOT NULL "
+            "AND source_asset_id != ? ORDER BY updated_at DESC LIMIT 1",
+            (checksum, owner_id, exclude_asset_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _row_to_job(row) if row else None
 
     async def replaced_source_asset_ids(self) -> list[str]:
         """Every original this service replaced — the selection ``restore --all-pending`` uses.
@@ -692,6 +735,8 @@ def _row_to_job(row: aiosqlite.Row) -> Job:
         skip_reason=SkipReason(row["skip_reason"]) if row["skip_reason"] else None,
         new_asset_id=row["new_asset_id"],
         new_checksum=row["new_checksum"],
+        source_checksum=row["source_checksum"],
+        owner_id=row["owner_id"],
         orig_bytes=row["orig_bytes"],
         new_bytes=row["new_bytes"],
         ratio=row["ratio"],

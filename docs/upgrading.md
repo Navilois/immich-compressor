@@ -13,6 +13,31 @@ Job state lives in a volume and survives. Schema changes are applied automatical
 
 ## Unreleased
 
+### A new skip reason, `re_uploaded`, and two new columns
+
+**Nothing to edit.** The `jobs` table gains `source_checksum` and `owner_id`, applied
+automatically the first time the new version opens the database. Nothing is rewritten and
+no job changes state.
+
+From this version on, every job records what the original hashed to and who owned it before
+it touches anything. If an asset later shows up carrying the checksum of an original this
+service already replaced — a device that still held the file, uploading it again — the job
+stops at `re_uploaded` instead of compressing the same bytes a second time. It is not
+downloaded, encoded or deleted, and neither is the earlier replacement.
+
+Two things to expect:
+
+- **`report` may start showing `re_uploaded` counts that were previously invisible.** The
+  re-uploads were already happening; what is new is that they are named. A trickle is one
+  device that has not caught up. A burst usually means a reinstall or a second client such
+  as `immich-go` pointed at the same files.
+- **Jobs that ran before this release carry neither column**, and they cannot be
+  backfilled — the original whose checksum they would hold is already deleted. An asset
+  re-uploaded from one of those goes through the pipeline as before.
+
+The verdict is deliberately stable: `reprocess` and `requeue` re-run the check and reach
+`re_uploaded` again, the same way they do for an asset carrying a compressor marker.
+
 ### The metadata gate stops failing jobs on arithmetic
 
 **Nothing to edit**, and it changes when the gate fires. With

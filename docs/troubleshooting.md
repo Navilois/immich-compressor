@@ -33,6 +33,7 @@ real one-frame encode. `hardware` explains every encoder decision.
 | `unsupported_format` | The type is covered but no preset accepts this extension. The `IMAGE` preset is a JPEG allowlist: RAW, HEIC, PNG, GIF, TIFF and WebP are out by design — see [safety.md](safety.md#why-only-jpeg-stills). |
 | `source_quality` | The still is already at or below the preset's `min_source_quality`. Re-encoding it would add a second generation of artefacts and usually *enlarge* the file — measured 158 368 -> 190 488 bytes for a q60 source through the q82 preset. |
 | `embedded_media` | A motion photo: a JPEG with a video glued on behind the end-of-image marker. Re-encoding would silently drop the video — see [safety.md](safety.md#why-motion-photos-are-skipped). |
+| `re_uploaded` | These exact bytes were an original this service already replaced, and a device that still holds the file has uploaded them again under a new asset id. Nothing is downloaded, encoded or deleted — see [the FAQ](faq.md#will-my-phone-just-re-upload-the-original). |
 | `external_library`, `live_photo`, `edited`, `locked`, `trashed` | Never touched, by design. |
 
 ## Stills fail with `metadata carry-over incomplete`
