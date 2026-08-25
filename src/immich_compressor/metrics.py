@@ -178,6 +178,35 @@ def render(
         source_key = name.removesuffix("_total")
         lines += _block(name, help_text, "counter", [_metric(name, counters.get(source_key, 0))])
 
+    # Shim counters. `shim_requests_total` staying at zero while the shim is enabled is the
+    # diagnosis for a reverse proxy that is not routing the two paths here at all, which is
+    # otherwise indistinguishable from a library nothing has re-uploaded.
+    for name, help_text in (
+        ("shim_requests_total", "Requests the shim proxied to Immich."),
+        ("shim_lines_rewritten_total", "Sync stream lines whose checksum was translated."),
+        (
+            "shim_hashes_translated_total",
+            "Checksums translated, in either direction. Sums the sync rewrite and the "
+            "bulk-upload-check rewrite.",
+        ),
+        (
+            "shim_gates_opened_total",
+            "Originals observed to be gone for good, so their replacement may now carry their checksum.",
+        ),
+        (
+            "shim_touches_total",
+            "No-op updates made to have a replacement re-sent to clients. Without these "
+            "the translation is armed but never reaches a device.",
+        ),
+        (
+            "shim_passthrough_errors_total",
+            "Times the shim could not reach Immich and answered 502. Anything above zero "
+            "means clients saw a sync failure.",
+        ),
+    ):
+        source_key = name.removesuffix("_total")
+        lines += _block(name, help_text, "counter", [_metric(name, counters.get(source_key, 0))])
+
     # Session counters: reset on restart, which is what a counter is allowed to do.
     for name, help_text in (
         ("processed", "Assets compressed and uploaded since this process started."),

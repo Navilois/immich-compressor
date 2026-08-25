@@ -351,6 +351,56 @@
       "title": "Preset",
       "type": "object"
     },
+    "ShimSettings": {
+      "additionalProperties": false,
+      "description": "The checksum-translation shim: two Immich routes proxied through this service.\n\nOff by default, like everything here that can change what a client sees. When it is\non, the phone is told that a replacement carries the checksum its original had, so the\nlocal file it still holds matches something in its mirror and is never queued for\nbackup again. Nothing in Immich is altered; the deception is confined to two response\nfields and is documented in ``docs/shim.md``.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "upstream_url": {
+          "default": "http://immich-server:2283",
+          "title": "Upstream Url",
+          "type": "string"
+        },
+        "rewrite_sync_stream": {
+          "default": true,
+          "title": "Rewrite Sync Stream",
+          "type": "boolean"
+        },
+        "rewrite_upload_check": {
+          "default": true,
+          "title": "Rewrite Upload Check",
+          "type": "boolean"
+        },
+        "watch_deletes": {
+          "default": true,
+          "title": "Watch Deletes",
+          "type": "boolean"
+        },
+        "log_only": {
+          "default": false,
+          "title": "Log Only",
+          "type": "boolean"
+        },
+        "ledger_refresh_seconds": {
+          "default": 60.0,
+          "exclusiveMinimum": 0,
+          "title": "Ledger Refresh Seconds",
+          "type": "number"
+        },
+        "connect_timeout_s": {
+          "default": 10.0,
+          "exclusiveMinimum": 0,
+          "title": "Connect Timeout S",
+          "type": "number"
+        }
+      },
+      "title": "ShimSettings",
+      "type": "object"
+    },
     "WebhookSettings": {
       "additionalProperties": false,
       "description": "Shared-secret configuration for the inbound webhook endpoint.",
@@ -380,6 +430,9 @@
     },
     "webhook": {
       "$ref": "#/$defs/WebhookSettings"
+    },
+    "shim": {
+      "$ref": "#/$defs/ShimSettings"
     },
     "behavior": {
       "$ref": "#/$defs/BehaviorSettings"

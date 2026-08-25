@@ -78,21 +78,29 @@ checksum is still known and the device stays quiet. When the scheduled purge har
 it, the checksum stops being known and the re-upload becomes possible — from the phone's
 point of view a purge and a `force` delete are the same event.
 
-**What this service does about it.** It cannot stop the upload — that decision is made on
-the device, before any request reaches Immich. What it does is refuse to compress the same
-bytes twice. Every job records the checksum and owner of the original before anything is
-touched, and an asset that arrives carrying the checksum of an original this service has
-already replaced is skipped as `re_uploaded`, naming the earlier asset and its replacement
-in the log. Nothing is downloaded, nothing is encoded and nothing is deleted.
+**What this service does about it, by default.** It refuses to compress the same bytes
+twice. Every job records the checksum and owner of the original before anything is touched,
+and an asset that arrives carrying the checksum of an original this service has already
+replaced is skipped as `re_uploaded`, naming the earlier asset and its replacement in the
+log. Nothing is downloaded, nothing is encoded and nothing is deleted.
+
+**And how to stop the upload happening at all.** The backup decision is made on the device
+against the list of assets it has mirrored from the server, so the one place it can be
+changed is that list. The optional [shim](shim.md) does exactly that: once the original is
+really gone, it substitutes the original's checksum into the replacement's line in the sync
+stream, so the phone finds a match for the file it is holding and never queues it. It is off
+by default, needs two paths routed to this service through your reverse proxy, and is
+plainly a deliberate untruth told to one client — [shim.md](shim.md) sets out the trade in
+full.
 
 Two limits worth knowing:
 
 - The ledger only covers jobs that ran **after** the version that introduced it. For an
   original deleted before that, the checksum is gone from both sides and cannot be
   recovered.
-- Recognition is not prevention. The duplicate is on the server and stays there until you
-  remove it; `report` counts the `re_uploaded` skips so a device that keeps doing it is
-  visible rather than silent.
+- Recognition is not prevention. Without the shim the duplicate is on the server and stays
+  there until you remove it; `report` counts the `re_uploaded` skips so a device that keeps
+  doing it is visible rather than silent.
 
 If the re-uploads keep coming, the cause is on the device — an app that has not synced, a
 second device, or a folder-sync client such as `immich-go` pointed at the same files, none

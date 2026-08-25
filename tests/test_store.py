@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from immich_compressor.models import BackfillCandidate, JobState, SkipReason
-from immich_compressor.store import JobStore
+from immich_compressor.store import SHIM_COUNTERS, JobStore
 
 PAYLOAD = {"type": "AssetV1", "trigger": "AssetMetadataExtraction", "data": {"asset": {"id": "a"}}}
 
@@ -446,3 +446,83 @@ async def test_ledger_columns_are_added_to_an_existing_database(tmp_path: Path) 
         assert job.source_checksum is None and job.owner_id is None
         await store.update("asset-1", source_checksum="c3Vt", owner_id="user-1")
         assert (await store.get("asset-1")).source_checksum == "c3Vt"  # type: ignore[union-attr]
+
+
+# ------------------------------------------------------------------------- the ledger
+
+
+LEDGER_HASH = "02MpaJkpzGHNbGwxWtencVNK7uY="
+LEDGER_OWNER = "11111111-1111-4111-8111-111111111111"
+
+
+async def _replaced(store: JobStore, asset_id: str, *, checksum: str | None, owner: str | None) -> None:
+    await store.enqueue(asset_id, PAYLOAD, delay_seconds=0)
+    await store.update(
+        asset_id,
+        new_asset_id=f"{asset_id}-new",
+        new_checksum="replacement-hash=",
+        source_checksum=checksum,
+        owner_id=owner,
+    )
+
+
+async def test_ledger_entries_matches_find_replaced_original(tmp_path: Path) -> None:
+    """The two ledger reads must agree on what "this service replaced that" means.
+
+    They answer different questions — one row for the guard, all rows for the shim — and
+    if they ever disagreed the shim would translate a checksum the guard would not
+    recognise coming back, which is the one combination that produces a silent loop.
+    """
+    async with JobStore(tmp_path / "s.db") as store:
+        await _replaced(store, "eligible", checksum=LEDGER_HASH, owner=LEDGER_OWNER)
+        # Ineligible three different ways, one of which is a pre-ledger row.
+        await _replaced(store, "no-owner", checksum="x=", owner=None)
+        await _replaced(store, "no-checksum", checksum=None, owner=LEDGER_OWNER)
+        await _replaced(store, "pre-ledger", checksum=None, owner=None)
+        await store.enqueue("never-replaced", PAYLOAD, delay_seconds=0)
+        await store.update("never-replaced", source_checksum="y=", owner_id=LEDGER_OWNER)
+
+        entries = await store.ledger_entries()
+        assert {entry.source_asset_id for entry in entries} == {"eligible"}
+
+        for entry in entries:
+            match = await store.find_replaced_original(
+                checksum=entry.source_checksum,
+                owner_id=entry.owner_id,
+                exclude_asset_id="something-else",
+            )
+            assert match is not None and match.source_asset_id == entry.source_asset_id
+
+
+async def test_ledger_entry_starts_with_its_gate_closed(tmp_path: Path) -> None:
+    async with JobStore(tmp_path / "s.db") as store:
+        await _replaced(store, "asset-1", checksum=LEDGER_HASH, owner=LEDGER_OWNER)
+        (entry,) = await store.ledger_entries()
+        assert entry.gate_is_open is False
+
+
+async def test_mark_original_freed_is_first_write_wins(tmp_path: Path) -> None:
+    """Both callers can fire for the same row on a deployment that switched delete_mode."""
+    async with JobStore(tmp_path / "s.db") as store:
+        await _replaced(store, "asset-1", checksum=LEDGER_HASH, owner=LEDGER_OWNER)
+
+        assert await store.mark_original_freed("asset-1") is True
+        first = await store.get("asset-1")
+        assert first is not None and first.original_freed_at is not None
+
+        assert await store.mark_original_freed("asset-1") is False
+        again = await store.get("asset-1")
+        assert again is not None and again.original_freed_at == first.original_freed_at
+
+
+async def test_mark_original_freed_ignores_an_unknown_asset(tmp_path: Path) -> None:
+    async with JobStore(tmp_path / "s.db") as store:
+        assert await store.mark_original_freed("never-heard-of-it") is False
+
+
+async def test_shim_counters_are_zero_filled(tmp_path: Path) -> None:
+    """ "0 requests" is a diagnosis — it means the reverse proxy is not routing to us."""
+    async with JobStore(tmp_path / "s.db") as store:
+        counters = await store.counters()
+        for name in SHIM_COUNTERS:
+            assert counters[name] == 0

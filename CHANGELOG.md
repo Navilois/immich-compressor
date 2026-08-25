@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A checksum-translation shim that stops the re-upload instead of only recognising it.**
+  Off by default (`shim.enabled: false`), and inert until a reverse proxy routes
+  `POST /api/sync/stream` and `POST /api/assets/bulk-upload-check` to this service.
+
+  The Immich app decides what to back up entirely offline, by joining the SHA-1 of each
+  local file against the assets it has mirrored from the server. Once the original is
+  permanently deleted its checksum exists nowhere, so the device uploads the file again.
+  The shim substitutes the **original's** checksum into the replacement's line in the sync
+  stream, so the device finds a match and never queues the file. Nothing in Immich is
+  altered; the substitution happens in two responses on their way to a client.
+
+  It is gated, and the gate is the whole design. The app's mirror enforces one row per
+  `(owner, checksum)`, so the replacement may only be given that checksum after the
+  original has really stopped existing — earlier, the write would either drop the
+  original's mirror row or abort the client's sync batch. A new `original_freed_at` column
+  on `jobs` records that moment: set by the pipeline right after a `permanent` delete,
+  which this service performs itself, and by the shim when it sees the purge of a trashed
+  original go past on the sync stream, which happens inside Immich up to 30 days later and
+  is never reported here.
+
+  Opening a gate also makes one no-op update to the replacement — it writes back the
+  `isFavorite` value it just read — because the sync stream only re-offers assets that have
+  changed, and without it the translation would be armed but never sent. Six counters
+  (`shim_requests`, `shim_lines_rewritten`, `shim_hashes_translated`, `shim_gates_opened`,
+  `shim_touches`, `shim_passthrough_errors`) are exposed at `/metrics`, and
+  [docs/shim.md](docs/shim.md) covers the deployment, the staged rollout and the limits —
+  including that this is, deliberately, telling one client something untrue.
+
+
 - **A re-uploaded original is recognised instead of compressed a second time.** Every job
   now records the checksum and owner id the server reported for the original, before
   anything mutating happens. An asset that later arrives carrying the checksum of an

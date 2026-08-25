@@ -34,6 +34,7 @@ from immich_compressor.config import (  # noqa: E402
     ImmichSettings,
     Preset,
     Settings,
+    ShimSettings,
     WebhookSettings,
 )
 
@@ -57,6 +58,13 @@ SECTIONS: tuple[tuple[str, type, str], ...] = (
         "Which encoder to use. The default is to work it out — see [hardware.md](hardware.md).",
     ),
     (
+        "shim",
+        ShimSettings,
+        "The checksum-translation shim, which stops a phone re-uploading an original after "
+        "its compressed replacement took over. Off by default and inert until a reverse "
+        "proxy routes two paths here — see [shim.md](shim.md).",
+    ),
+    (
         "behavior",
         BehaviorSettings,
         "Everything that decides whether and how an asset gets touched. The three that "
@@ -69,6 +77,39 @@ SECTIONS: tuple[tuple[str, type, str], ...] = (
 # rest are described from their type and default, which is enough for a knob like
 # `timeout_s`.
 NOTES: dict[str, str] = {
+    "shim.enabled": (
+        "Master switch. Off ships inert: the two proxied routes are not mounted at all, and "
+        "nothing about what a client sees changes."
+    ),
+    "shim.upstream_url": (
+        "The Immich **origin**, without the `/api` suffix — this is not `immich.base_url`. "
+        "The shim forwards the client's whole path, which already begins with `/api`, so a "
+        "value ending in `/api` is rejected at startup rather than producing 404s from a "
+        "server that is plainly up."
+    ),
+    "shim.rewrite_sync_stream": (
+        "Translate `POST /api/sync/stream`. This is the direction that reaches the mobile "
+        "app, and the one that actually stops a re-upload."
+    ),
+    "shim.rewrite_upload_check": (
+        "Translate `POST /api/assets/bulk-upload-check`. The mobile app does not use this "
+        "route; the CLI, `immich-go` and the web uploader do."
+    ),
+    "shim.watch_deletes": (
+        "Watch the sync stream for the purge of an original this service replaced, and open "
+        "that row's gate when it goes past. With `delete_mode: trash` this is the only way "
+        "the service ever learns the retention window expired — the deletion happens inside "
+        "Immich, up to a month later, and nothing reports it."
+    ),
+    "shim.log_only": (
+        "Count what would change and change nothing. The first rollout step: it proves the "
+        "ledger matches real traffic before a single byte is altered."
+    ),
+    "shim.ledger_refresh_seconds": "How often the translation maps are rebuilt from the job store.",
+    "shim.connect_timeout_s": (
+        "Connection timeout for the proxied requests. There is deliberately no read timeout "
+        "on the sync stream, which is long-lived by design."
+    ),
     "immich.api_key": (
         "**Environment only**, as `IMMICH__API_KEY`. Setting it here makes the service refuse to start."
     ),

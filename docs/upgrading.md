@@ -13,6 +13,29 @@ Job state lives in a volume and survives. Schema changes are applied automatical
 
 ## Unreleased
 
+### The checksum-translation shim (opt-in, off by default)
+
+**Nothing to edit unless you want it.** `shim.enabled` defaults to `false`, and while it is
+off the two proxied routes are not mounted at all — the service behaves exactly as before.
+
+Turning it on stops a phone re-uploading an original after its compressed replacement took
+over, instead of only recognising the re-upload after the fact. It needs a reverse proxy in
+front of Immich that routes `POST /api/sync/stream` and `POST /api/assets/bulk-upload-check`
+to this service, and `proxy_buffering off` on the first of them. Start with
+`shim.log_only: true`, which counts what would change without changing anything, and read
+[shim.md](shim.md) before routing anything — it is a deliberate untruth told to one client,
+and the page sets out the trade.
+
+The `jobs` table gains one column, `original_freed_at`, applied automatically the first time
+the new version opens the database. Nothing is rewritten and no job changes state. It is
+recorded whether or not the shim is enabled, so a deployment that turns it on later has the
+history from this version onwards.
+
+One behaviour change even with the shim off: after a **`delete_mode: permanent`** delete the
+job now records that the original is gone. No request is made and nothing user-visible
+changes; the no-op update that re-offers the replacement to clients is only made when the
+shim is actually enabled.
+
 ### A new skip reason, `re_uploaded`, and two new columns
 
 **Nothing to edit.** The `jobs` table gains `source_checksum` and `owner_id`, applied
