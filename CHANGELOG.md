@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`docs/faq.md` no longer claims that `delete_mode: trash` avoids the re-upload.** It
+  delays it. Immich's own trash retention defaults to 30 days (`trash: { enabled: true,
+  days: 30 }`, verified against `immich-app/immich@fbd5dc2`); when the scheduled purge
+  hard-deletes the original its checksum stops being known and the re-upload becomes
+  possible, exactly as it would after a `force` delete. The answer now describes the
+  mechanism, the 30-day reprieve and what `re_uploaded` does about it.
+
 - **The metadata gate no longer fails a job on floating-point re-approximation.** Values
   that are numbers on both sides — with an identical unit, if any — are now compared with a
   relative tolerance of 1e-6 instead of character by character. Copying an EXIF rational

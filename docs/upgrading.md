@@ -38,6 +38,16 @@ Two things to expect:
 The verdict is deliberately stable: `reprocess` and `requeue` re-run the check and reach
 `re_uploaded` again, the same way they do for an asset carrying a compressor marker.
 
+### The FAQ's answer on re-uploads was wrong about `trash`
+
+**Nothing to edit**, but if you chose `delete_mode: trash` because the FAQ said the
+re-upload "does not arise", read
+[the corrected answer](faq.md#will-my-phone-just-re-upload-the-original). Immich's trash
+retention defaults to 30 days; when the scheduled purge hard-deletes the original, its
+checksum stops being known to the server and the device can upload the file again. `trash`
+buys 30 days and the ability to restore, which are both real — it does not prevent the
+re-upload.
+
 ### The metadata gate stops failing jobs on arithmetic
 
 **Nothing to edit**, and it changes when the gate fires. With
