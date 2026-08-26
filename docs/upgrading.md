@@ -202,6 +202,38 @@ Assets that already failed this way stay `failed` — the fix does not requeue a
 is no bulk retry for failed jobs, so they come back one id at a time with
 `reprocess <asset_id>`.
 
+### The metadata gate stops failing jobs on a time that gained a `+00:00`
+
+**Nothing to edit**, and it changes when the gate fires again. exiftool writes an explicit
+zero UTC offset onto an IPTC time that carried none, and with
+`behavior.metadata_verify: strict` the two spellings of the same clock were a difference
+like any other. Measured on a live instance on 2026-08-26:
+
+```
+IPTC:TimeCreated changed:         '11:24:38' -> '11:24:38+00:00'
+IPTC:DigitalCreationTime changed: '11:24:38' -> '11:24:38+00:00'
+```
+
+**92 jobs** in a single backfill run failed on that, the first at 2026-08-25T05:18:26Z. The
+time is the same time; only its written form changed.
+
+A value that is a time — `HH:MM:SS`, or a full `YYYY:MM:DD HH:MM:SS`, either with an offset
+or without — is now compared as a clock plus an offset, and an absent offset and a zero one
+(`+00:00`, `Z`) mean the same thing. Everything else is unchanged. A **non-zero** offset is a
+different time and still fails, whether it was added (`'15:46:30'` against
+`'15:46:30+01:00'`) or changed (`'+01:00'` against `'+02:00'`); a clock that moved fails; a
+date that moved fails; and anything that is not a time in that shape still compares
+character by character.
+
+`XMP:Orientation` also joins `EXIF:Orientation` on the ignore list, for the same reason that
+tag has always been there: `normalize_orientation` pins the rotation to 1 once `-auto-orient`
+has baked it into the pixels, and the XMP mirror describes exactly that rotation. Measured on
+the same instance: `'Rotate 270 CW'` -> `'Horizontal (normal)'` on 2 jobs.
+
+Assets that already failed this way stay `failed` — as above, nothing is requeued, and
+`reprocess <asset_id>` takes them one id at a time. `jobs --status failed` lists them with
+the error each one failed on.
+
 ## 1.3.0 → 1.3.1
 
 **Nothing to edit.** One line of output changed, on the command you reach for when something

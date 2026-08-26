@@ -143,11 +143,24 @@ viewer could be shown. Everything else is unchanged: a differing unit (`339.569 
 `339.569 ft`) is a difference, non-numeric values compare character by character, and a tag
 that is gone is gone.
 
-Four kinds of tag are on the ignore list, and each one is earned rather than convenient:
+The second printed-form change measured is a time gaining a UTC offset it never had.
+exiftool writes an explicit `+00:00` onto an IPTC time that carried none, and on a live
+instance on 2026-08-26 that failed **92 jobs** in a single backfill run, on `IPTC:TimeCreated
+changed: '11:24:38' -> '11:24:38+00:00'` and `IPTC:DigitalCreationTime` alongside it. Same
+clock, same displayed value. So a value that is a time — `HH:MM:SS` or a full
+`YYYY:MM:DD HH:MM:SS`, with an offset or without — is compared as a clock plus an offset,
+and an absent offset and a zero one (`+00:00`, `Z`) count as the same time. This is the
+narrowest reading that clears the measurement: a **non-zero** offset is a different instant
+and is still a difference, whether it was added (`'15:46:30'` against `'15:46:30+01:00'`) or
+changed (`'+01:00'` against `'+02:00'`), and a clock or a date that moved by one second or
+one day is still a difference.
+
+Five kinds of tag are on the ignore list, and each one is earned rather than convenient:
 
 | Tag | Why |
 |---|---|
 | `EXIF:Orientation` | `normalize_orientation` pins it to 1 by design, and writes it even when the source had none |
+| `XMP:Orientation` | the XMP mirror of that same tag, describing the same rotation of the same pixels — measured `Rotate 270 CW` -> `Horizontal (normal)` on 2 jobs on 2026-08-26 |
 | `XMP:XMPToolkit` | the version stamp of whatever last wrote the XMP packet, so exiftool stamps its own on every copy. It names the writing tool, not the picture |
 | `EXIF:ThumbnailOffset`, `EXIF:PreviewImageStart`, `EXIF:OtherImageStart`, `EXIF:StripOffsets` | byte positions inside the file, not content. Rewriting the EXIF block moves them by definition — measured 1008 -> 1026. The matching `*Length` tags stay compared, because a thumbnail length that changes is a truncated thumbnail |
 

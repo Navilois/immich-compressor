@@ -12,6 +12,7 @@ from immich_compressor.encoder import (
     EncodeError,
     EncodeResult,
     MediaProbe,
+    _diff_metadata,
     _trailer_bytes,
     _values_match,
     check_sanity,
@@ -680,6 +681,84 @@ def test_values_match_tolerates_re_approximation(before: object, after: object) 
 def test_values_match_still_reports_a_real_difference(before: object, after: object) -> None:
     """Tolerating arithmetic must not tolerate an edit, a unit change or free text."""
     assert not _values_match(before, after)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        # Measured on a live instance on 2026-08-26: exiftool wrote an explicit zero offset
+        # onto IPTC:TimeCreated and IPTC:DigitalCreationTime, failing 92 jobs in one
+        # backfill run. Same clock, same displayed value.
+        ("11:24:38", "11:24:38+00:00"),
+        # Symmetric: dropping the explicit zero offset is the same non-change.
+        ("11:24:38+00:00", "11:24:38"),
+        # 'Z' is the same zero offset spelled differently.
+        ("11:24:38", "11:24:38Z"),
+        ("11:24:38Z", "11:24:38+00:00"),
+        ("11:24:38", "11:24:38-00:00"),
+        # A non-zero offset that is written on both sides is not a difference either.
+        ("15:46:30+01:00", "15:46:30+01:00"),
+        # The date-time form takes the same rule. It is not the form that was measured, but
+        # it is the same printed value with a date in front of it.
+        ("2026:08:25 15:46:30", "2026:08:25 15:46:30+00:00"),
+        # Sub-second precision survives the split into clock and offset.
+        ("11:24:38.25", "11:24:38.25+00:00"),
+    ],
+)
+def test_values_match_tolerates_an_added_zero_utc_offset(before: object, after: object) -> None:
+    """The offset exiftool adds to a time that carried none is a representation change."""
+    assert _values_match(before, after)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        # An offset that is not zero moves the time. Adding one is a real change.
+        ("15:46:30", "15:46:30+01:00"),
+        ("15:46:30+01:00", "15:46:30"),
+        # Two explicit offsets that disagree, whichever way round.
+        ("15:46:30+01:00", "15:46:30+02:00"),
+        ("15:46:30+01:00", "15:46:30-01:00"),
+        # The clock itself, one second apart, offsets or not.
+        ("15:46:30", "15:46:31"),
+        ("15:46:30+00:00", "15:46:31"),
+        # The date in front of an identical clock.
+        ("2026:08:25 15:46:30", "2026:08:26 15:46:30"),
+        # A bare number must stay a number: '11' is not 11:00:00 with anything appended.
+        ("11", "11:00"),
+    ],
+)
+def test_values_match_still_reports_a_real_time_difference(before: object, after: object) -> None:
+    """Tolerating a zero offset must not tolerate a real one, or a moved clock."""
+    assert not _values_match(before, after)
+
+
+def test_metadata_diff_ignores_only_the_listed_tags() -> None:
+    """The ignore list passes what it names, and the gate still reports everything else.
+
+    `XMP:Orientation` is the entry this test was written for. Measured on a live instance on
+    2026-08-26: 'Rotate 270 CW' -> 'Horizontal (normal)', after `-auto-orient` had baked the
+    rotation into the pixels and `normalize_orientation` pinned the tag.
+    """
+    before: dict[str, object] = {
+        "EXIF:Orientation": "Rotate 90 CW",
+        "XMP:Orientation": "Rotate 270 CW",
+        "XMP:XMPToolkit": "Image::ExifTool 12.76",
+        "XMP:Rating": 4,
+        "IPTC:TimeCreated": "11:24:38",
+    }
+    after: dict[str, object] = {
+        "EXIF:Orientation": "Horizontal (normal)",
+        "XMP:Orientation": "Horizontal (normal)",
+        "XMP:XMPToolkit": "Image::ExifTool 13.25",
+        "XMP:Rating": 4,
+        "IPTC:TimeCreated": "11:24:38+00:00",
+    }
+    assert _diff_metadata(before, after) == []
+
+    # A tag outside the list is reported by both routes it can fail.
+    assert _diff_metadata({**before, "XMP:Label": "keep"}, after) == ["XMP:Label lost"]
+    assert _diff_metadata(before, {**after, "XMP:Rating": 3}) == ["XMP:Rating changed: 4 -> 3"]
 
 
 @needs_still_tools

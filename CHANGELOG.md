@@ -128,6 +128,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that changed (`339.569 m` against `339.569 ft`) are all still reported, and non-numeric
   values still compare exactly.
 
+- **The metadata gate no longer fails a job on a time that gained an explicit `+00:00`.**
+  exiftool writes a zero UTC offset onto a time that carried none, and the gate compared the
+  two spellings character by character. Measured on a live instance on 2026-08-26,
+  `IPTC:TimeCreated` and `IPTC:DigitalCreationTime` came back `'11:24:38'` ->
+  `'11:24:38+00:00'` and failed **92 jobs** in a single backfill run, first seen
+  2026-08-25T05:18:26Z. Same clock, same displayed value, nothing lost. A time and a
+  date-time are now compared as a clock plus an offset, where no offset and a zero offset
+  mean the same thing. A **non-zero** offset still has to agree — `'15:46:30'` against
+  `'15:46:30+01:00'` and `'+01:00'` against `'+02:00'` are both still findings — and so does
+  the clock itself.
+
+- **`XMP:Orientation` joined `EXIF:Orientation` on the metadata gate's ignore list.** It is
+  the XMP mirror of the same tag, describing the same rotation of the same pixels, and
+  `normalize_orientation` pins that rotation to 1 after `-auto-orient` has baked it into the
+  picture — the reason `EXIF:Orientation` has been ignored since the gate existed. It was
+  simply not listed. Measured on a live instance on 2026-08-26: `'Rotate 270 CW'` ->
+  `'Horizontal (normal)'` on 2 jobs.
+
 ### Documentation
 
 - **Every tracked document was read against the 1.3.1 source and corrected.** No behaviour
