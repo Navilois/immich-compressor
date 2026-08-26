@@ -67,9 +67,11 @@ format: $(PY)
 test: $(PY)
 	$(PY) -m pytest -m 'not live' -q
 
-# Needs E2E_IMMICH_URL and E2E_IMMICH_KEY pointing at a throwaway instance.
+# Needs E2E_IMMICH_URL and E2E_IMMICH_KEY pointing at a throwaway instance, plus
+# E2E_IMMICH_EMAIL and E2E_IMMICH_PASSWORD for the sync-stream tests — an API key cannot
+# open a sync session. `-rs` so a skip is visible instead of passing for green.
 test-live: $(PY)
-	$(PY) -m pytest -m live -q
+	$(PY) -m pytest -m live -q -rs
 
 image:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE) .

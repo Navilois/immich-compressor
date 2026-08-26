@@ -8,6 +8,17 @@ Deselect with ``pytest -m "not live"``. Requires:
 The test uploads its own throwaway video, drives the full pipeline, asserts that album,
 tags, rating, description, GPS and timeline position survived, and finally trashes the
 original and restores it again (the documented rollback path).
+
+Two of these tests drive ``POST /sync/stream``, which **no API key can open** — Immich
+answers ``403 {"message": "Sync endpoints cannot be used with API keys"}`` on every
+``/sync`` route. They need a session token, so they need the credentials of the account
+that owns the key above:
+
+    E2E_IMMICH_EMAIL=<that account's email>
+    E2E_IMMICH_PASSWORD=<that account's password>
+
+Without them the sync tests skip, and a skip is not a pass: the one claim the shim's whole
+delivery path rests on goes unverified. See ``docs/immich-api-notes.md`` #17.
 """
 
 from __future__ import annotations
@@ -41,6 +52,9 @@ pytestmark = [
 
 BASE = os.environ.get("E2E_IMMICH_URL", "")
 KEY = os.environ.get("E2E_IMMICH_KEY", "")
+# Only the sync routes need these, and only because an API key cannot open a sync session.
+SESSION_EMAIL = os.environ.get("E2E_IMMICH_EMAIL", "")
+SESSION_PASSWORD = os.environ.get("E2E_IMMICH_PASSWORD", "")
 MARKER = "e2e-live"
 
 
@@ -55,6 +69,28 @@ async def api() -> ImmichClient:
 async def raw() -> httpx.AsyncClient:
     async with httpx.AsyncClient(base_url=BASE, headers={"x-api-key": KEY}, timeout=300) as client:
         yield client
+
+
+@pytest.fixture
+async def session() -> httpx.AsyncClient:
+    """A client holding a real session token, which is what the ``/sync`` routes require.
+
+    Immich refuses API keys on every sync endpoint, so the `raw` fixture's key cannot open
+    a sync session however it is scoped. The phone logs in; so does this. The account must
+    be the one that owns ``E2E_IMMICH_KEY`` — the assertions here compare what one
+    credential uploaded against what the other is offered, and two users would not see each
+    other's assets.
+    """
+    if not SESSION_EMAIL or not SESSION_PASSWORD:
+        pytest.skip("E2E_IMMICH_EMAIL / E2E_IMMICH_PASSWORD not set, and the sync routes reject API keys")
+    async with httpx.AsyncClient(base_url=BASE, timeout=300) as client:
+        login = await client.post("/auth/login", json={"email": SESSION_EMAIL, "password": SESSION_PASSWORD})
+        login.raise_for_status()
+        client.headers["Authorization"] = f"Bearer {login.json()['accessToken']}"
+        try:
+            yield client
+        finally:
+            await client.post("/auth/logout")
 
 
 async def _make_fat_clip(path: Path) -> Path:
@@ -428,29 +464,67 @@ async def test_live_dry_run_changes_nothing(
         await raw.request("DELETE", "/assets", json={"ids": [source_id], "force": True})
 
 
-async def _read_sync_stream(raw: httpx.AsyncClient, types: list[str]) -> list[dict[str, object]]:
+async def _read_sync_stream(client: httpx.AsyncClient, types: list[str]) -> list[dict[str, object]]:
     """One pass of `POST /sync/stream`, acking every batch as a real client would.
 
     Returns the parsed lines. Acking matters: the point of every assertion below is what
     the *next* pass contains, and that is decided entirely by the checkpoint this one
     leaves behind.
+
+    Takes a client rather than using the API key directly: this route needs the `session`
+    fixture's token, and passing `raw` here is the mistake that made this test skip
+    silently for the whole life of the shim.
     """
     lines: list[dict[str, object]] = []
-    async with raw.stream("POST", "/sync/stream", json={"types": types}) as response:
+    async with client.stream("POST", "/sync/stream", json={"types": types}) as response:
         if response.status_code != 200:
-            await response.aread()
-            pytest.skip(f"this server/credential cannot open a sync session: {response.status_code}")
+            body = await response.aread()
+            pytest.skip(
+                f"this server/credential cannot open a sync session: {response.status_code} {body[:200]!r}"
+            )
         async for line in response.aiter_lines():
             if line.strip():
                 lines.append(json.loads(line))
-    if lines:
-        ack = await raw.post("/sync/ack", json={"acks": [lines[-1]["ack"]]})
+    # The last ack of each type, which is what a real client sends. Acking only the final
+    # line of the response does not work: every response ends with `SyncCompleteV1`, and
+    # that ack advances no asset checkpoint — so the same backlog comes back on every pass
+    # and the stream never drains. Measured on v3.1.0: six consecutive passes acking only
+    # the last line returned the identical nine lines; acking per type drained in one.
+    last_ack_per_type: dict[str, str] = {}
+    for line in lines:
+        kind, ack_value = line.get("type"), line.get("ack")
+        if isinstance(kind, str) and isinstance(ack_value, str):
+            last_ack_per_type[kind] = ack_value
+    if last_ack_per_type:
+        ack = await client.post("/sync/ack", json={"acks": list(last_ack_per_type.values())})
         ack.raise_for_status()
     return lines
 
 
+def _offered_ids(lines: list[dict[str, object]]) -> set[str]:
+    """The asset ids a pass actually offered, ignoring deletes and the terminator."""
+    return {
+        str(item["data"]["id"])  # type: ignore[index]
+        for item in lines
+        if isinstance(item.get("data"), dict) and "id" in item["data"]  # type: ignore[operator]
+    }
+
+
+async def _drain_sync_stream(client: httpx.AsyncClient, types: list[str], max_passes: int = 8) -> None:
+    """Read and ack until a pass offers no assets at all.
+
+    A fixed number of passes is not enough: metadata extraction keeps updating a freshly
+    uploaded row for a moment, and any backlog on the instance has to clear first. What
+    matters is only that a checkpoint is reached before the control asserts against it.
+    """
+    for _ in range(max_passes):
+        if not _offered_ids(await _read_sync_stream(client, types)):
+            return
+    raise AssertionError(f"the sync stream still offered assets after {max_passes} acked passes")
+
+
 async def test_live_touch_makes_the_sync_stream_reoffer_an_asset(
-    tmp_path: Path, api: ImmichClient, raw: httpx.AsyncClient
+    tmp_path: Path, api: ImmichClient, raw: httpx.AsyncClient, session: httpx.AsyncClient
 ) -> None:
     """The one link in the shim's chain that source reading cannot settle.
 
@@ -486,25 +560,16 @@ async def test_live_touch_makes_the_sync_stream_reoffer_an_asset(
     try:
         await api.wait_for_metadata_extraction(asset_id, timeout_s=60)
 
-        # Drain to a checkpoint. Two passes because metadata extraction keeps updating the
-        # row for a moment after the upload, and the first drain can race it.
-        await _read_sync_stream(raw, ["AssetsV2"])
-        await _read_sync_stream(raw, ["AssetsV2"])
-
-        def offered(lines: list[dict[str, object]]) -> set[str]:
-            return {
-                str(item["data"]["id"])  # type: ignore[index]
-                for item in lines
-                if isinstance(item.get("data"), dict) and "id" in item["data"]  # type: ignore[operator]
-            }
+        # Drain to a checkpoint, however many passes that takes.
+        await _drain_sync_stream(session, ["AssetsV2"])
 
         # The control. If this fails, every pass contains everything and the assertion
         # below would pass for the wrong reason.
-        assert asset_id not in offered(await _read_sync_stream(raw, ["AssetsV2"]))
+        assert asset_id not in _offered_ids(await _read_sync_stream(session, ["AssetsV2"]))
 
         await api.touch_asset(asset_id)
 
-        assert asset_id in offered(await _read_sync_stream(raw, ["AssetsV2"]))
+        assert asset_id in _offered_ids(await _read_sync_stream(session, ["AssetsV2"]))
     finally:
         await raw.request("DELETE", "/assets", json={"ids": [asset_id], "force": True})
 

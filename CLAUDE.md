@@ -22,8 +22,10 @@ make check    # everything CI runs
 
 `make test-live` runs the end-to-end suite against a real Immich. It needs
 `E2E_IMMICH_URL` and `E2E_IMMICH_KEY` pointing at a throwaway instance — never a real
-library. `docker-compose.test.yaml` brings one up under the separate compose project
-`immich-test`.
+library — plus `E2E_IMMICH_EMAIL` and `E2E_IMMICH_PASSWORD` for the two sync-stream tests,
+which cannot use an API key because Immich refuses one on every `/sync` route. Without them
+those two skip, so read the summary and not just the exit code.
+`docker-compose.test.yaml` brings one up under the separate compose project `immich-test`.
 
 ## Rules
 

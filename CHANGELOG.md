@@ -65,6 +65,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backfilled: the original they would describe is already gone. Recognition is therefore
   complete only from this version onwards.
 
+- **A test that reproduces the Immich app's local mirror and replays the shim's output
+  through it.** `tests/test_app_mirror.py` builds `remote_asset_entity` from the app's own
+  schema — `STRICT`, `WITHOUT ROWID`, and the partial `UNIQUE (owner_id, checksum)` index —
+  and drives it with the same upsert the app performs, so the constraint the whole gate
+  exists to respect is enforced in CI rather than argued about. It needs no live Immich and
+  no phone.
+
+  Its negative control forces the ungated rewrite and pins down both failure modes, which
+  turn out to depend on whether the phone has already mirrored the replacement: with the row
+  present the unique index aborts the batch and drift's `rethrow` carries the failure into
+  the client's sync, taking healthy lines in the same batch with it; with the row absent,
+  `INSERT OR REPLACE` resolves the conflict by deleting the original's row instead,
+  silently. Removing the gate turns four of these tests red.
+
 ### Changed
 
 - **The surge breaker ships off (`behavior.surge_threshold: null`), and its suggested value
@@ -94,6 +108,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Preset` overrides, whose own text already said `null` inherits the behavior setting.
 
 ### Fixed
+
+- **The live test behind the shim's delivery claim never actually ran.** Immich refuses API
+  keys on every `/sync` route — `403 {"message": "Sync endpoints cannot be used with API
+  keys"}`, whatever the key is scoped to — so
+  `test_live_touch_makes_the_sync_stream_reoffer_an_asset` hit the 403, called
+  `pytest.skip`, and reported green without executing a single assertion. It now logs in
+  with `E2E_IMMICH_EMAIL` / `E2E_IMMICH_PASSWORD` and passes against a live v3.1.0: the
+  no-op `isFavorite` write-back does re-offer the asset on the next sync pass, and with the
+  touch removed the pass comes back empty, so the control discriminates. The shim itself
+  was never affected — on its proxied routes it relays the caller's own credentials and
+  never substitutes this service's key. See
+  [#17](docs/immich-api-notes.md).
+
+- **The live suite's sync helper acked one line per response, which drained nothing.** Every
+  response ends with `SyncCompleteV1`, whose ack advances no asset checkpoint; six
+  consecutive passes acking only the last line returned the identical nine lines. It now
+  acks the last line of each type, the way a real client does, and drains the same backlog
+  in one pass. `make test-live` also gained `-rs`, so a skip is visible rather than
+  counted as green. See [#18](docs/immich-api-notes.md).
 
 - **The gate the checksum-translation shim waits on now really opens after a `permanent`
   delete.** With `delete_mode: permanent` and `retention_days: 0` the pipeline deletes the

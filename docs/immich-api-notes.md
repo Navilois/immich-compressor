@@ -312,3 +312,47 @@ repeated-page check stay where they are.
 without complaint and neither selects trashed assets; a request carrying them returns the
 same live assets as one without. **`trashedAfter`** is the field that works — that is how
 the trash view was confirmed to hold a specific asset id.
+
+### 17. Sync endpoints reject API keys outright, whatever their permissions
+
+Measured on v3.1.0 on 2026-08-26, against a throwaway instance, with a key holding `all`:
+
+| Request | Credential | Result |
+|---|---|---|
+| `POST /sync/stream` | `x-api-key` | `403 {"message": "Sync endpoints cannot be used with API keys"}` |
+| `POST /sync/ack` | `x-api-key` | `403`, same message |
+| `POST /sync/stream` | `Authorization: Bearer <session token>` | `200` |
+| `GET /users/me` | `x-api-key` | `200` |
+
+This is not a permission that can be granted — the refusal names the *credential type*, and
+a key scoped to `all` is refused exactly like a narrow one. Sync is for logged-in clients,
+and the phone is a logged-in client.
+
+Two consequences, and only one of them is a problem:
+
+**The shim is unaffected.** On its two proxied routes it is a pipe: it relays the caller's
+own credentials verbatim and never substitutes this service's key, so the phone's session
+token is what reaches Immich. Owner resolution is unaffected too — it asks `GET /users/me`,
+which answers 200 for an API key, so it works whichever credential the caller presents.
+
+**The live test was affected**, and silently. `tests/test_e2e_live.py` drove the sync stream
+with `E2E_IMMICH_KEY`, got a 403, and called `pytest.skip` — so
+`test_live_touch_makes_the_sync_stream_reoffer_an_asset`, the one test standing behind the
+claim that a touch re-offers an asset, never executed on any machine. It now takes
+`E2E_IMMICH_EMAIL` and `E2E_IMMICH_PASSWORD` and logs in.
+
+### 18. A sync pass is acked per type, not per response
+
+The stream's last line is always `SyncCompleteV1`, and acking it advances no asset
+checkpoint. Acking only the final line of a response therefore drains nothing: measured on
+v3.1.0, six consecutive passes that acked the last line returned the identical nine lines
+every time. Collecting the last `ack` of *each* type and sending them together drained the
+same backlog in a single pass, leaving only the `SyncCompleteV1` terminator.
+
+So "the next pass is empty" is never a usable assertion — a pass always carries the
+terminator. What a checkpoint actually means is that no asset line comes back, which is
+what `_offered_ids` in the live suite checks.
+
+This is what a real client does, and the reason is visible in the ack format itself:
+`AssetV2|01a03ecd-6ec1-75f6-906c-9127d50198cc` is `<type>|<checkpoint>`, one cursor per
+type rather than one per connection.
