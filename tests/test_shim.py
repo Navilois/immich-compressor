@@ -298,6 +298,8 @@ class Upstream:
         self.lines: list[bytes] = []
         self.body: bytes = b""
         self.content_type = "application/jsonlines+json"
+        # Extra response headers, for the relay rules. Immich really does send `date`.
+        self.response_headers: dict[str, str] = {}
         self.seen_headers: httpx.Headers | None = None
         self.seen_body: bytes | None = None
         self.raise_error = False
@@ -313,7 +315,8 @@ class Upstream:
         self.seen_headers = request.headers
         self.seen_body = request.content
         content = b"".join(self.lines) if self.lines else self.body
-        return httpx.Response(self.status, content=content, headers={"content-type": self.content_type})
+        headers = {"content-type": self.content_type, **self.response_headers}
+        return httpx.Response(self.status, content=content, headers=headers)
 
 
 def build(store: JobStore, upstream: Upstream, **overrides: Any) -> tuple[FastAPI, ShimDeps, list[str]]:
@@ -382,6 +385,46 @@ async def test_sync_route_forwards_the_callers_credentials_and_never_the_service
         # Overwritten, not just dropped: httpx would otherwise supply its own default and
         # the upstream would gzip a stream this code reads line by line.
         assert upstream.seen_headers["accept-encoding"] == "identity"
+    finally:
+        await store.close()
+
+
+async def test_upstream_date_and_server_are_not_relayed(tmp_path: Path) -> None:
+    """The ASGI server writes its own `Date` and `Server`, so relaying Immich's duplicates them.
+
+    Uvicorn appends the application's headers to its own rather than replacing them, so a
+    relayed `date` arrives as a second one of a field RFC 9110 defines as a singleton — with
+    a different value, because the two hops read the clock a moment apart. nginx logged
+    `upstream sent duplicate header line: "date: ..."` on every proxied request until this
+    dropped them. `Server` is latent rather than observed — Immich sends `X-Powered-By` and no
+    `Server` — but anything in front of it would duplicate the same way.
+
+    Everything else Immich sets still comes through: this drops the two fields that describe
+    the hop, not the response.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    upstream = Upstream()
+    upstream.lines = [asset_line()]
+    upstream.response_headers = {
+        "date": "Mon, 01 Jan 2001 00:00:00 GMT",
+        "server": "immich-upstream",
+        "x-correlation-id": "abc123",
+        "vary": "Accept-Encoding",
+    }
+    app, _, _ = build(store, upstream)
+    try:
+        with TestClient(app) as http:
+            response = http.post("/api/sync/stream", json={})
+
+        # `multi_items`, not `headers[...]`: the bug is a *duplicate*, and a mapping lookup
+        # would happily return the first of two and call it a pass.
+        relayed = [name.lower() for name, _ in response.headers.multi_items()]
+        assert "date" not in relayed, f"the upstream Date must not be relayed: {relayed}"
+        assert "server" not in relayed, f"the upstream Server must not be relayed: {relayed}"
+        # The headers that describe the response, rather than the hop, are untouched.
+        assert response.headers["x-correlation-id"] == "abc123"
+        assert response.headers["vary"] == "Accept-Encoding"
+        assert response.headers["content-type"] == "application/jsonlines+json"
     finally:
         await store.close()
 

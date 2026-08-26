@@ -71,7 +71,15 @@ _HOP_BY_HOP = frozenset(
         "proxy-authorization",
     }
 )
-_DROP_FROM_RESPONSE = _HOP_BY_HOP | {"content-length", "content-encoding"}
+# `Date` and `Server` join them because the ASGI server emits its own of each and appends
+# the application's afterwards rather than replacing them — measured, not assumed: an app
+# returning both gets two of both on the wire. Relaying Immich's `Date` therefore produced
+# two of a field RFC 9110 defines as a singleton, whose values disagreed by a second, and
+# nginx logged `upstream sent duplicate header line: "date: ..."` on every proxied request.
+# `Server` is dropped for the same reason and not because Immich sends one — it does not,
+# so that half is latent, but a `Server` arriving from anything in front of Immich would
+# duplicate exactly the same way. Both describe the hop that answered, which is this one.
+_DROP_FROM_RESPONSE = _HOP_BY_HOP | {"content-length", "content-encoding", "date", "server"}
 # Replaced rather than relayed on the forwarded request — see `_forward_request_headers`.
 _DROP_FROM_REQUEST = _HOP_BY_HOP | {"host", "accept-encoding", "content-length"}
 
