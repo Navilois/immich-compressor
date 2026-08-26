@@ -50,6 +50,10 @@ _METADATA_GROUPS: tuple[str, ...] = ("-EXIF:all", "-GPS:all", "-XMP:all", "-IPTC
 #   EXIF:Orientation  `normalize_orientation` pins the output to 1 after `-auto-orient` has
 #                     baked the rotation into the pixels, and writes the tag even when the
 #                     source carried none — so both "changed" and "added" are expected.
+#   XMP:Orientation   the XMP mirror of that same tag, describing the same rotation of the
+#                     same pixels, so the reasoning above applies to it verbatim — it was
+#                     simply not listed. Measured on a live instance on 2026-08-26,
+#                     'Rotate 270 CW' -> 'Horizontal (normal)' on 2 jobs.
 #   XMP:XMPToolkit    the version stamp of whatever last wrote the XMP packet, so exiftool
 #                     stamps its own on every copy. It describes the writing tool, not the
 #                     picture. Found by running the shipped preset against a real photo:
@@ -63,6 +67,7 @@ _METADATA_GROUPS: tuple[str, ...] = ("-EXIF:all", "-GPS:all", "-XMP:all", "-IPTC
 _METADATA_IGNORED: frozenset[str] = frozenset(
     {
         "EXIF:Orientation",
+        "XMP:Orientation",
         "XMP:XMPToolkit",
         "EXIF:ThumbnailOffset",
         "EXIF:PreviewImageStart",
@@ -102,17 +107,78 @@ def _as_number(value: object) -> tuple[float, str] | None:
     return float(match.group(1)), match.group(2).strip()
 
 
+# A time as exiftool prints it, with the UTC offset split off: '11:24:38',
+# '11:24:38+00:00', '11:24:38Z', and the same with the date exiftool writes in front of it,
+# '2026:08:25 15:46:30'. Deliberately strict — seconds are required and the date uses
+# exiftool's own `YYYY:MM:DD ` form, so a bare '11' or '2026' stays a number rather than
+# becoming a time, and any shape not written here simply falls through to the exact
+# comparison that has always applied. Only the bare-time form has been measured
+# (IPTC:TimeCreated, IPTC:DigitalCreationTime); the date-time form is in because it is the
+# same printed value with a date in front of it and the offset hangs off the end of it in
+# exactly the same way, and leaving it out would be waiting for the same report twice.
+_TIME_WITH_OFFSET = re.compile(
+    r"(?P<clock>(?:\d{4}:\d{2}:\d{2} )?\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?P<offset>Z|[+-]\d{2}:\d{2})?"
+)
+
+
+def _as_time(value: object) -> tuple[str, int | None] | None:
+    """``value`` as a (clock, UTC offset in minutes) pair, or ``None`` if it is not a time.
+
+    The offset is ``None`` when the value carries none, which is a different thing from an
+    offset of zero and is why it is not folded into the number here.
+    """
+    if not isinstance(value, str):
+        return None
+    match = _TIME_WITH_OFFSET.fullmatch(value.strip())
+    if match is None:
+        return None
+    clock, offset = match.group("clock"), match.group("offset")
+    if offset is None:
+        return clock, None
+    if offset == "Z":
+        return clock, 0
+    minutes = int(offset[1:3]) * 60 + int(offset[4:6])
+    return clock, -minutes if offset.startswith("-") else minutes
+
+
+def _times_match(before: object, after: object) -> bool:
+    """Whether two times are the same time written with and without a *zero* UTC offset.
+
+    ``False`` unless both sides are times, so nothing else is affected.
+    """
+    before_time = _as_time(before)
+    after_time = _as_time(after)
+    if before_time is None or after_time is None:
+        return False
+    before_clock, before_offset = before_time
+    after_clock, after_offset = after_time
+    if before_clock != after_clock:
+        return False
+    # No offset written and an explicit +00:00 both mean the clock is the whole story, so
+    # `None or 0` collapses them onto each other. Every other pair still has to agree:
+    # '15:46:30' against '15:46:30+01:00' is a real difference, and so is +01:00 against
+    # +02:00.
+    return (before_offset or 0) == (after_offset or 0)
+
+
 def _values_match(before: object, after: object) -> bool:
     """Whether two exiftool values mean the same thing.
 
-    Exact for everything that is not a number, so ``Make``, ``Model`` and any free text keep
-    comparing character by character, and a differing unit ('339.569 m' against
+    Exact for everything that is not a number or a time, so ``Make``, ``Model`` and any free
+    text keep comparing character by character, and a differing unit ('339.569 m' against
     '339.569 ft') is a difference like any other. Two numbers with the same unit are
     compared within :data:`_METADATA_REL_TOL`, because a tag whose printed form is a raw
     decimal shows the rational re-approximation that :func:`verify_metadata` exists to
-    tolerate everywhere else.
+    tolerate everywhere else. Two times are compared by :func:`_times_match`, because
+    exiftool writes an explicit zero UTC offset onto a time that carried none.
+
+    Times are tried first: to :func:`_as_number` a time is the number in front of it with
+    the rest as a unit, so '11:24:38+00:00' and '11:24:38' would be rejected on their units
+    before they were ever recognised as the same time.
     """
     if before == after:
+        return True
+    if _times_match(before, after):
         return True
     before_number = _as_number(before)
     after_number = _as_number(after)
@@ -123,6 +189,23 @@ def _values_match(before: object, after: object) -> bool:
     if before_unit != after_unit:
         return False
     return math.isclose(before_value, after_value, rel_tol=_METADATA_REL_TOL, abs_tol=0.0)
+
+
+def _diff_metadata(before: dict[str, object], after: dict[str, object]) -> list[str]:
+    """Every tag of ``before`` that ``after`` lost or changed, in the reported form.
+
+    Split out from the exiftool call in :func:`verify_metadata` so the rules — the ignore
+    list and :func:`_values_match` — are testable without exiftool installed.
+    """
+    differences: list[str] = []
+    for key, value in before.items():
+        if key in _METADATA_IGNORED:
+            continue
+        if key not in after:
+            differences.append(f"{key} lost")
+        elif not _values_match(value, after[key]):
+            differences.append(f"{key} changed: {value!r} -> {after[key]!r}")
+    return differences
 
 
 # How many bytes may follow the JPEG's end-of-image marker before we call it a payload.
@@ -513,6 +596,13 @@ async def verify_metadata(source: Path, target: Path, *, timeout_s: float = 120.
     else, including a differing unit, still has to match exactly, and a tag that is gone is
     still gone.
 
+    The other printed-form change measured is exiftool writing an explicit ``+00:00`` onto a
+    time that carried none: on a live instance on 2026-08-26, ``IPTC:TimeCreated`` and
+    ``IPTC:DigitalCreationTime`` came back '11:24:38' -> '11:24:38+00:00' and failed 92 jobs
+    in a single backfill run. Same clock, same displayed value, so :func:`_times_match`
+    treats an absent offset and a zero one as the same time. A *non-zero* offset is a
+    different time and still fails.
+
     The cost of comparing the printed form is that a change too small to alter the printed
     value cannot be seen here. That is the intended reading of "the metadata survived": the
     value a viewer is shown is the value that has to survive.
@@ -534,18 +624,7 @@ async def verify_metadata(source: Path, target: Path, *, timeout_s: float = 120.
             return {}
         return {key: value for key, value in entries[0].items() if key != "SourceFile"}
 
-    before = await read(source)
-    after = await read(target)
-
-    differences: list[str] = []
-    for key, value in before.items():
-        if key in _METADATA_IGNORED:
-            continue
-        if key not in after:
-            differences.append(f"{key} lost")
-        elif not _values_match(value, after[key]):
-            differences.append(f"{key} changed: {value!r} -> {after[key]!r}")
-    return differences
+    return _diff_metadata(await read(source), await read(target))
 
 
 async def copy_metadata(
