@@ -46,7 +46,7 @@
               "type": "null"
             }
           ],
-          "default": 200,
+          "default": null,
           "title": "Surge Threshold"
         },
         "surge_window_seconds": {

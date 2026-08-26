@@ -240,12 +240,30 @@ def test_a_zero_length_freshness_window_is_rejected(tmp_path: Path, monkeypatch:
         load_settings(_write(tmp_path, _with_behavior(max_asset_age_hours=0)))
 
 
-def test_the_surge_breaker_is_on_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_surge_breaker_is_off_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The breaker counts assets and knows nothing else about them.
+
+    A first phone backup and a camera card import look exactly like the influx it exists to
+    stop, and `IMAGE` in `enabled_types` makes that an ordinary day rather than an unusual
+    one. `max_asset_age_hours` is the guard that can tell a re-trigger from an upload, and
+    that one is still on by default — see the test above.
+    """
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
     settings = load_settings(_write(tmp_path, _MINIMAL))
-    assert settings.behavior.surge_threshold == 200
+    assert settings.behavior.surge_threshold is None
+    # The window keeps its value: it is what the threshold is counted over once somebody
+    # sets one, and a default of `null` there would be a second thing to configure.
     assert settings.behavior.surge_window_seconds == 600.0
+
+
+def test_the_surge_breaker_turns_on_with_a_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off by default is a default, not a removal. A number still arms it."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    settings = load_settings(_write(tmp_path, _with_behavior(surge_threshold=2000, surge_window_seconds=900)))
+    assert settings.behavior.surge_threshold == 2000
+    assert settings.behavior.surge_window_seconds == 900.0
 
 
 def test_the_surge_breaker_may_be_disabled_even_with_permanent_deletes(
@@ -255,13 +273,16 @@ def test_the_surge_breaker_may_be_disabled_even_with_permanent_deletes(
 
     The freshness gate is the precise fix for the bulk trigger and is mandatory. The breaker
     is a backstop with a real false-positive rate — a large phone backup is a surge by its
-    definition — so turning it off stays a supported choice.
+    definition — so turning it off stays a supported choice. Since it now ships off, this
+    covers both the explicit `null` and the default that no longer writes one.
     """
     monkeypatch.setenv("IMMICH__API_KEY", "key")
     monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
     body = _with_behavior(dry_run=False, trash_original=True, delete_mode="permanent", surge_threshold="null")
-    settings = load_settings(_write(tmp_path, body))
-    assert settings.behavior.surge_threshold is None
+    assert load_settings(_write(tmp_path, body)).behavior.surge_threshold is None
+
+    without = _with_behavior(dry_run=False, trash_original=True, delete_mode="permanent")
+    assert load_settings(_write(tmp_path, without)).behavior.surge_threshold is None
 
 
 def test_a_zero_surge_threshold_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

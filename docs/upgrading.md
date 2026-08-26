@@ -13,6 +13,35 @@ Job state lives in a volume and survives. Schema changes are applied automatical
 
 ## Unreleased
 
+### The surge breaker is now off by default — check whether you were relying on it
+
+**Read this one if you never wrote `behavior.surge_threshold` into your `config.yaml`.** It
+used to default to `200`, so you had a breaker whether you asked for one or not. It now
+defaults to `null`, and after this upgrade you have none.
+
+Keeping one is one line:
+
+```yaml
+behavior:
+  surge_threshold: 2000     # or 200, to keep exactly what you had
+  surge_window_seconds: 600
+```
+
+The mechanism is untouched — over the threshold in newly queued webhook assets inside the
+window still latches the whole service paused, and `immich-compressor resume --apply` is
+still what clears it. What changed is only which side of the switch ships. The breaker
+counts assets and knows nothing else about them, so a first phone backup or a camera card
+import looks exactly like the influx it exists to stop; with `IMAGE` in `enabled_types` that
+is an ordinary day. 2000 is a suggested starting point and not a measured one.
+
+**Nothing about your protection against the bulk metadata-extraction trigger changed.**
+`behavior.max_asset_age_hours` is the guard for that, it still defaults to 24 hours, and it
+is still refused at startup together with `delete_mode: permanent`.
+
+**If your service is paused right now, it stays paused.** The latch lives in the database
+and is independent of the threshold; clearing it is still `immich-compressor resume
+--apply`.
+
 ### The checksum-translation shim (opt-in, off by default)
 
 **Nothing to edit unless you want it.** `shim.enabled` defaults to `false`, and while it is

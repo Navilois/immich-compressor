@@ -57,6 +57,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backfilled: the original they would describe is already gone. Recognition is therefore
   complete only from this version onwards.
 
+### Changed
+
+- **The surge breaker ships off (`behavior.surge_threshold: null`), and its suggested value
+  is now 2000 rather than 200.** The breaker counts assets newly queued from webhooks and
+  knows nothing else about them, so a first phone backup, a camera card import and a holiday
+  upload all look exactly like the influx it exists to stop. 200 in ten minutes is a rate
+  that suits the default `enabled_types: [VIDEO]`; with `IMAGE` enabled it is an ordinary
+  day, and a backstop that fires on ordinary use teaches its operator to clear it unread.
+  Stills and the breaker shipped in the same release, 1.1.1, and the threshold was never
+  re-read against them.
+
+  Nothing about the mechanism changed. Writing a number turns it back on and it behaves
+  exactly as before: workers stop claiming, the sweeper stops finalising deletes, further
+  webhooks are refused, and the latch survives a restart until `immich-compressor resume
+  --apply`. `behavior.max_asset_age_hours` — the gate that can actually tell a bulk
+  re-trigger from an upload, and the one refused at startup under `delete_mode: permanent` —
+  is unchanged and still on by default.
+
+  **A deployment that relied on the 200 default now has no breaker.** Set
+  `behavior.surge_threshold` explicitly to keep one; see
+  [upgrading.md](docs/upgrading.md). A pause already latched in the database is *not*
+  cleared by this change.
+
+- **The generated configuration reference no longer prints a `null` default as "no
+  default".** `scripts/gen_docs.py` rendered an em dash for both, so five options that ship
+  with a value documented as if they had none — `behavior.surge_threshold` and the four
+  `Preset` overrides, whose own text already said `null` inherits the behavior setting.
+
 ### Fixed
 
 - **`docs/faq.md` no longer claims that `delete_mode: trash` avoids the re-upload.** It

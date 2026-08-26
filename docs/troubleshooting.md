@@ -92,8 +92,8 @@ longer than the window — raise `max_asset_age_hours`.
 ## The service has stopped doing anything
 
 ```
-WARNING starting PAUSED since 2026-08-21T09:14:22+00:00: 201 assets queued from webhooks
-        within 600s, over surge_threshold 200
+WARNING starting PAUSED since 2026-08-21T09:14:22+00:00: 2001 assets queued from webhooks
+        within 600s, over surge_threshold 2000
 ```
 
 The surge breaker latched. Nothing is queued, processed or deleted until it is cleared, and
@@ -105,8 +105,13 @@ docker compose exec immich-compressor immich-compressor resume
 ```
 
 prints the reason without changing anything. `--apply` clears it. If your normal traffic
-trips it — a phone backup of a few hundred photos will — raise `behavior.surge_threshold`.
-Full explanation in [operations.md](operations.md#the-surge-breaker).
+trips it, raise `behavior.surge_threshold` or set it back to `null`.
+Full explanation in [operations.md](operations.md#the-surge-breaker-off-by-default).
+
+The breaker is off unless you turned it on, so on a default configuration this is not why
+the service is idle — check `dry_run`, then the queue with `report`. A latch set by an
+earlier version does survive an upgrade: the threshold no longer being configured does not
+clear a pause that is already in the database, and `resume --apply` is still what clears it.
 
 ## The whole library queued at once
 

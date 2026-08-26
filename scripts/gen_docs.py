@@ -171,13 +171,18 @@ NOTES: dict[str, str] = {
         "`delete_mode: permanent`."
     ),
     "behavior.surge_threshold": (
-        "**The surge breaker.** More than this many *new* assets queued from webhooks inside "
-        "`surge_window_seconds` latches the service paused: workers stop claiming, the trash "
-        "sweeper stops finalising deletes, and further webhooks are refused until "
-        "`immich-compressor resume --apply`. The latch is stored in the database, so "
-        "restarting the container does not clear it. Counted for webhook-driven work only, so "
-        "`backfill` and `reprocess` never trip it — but a genuine bulk upload can, and pausing "
-        "is the intended answer for a service that deletes originals. `null` switches it off."
+        "**The surge breaker, off by default.** More than this many *new* assets queued from "
+        "webhooks inside `surge_window_seconds` latches the service paused: workers stop "
+        "claiming, the trash sweeper stops finalising deletes, and further webhooks are "
+        "refused until `immich-compressor resume --apply`. The latch is stored in the "
+        "database, so restarting the container does not clear it. Counted for webhook-driven "
+        "work only, so `backfill` and `reprocess` never trip it. `null` — the default — "
+        "switches it off, because the breaker counts assets and knows nothing else about "
+        "them: a first phone backup or a camera card import looks exactly like the influx it "
+        "exists to stop, and `IMAGE` in `enabled_types` makes that an ordinary day. "
+        "`max_asset_age_hours` is the guard that discriminates and it stays on. Set a number "
+        "to turn the breaker on; 2000 is a suggested starting point and not a measured one, "
+        "chosen to sit above one device's backlog and below a library migration."
     ),
     "behavior.surge_window_seconds": "The window `surge_threshold` is counted over.",
     "behavior.retention_days": (
@@ -319,10 +324,15 @@ def _default(model: type, name: str) -> str:
     if field.default_factory is not None:  # type: ignore[union-attr]
         return f"`{_yaml_literal(field.default_factory())}`"  # type: ignore[misc,operator]
     default = field.default
-    if default is None or repr(default) == "PydanticUndefined":
+    if repr(default) == "PydanticUndefined":
         return "—"
     if hasattr(default, "get_secret_value"):
         return "—"
+    # A `None` default is a value, not a missing one: `surge_threshold` ships off, and a
+    # `Preset` override left at `null` inherits the behavior setting. Rendering both as the
+    # em dash used for "no default" said the opposite of what the model does.
+    if default is None:
+        return "`null`"
     return f"`{_yaml_literal(default)}`"
 
 
