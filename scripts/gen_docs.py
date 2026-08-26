@@ -319,10 +319,15 @@ def _default(model: type, name: str) -> str:
     if field.default_factory is not None:  # type: ignore[union-attr]
         return f"`{_yaml_literal(field.default_factory())}`"  # type: ignore[misc,operator]
     default = field.default
-    if default is None or repr(default) == "PydanticUndefined":
+    if repr(default) == "PydanticUndefined":
         return "—"
     if hasattr(default, "get_secret_value"):
         return "—"
+    # A `None` default is a value, not a missing one: `surge_threshold` ships off, and a
+    # `Preset` override left at `null` inherits the behavior setting. Rendering both as the
+    # em dash used for "no default" said the opposite of what the model does.
+    if default is None:
+        return "`null`"
     return f"`{_yaml_literal(default)}`"
 
 

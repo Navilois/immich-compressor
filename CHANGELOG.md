@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backfilled: the original they would describe is already gone. Recognition is therefore
   complete only from this version onwards.
 
+### Changed
+
+- **The generated configuration reference no longer prints a `null` default as "no
+  default".** `scripts/gen_docs.py` rendered an em dash for both, so five options that ship
+  with a value documented as if they had none — `behavior.surge_threshold` and the four
+  `Preset` overrides, whose own text already said `null` inherits the behavior setting.
+
 ### Fixed
 
 - **`docs/faq.md` no longer claims that `delete_mode: trash` avoids the re-upload.** It

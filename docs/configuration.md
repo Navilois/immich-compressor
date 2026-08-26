@@ -151,10 +151,10 @@ presets:
 | `exiftool_copy` | boolean | `false` |  |
 | `normalize_orientation` | boolean | `false` |  |
 | `timeout_s` | number | `3600.0` | (> 0) |
-| `max_ratio` | number | — | Overrides `behavior.max_ratio` for this preset. `null` uses the behavior value. |
-| `min_savings_bytes` | integer | — | Overrides `behavior.min_savings_bytes` for this preset. `null` uses the behavior value. |
-| `require_date_time_original` | boolean | — | Overrides `behavior.require_date_time_original` for this preset. Off for stills in the built-in catalog: a replacement's timeline position comes from the `fileCreatedAt` sent at upload and the explicit `dateTimeOriginal` write afterwards, not from the file. |
-| `min_source_quality` | integer | — | Skip a still whose source JPEG quality is below this. Quantisation error is cumulative, so re-encoding an already-compressed image buys a second generation of artefacts and usually a *larger* file — measured 158 368 -> 190 488 bytes for a q60 source through the q82 preset. `null` disables the check. |
+| `max_ratio` | number | `null` | Overrides `behavior.max_ratio` for this preset. `null` uses the behavior value. |
+| `min_savings_bytes` | integer | `null` | Overrides `behavior.min_savings_bytes` for this preset. `null` uses the behavior value. |
+| `require_date_time_original` | boolean | `null` | Overrides `behavior.require_date_time_original` for this preset. Off for stills in the built-in catalog: a replacement's timeline position comes from the `fileCreatedAt` sent at upload and the explicit `dateTimeOriginal` write afterwards, not from the file. |
+| `min_source_quality` | integer | `null` | Skip a still whose source JPEG quality is below this. Quantisation error is cumulative, so re-encoding an already-compressed image buys a second generation of artefacts and usually a *larger* file — measured 158 368 -> 190 488 bytes for a q60 source through the q82 preset. `null` disables the check. |
 
 `{input}` and `{output}` are both required. Commands run **without a shell** — they are `shlex.split` at load time and rejected outright if a token is a shell control operator (`|`, `&&`, `;`), a redirection (`>`, `2>&1`) or a command substitution (`` ` ``, `$(`). A `|` *inside* a token is fine, because that is ffmpeg's format-alternation syntax and not a pipe.
 
