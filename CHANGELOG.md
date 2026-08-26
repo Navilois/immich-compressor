@@ -87,6 +87,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The gate the checksum-translation shim waits on now really opens after a `permanent`
+  delete.** With `delete_mode: permanent` and `retention_days: 0` the pipeline deletes the
+  original inline and recorded nothing: `original_freed_at` stayed empty on every job it
+  finished, so the shim never translated a checksum on the one configuration it exists for.
+  The finaliser read `source_checksum` and `owner_id` off the in-memory job object, which is
+  claimed *before* those two columns are written to its row, so on that path it always found
+  them empty and returned before opening the gate. It reads the row back from the store
+  instead — the same source of truth the sweeper's freshly loaded job was already using, so
+  `retention_days > 0` and the shim's own `trash`-mode path behave exactly as before.
+  Measured on a live deployment on 2026-08-26: 370 permanently deleted originals, 370 ledger
+  rows written, 0 gates open. A deployment that ran the affected build can recover those
+  timestamps by hand — [docs/upgrading.md](docs/upgrading.md) has the statement, and the one
+  configuration it must never be run on.
+
 - **`docs/faq.md` no longer claims that `delete_mode: trash` avoids the re-upload.** It
   delays it. Immich's own trash retention defaults to 30 days (`trash: { enabled: true,
   days: 30 }`, verified against `immich-app/immich@fbd5dc2`); when the scheduled purge

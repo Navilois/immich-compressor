@@ -65,6 +65,80 @@ job now records that the original is gone. No request is made and nothing user-v
 changes; the no-op update that re-offers the replacement to clients is only made when the
 shim is actually enabled.
 
+### If you already ran the unreleased permanent-delete build
+
+**Only concerns a deployment that ran `main` between the shim landing and this fix, with
+`delete_mode: permanent`.** Everyone else has nothing to do, and on a `trash` deployment the
+statement below must not be run at all — see the hazard.
+
+On `delete_mode: permanent` with `retention_days: 0` the original is deleted inline, and
+that path opened no gate: `original_freed_at` stayed empty on every job it finished, so the
+shim went on passing those assets through untranslated. Measured on one live deployment on
+2026-08-26: 370 permanently deleted originals, 370 ledger rows, 0 open gates.
+`retention_days > 0` was never affected — those deletes are finalised by the trash sweeper,
+which opened its gates correctly.
+
+The fix repairs everything from this version on. The gates already missed are recoverable
+without asking Immich anything, because `updated_at` on such a job is the moment the delete
+happened:
+
+```sql
+UPDATE jobs
+   SET original_freed_at = updated_at
+ WHERE state = 'done'
+   AND source_checksum IS NOT NULL
+   AND owner_id IS NOT NULL
+   AND new_asset_id IS NOT NULL
+   AND original_freed_at IS NULL;
+```
+
+The image ships no `sqlite3` command line, so it goes through Python. Count first — this
+one is read-only and safe to run with the service up:
+
+```bash
+docker compose exec immich-compressor python3 -c "
+import sqlite3
+db = sqlite3.connect('file:/var/lib/immich-compressor/state.db?mode=ro', uri=True)
+print(db.execute('SELECT COUNT(*) FROM jobs WHERE state = \'done\' '
+                 'AND source_checksum IS NOT NULL AND owner_id IS NOT NULL '
+                 'AND new_asset_id IS NOT NULL AND original_freed_at IS NULL').fetchone()[0],
+      'gates to open')
+"
+```
+
+If that number is not the number of originals you permanently deleted, stop and read the
+hazard below. Then apply it, with the service stopped so nothing else is writing:
+
+```bash
+docker compose stop immich-compressor
+docker compose run --rm --entrypoint python3 immich-compressor -c "
+import sqlite3
+db = sqlite3.connect('/var/lib/immich-compressor/state.db')
+rows = db.execute('UPDATE jobs SET original_freed_at = updated_at WHERE state = \'done\' '
+                  'AND source_checksum IS NOT NULL AND owner_id IS NOT NULL '
+                  'AND new_asset_id IS NOT NULL AND original_freed_at IS NULL').rowcount
+db.commit()
+print(rows, 'gates opened')
+"
+docker compose start immich-compressor
+```
+
+**Never on `trash`, and not blind after a `delete_mode` switch.** The job store does not
+record which mode was in force for a given job. On a `trash` deployment those same rows
+describe originals that are still in the trash *still holding their checksums*, and opening
+their gates tells the shim it may hand those checksums to clients while the originals exist.
+That is the exact write the gate is there to prevent: the phone's mirror allows one row per
+`(owner, checksum)`, so it either drops the original's row or aborts the sync batch. If you
+switched to `permanent` on a known date, add `AND updated_at >= '2026-01-01T00:00:00'` with
+that date to both statements, and satisfy yourself with the count before running the update.
+
+**It opens gates and nothing else.** A gate opened by the service also makes the no-op update
+that has the replacement re-offered to clients; a backfill of hundreds of rows does not make
+hundreds of live updates, and moves no counter either. The translation is armed for those
+assets all the same — a client sees it the next time anything changes that replacement for
+another reason. [shim.md](shim.md#why-a-no-op-update-is-needed-at-all) explains why the
+update exists.
+
 ### A new skip reason, `re_uploaded`, and two new columns
 
 **Nothing to edit.** The `jobs` table gains `source_checksum` and `owner_id`, applied
