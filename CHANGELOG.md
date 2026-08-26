@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [docs/shim.md](docs/shim.md) covers the deployment, the staged rollout and the limits —
   including that this is, deliberately, telling one client something untrue.
 
+  `shim_gates_opened` and `shim_touches` count the event and not the code path that saw
+  it, so both routes to an open gate bump both: neither counter is structurally zero on a
+  given `delete_mode`. `shim_gates_opened` follows the record, so it counts on a
+  `permanent` deployment even with the shim switched off; `shim_touches` follows the write,
+  so it counts only where the no-op update is actually made. One original cannot be counted
+  twice — a deployment that switched `delete_mode` can have both routes observe the same
+  purge, and the gate behind them is first-write-wins.
+
 
 - **A re-uploaded original is recognised instead of compressed a second time.** Every job
   now records the checksum and owner id the server reported for the original, before

@@ -43,6 +43,7 @@ from .store import (
     SHIM_LINES_REWRITTEN,
     SHIM_PASSTHROUGH_ERRORS,
     SHIM_REQUESTS,
+    SHIM_TOUCHES,
     JobStore,
 )
 
@@ -374,6 +375,10 @@ async def _open_gates(ready: _Ready, entries: tuple[LedgerEntry, ...]) -> None:
     Without the touch this is inert. The sync stream only offers assets whose ``updateId``
     is newer than the client's checkpoint, and nothing has updated the replacement since
     it was created — so the line the shim wants to rewrite would never be sent again.
+
+    Both counters are bumped here, exactly as the pipeline bumps both on the ``permanent``
+    path: a counter names the event, not the module that saw it. Neither can be counted
+    twice, because both sit behind `JobStore.mark_original_freed`.
     """
     deps = ready.deps
     for entry in entries:
@@ -406,6 +411,10 @@ async def _open_gates(ready: _Ready, entries: tuple[LedgerEntry, ...]) -> None:
                 entry.new_asset_id,
                 exc_info=True,
             )
+        else:
+            # In the `else`, not the `try`: a store error here is not a failed touch, and
+            # logging it as one would send an operator after the wrong thing entirely.
+            await ready.store.bump_counter(SHIM_TOUCHES)
 
 
 async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator[bytes]:

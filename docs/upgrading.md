@@ -65,6 +65,14 @@ job now records that the original is gone. No request is made and nothing user-v
 changes; the no-op update that re-offers the replacement to clients is only made when the
 shim is actually enabled.
 
+**That record is counted, so `shim_gates_opened_total` climbs on a `permanent` deployment
+even with the shim off.** If you are about to alert on "the `shim_*` counters are all zero
+while `shim.enabled: false`", that one is not. It follows the record rather than the shim,
+because a deployment that turns the shim on later wants the history. The other five stay at
+zero until the routes are mounted. `shim_touches_total` is the pair to read against it:
+gates ahead of touches means the translation is armed but is not being delivered — expected
+while `shim.rewrite_sync_stream` is still `false`, worth investigating once it is `true`.
+
 ### A new skip reason, `re_uploaded`, and two new columns
 
 **Nothing to edit.** The `jobs` table gains `source_checksum` and `owner_id`, applied

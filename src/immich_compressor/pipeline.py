@@ -38,7 +38,7 @@ from .models import (
     WebhookAsset,
     WebhookPayload,
 )
-from .store import SHIM_TOUCHES, JobStore
+from .store import SHIM_GATES_OPENED, SHIM_TOUCHES, JobStore
 
 logger = logging.getLogger(__name__)
 
@@ -698,11 +698,17 @@ class Pipeline:
         server, it costs one UPDATE, and a deployment that turns the shim on later wants
         the history. The touch is a write against the library, so it is only worth making
         when something is actually listening for the result.
+
+        Both counters are bumped here, exactly as the shim bumps both on the ``trash``
+        path, and they part company where the writes do: ``shim_gates_opened`` follows the
+        UPDATE and is therefore unconditional, ``shim_touches`` follows the touch and is
+        therefore not.
         """
         if not (job.source_checksum and job.owner_id):
             return  # A job from before the ledger existed. Nothing to translate to.
         if not await self._store.mark_original_freed(job.source_asset_id):
             return
+        await self._store.bump_counter(SHIM_GATES_OPENED)
         shim = self._settings.shim
         if not shim.enabled or shim.log_only or not shim.rewrite_sync_stream:
             return
