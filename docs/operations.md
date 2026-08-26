@@ -233,16 +233,37 @@ So the button is no longer a hazard, and the answer to *"can I re-run metadata e
 is yes. It is still not a way to reach the backlog — every one of those assets is refused,
 by design. `backfill` is the way to reach the backlog.
 
-### The surge breaker
+### The surge breaker (off by default)
 
 The freshness gate answers a known question. The breaker is the backstop for the one nobody
 asked: a trigger this project has not seen, a re-uploaded library, a workflow pointed at the
 wrong endpoint. More than `surge_threshold` **new** assets queued from webhooks inside
 `surge_window_seconds` latches the whole service paused.
 
+**It ships off — `surge_threshold: null` — and turning it on is a deliberate choice.** The
+breaker counts assets and knows nothing else about them, so a first phone backup, a camera
+card import and a holiday upload all look exactly like the influx it exists to stop. With
+`IMAGE` in `enabled_types` that is an ordinary day rather than an unusual one, and a
+backstop that fires on ordinary use teaches its operator to clear it unread. The gate above
+is the guard that can actually tell a re-trigger from an upload, and it is still on.
+
+Turn the breaker on by writing a number:
+
+```yaml
+behavior:
+  surge_threshold: 2000
+  surge_window_seconds: 600
 ```
-ERROR SURGE BREAKER TRIPPED: 201 assets queued from webhooks within 600s, over
-      surge_threshold 200. Nothing further is queued, processed or deleted until
+
+2000 is a suggested starting point and not a measured one — above one device's backlog,
+below a library migration, which is the shape of event worth pausing for. Pick your own from
+what your library actually does: `immich_compressor_webhooks_received_total` in
+[`/metrics`](#metrics) is the arrival rate to size it against, bearing in mind that the
+breaker counts only the subset that queues a new job.
+
+```
+ERROR SURGE BREAKER TRIPPED: 2001 assets queued from webhooks within 600s, over
+      surge_threshold 2000. Nothing further is queued, processed or deleted until
       `immich-compressor resume --apply`.
 ```
 
@@ -258,11 +279,11 @@ docker compose exec immich-compressor immich-compressor resume
 That prints why it paused and changes nothing. Add `--apply` to clear it, or `POST /resume`
 with the webhook token. Workers pick up where they left off on the next poll.
 
-**It has a real false-positive rate, and that is the accepted trade-off.** Two hundred photos
-from a phone backup in ten minutes is a surge by this definition, even though it is entirely
-legitimate. The breaker only pauses — nothing is lost, and one command resumes — so erring
-towards a stop is the right way round for a service that deletes originals. If that is your
-normal traffic, raise `surge_threshold`; `null` switches it off.
+**Whatever number you pick has a false-positive rate.** A big enough legitimate upload is a
+surge by this definition, and no threshold separates the two — that is why the breaker only
+*pauses*. Nothing is lost, one command resumes, and erring towards a stop is the right way
+round for a service that deletes originals. Raise `surge_threshold` if your normal traffic
+trips it, or set it back to `null` to switch it off.
 
 Assets whose webhook was refused while paused are not recorded anywhere, so they stay
 reachable by `backfill` once you have resumed.

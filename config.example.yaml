@@ -49,16 +49,21 @@ behavior:
   # library. `null` turns the gate off and is refused together with delete_mode: permanent.
   max_asset_age_hours: 24
 
-  # The surge breaker: a backstop behind the gate above, for the bulk influx nobody
+  # The surge breaker: an OPT-IN backstop behind the gate above, for the bulk influx nobody
   # predicted. More than surge_threshold NEW assets queued from webhooks inside
   # surge_window_seconds latches the service paused — workers stop claiming, the sweeper
   # stops deleting, further webhooks are refused — until `immich-compressor resume --apply`.
   # The latch lives in the database, so restarting the container does not clear it.
-  # Counted for webhook work only, so backfill and reprocess never trip it. A large phone
-  # backup can: 200 photos in ten minutes is a surge by this definition, and pausing is the
-  # right answer for something that deletes originals. Raise it if that is your normal, or
-  # set `null` to switch it off.
-  surge_threshold: 200
+  # Counted for webhook work only, so backfill and reprocess never trip it.
+  #
+  # Off by default: it counts assets and knows nothing else about them, so a first phone
+  # backup or a camera card import looks exactly like the thing it exists to stop — and with
+  # IMAGE in enabled_types an ordinary day is thousands of files, not tens. The gate above
+  # is the guard that tells a re-trigger from an upload, and that one stays on.
+  #
+  # Set a number to turn it on. 2000 is a suggested starting point, not a measured one:
+  # above one device's backlog, below a library migration.
+  surge_threshold: null
   surge_window_seconds: 600
 
   # balanced | higher | smaller. Mapped per encoder to the right CRF / -global_quality /

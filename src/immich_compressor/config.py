@@ -169,7 +169,7 @@ class BehaviorSettings(BaseModel):
     # enqueues directly and is not subject to this gate.
     max_asset_age_hours: float | None = Field(default=24.0, gt=0)
 
-    # The surge breaker: defence in depth behind `max_asset_age_hours`, for the bulk influx
+    # The surge breaker: an opt-in backstop behind `max_asset_age_hours`, for the bulk influx
     # nobody predicted — a trigger this project has not seen, a re-uploaded library, a
     # misconfigured workflow. More than `surge_threshold` *new* assets queued from webhooks
     # inside `surge_window_seconds` latches the service paused: workers stop claiming, the
@@ -177,11 +177,19 @@ class BehaviorSettings(BaseModel):
     # `immich-compressor resume --apply`. The latch is stored in the database, so restarting
     # the container does not clear it.
     #
-    # Counted for webhook-driven work only, so `backfill` and `reprocess` never trip it.
-    # A genuine bulk upload can: 200 photos from a phone backup in ten minutes is a surge by
-    # this definition, and pausing is the correct answer for a service that deletes
-    # originals. Raise it if that is your normal, or set `null` to switch it off.
-    surge_threshold: int | None = Field(default=200, gt=0)
+    # `null` — off — is the default, because the breaker counts webhook-queued assets and
+    # knows nothing else about them. A first phone backup, a camera card import and a
+    # holiday upload all look exactly like the thing it exists to stop, and enabling `IMAGE`
+    # in `enabled_types` moves the ordinary day from tens of files to thousands. A backstop
+    # that fires on ordinary use teaches its operator to clear it unread, which is worse
+    # than not having it. `max_asset_age_hours` above is the guard that discriminates, it is
+    # mandatory under `delete_mode: permanent`, and it stays on.
+    #
+    # Set a number to turn the breaker on. 2000 is a suggested starting point and not a
+    # measured one: it sits above one device's backlog and below a library migration, which
+    # is the shape of event worth pausing for. Counted for webhook-driven work only, so
+    # `backfill` and `reprocess` never trip it.
+    surge_threshold: int | None = Field(default=None, gt=0)
     surge_window_seconds: float = Field(default=600.0, gt=0)
 
     # 0 means "as soon as the verification chain passes", inline in the job rather than
