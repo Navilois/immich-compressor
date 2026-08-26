@@ -109,6 +109,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The shim no longer relays Immich's `Date`, which arrived as a duplicate.** Uvicorn writes
+  its own `Date` and `Server` and appends the application's rather than replacing them, so
+  every proxied response carried two `Date` headers whose values disagreed by a second —
+  a field RFC 9110 defines as a singleton — and nginx logged `upstream sent duplicate header
+  line: "date: ..."` on each one. Both are now dropped from the relayed set along with the
+  hop-by-hop headers. `Server` is latent rather than observed, since Immich sends
+  `X-Powered-By` and no `Server`, but anything in front of Immich would duplicate the same
+  way. Everything that describes the response rather than the hop — `X-Correlation-ID`,
+  `Vary`, `Content-Type` — still comes through untouched.
+
 - **The live test behind the shim's delivery claim never actually ran.** Immich refuses API
   keys on every `/sync` route — `403 {"message": "Sync endpoints cannot be used with API
   keys"}`, whatever the key is scoped to — so
