@@ -119,9 +119,24 @@ location @immich { proxy_pass http://immich-server:2283; }
 location / { proxy_pass http://immich-server:2283; }
 ```
 
-`proxy_buffering off` is not optional. With buffering on, nginx holds the sync stream and
-the app stalls waiting for a response that never finishes arriving. If you use Caddy or
-Traefik, find their equivalent before you route anything.
+`proxy_buffering off` is the setting this was tested with, and the one to use. The reason is
+narrower than this page used to claim.
+
+It said the app stalls on a response that never finishes arriving. That is not what happens.
+Measured on v3.1.0 against a 423-line, 265 KB sync response, buffering on and off were
+indistinguishable — first byte inside 20 ms either way, byte-identical output, no stall —
+with a fast client and again with one reading at roughly 40 KB/s. Immich's sync stream is a
+*finite* response that completes and closes, so there is nothing for nginx to hold open.
+
+What remains true is that this is a streaming endpoint and `proxy_buffering off` is the
+setting that matches it: the shim rewrites and yields one line at a time, and the client
+applies batches as they arrive rather than at the end. Buffering also lets nginx spool a
+response larger than `proxy_buffers` to a temporary file — documented nginx behaviour, but
+**not observed here**: no temp file appeared at 265 KB even with the slow client, and the
+size a first sync of a large library reaches has not been tested. Treat the large-library
+case as unverified in both directions.
+
+If you use Caddy or Traefik, find their equivalent before you route anything.
 
 ## Rolling it out
 

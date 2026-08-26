@@ -181,6 +181,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **The shim's `proxy_buffering` warning now says what was measured.** `docs/shim.md`
+  claimed that with buffering on "nginx holds the sync stream and the app stalls waiting for
+  a response that never finishes arriving". It does not: measured on v3.1.0 against a
+  423-line, 265 KB response, buffering on and off were indistinguishable — first byte inside
+  20 ms either way, byte-identical output, no stall — with a fast client and again with one
+  reading at roughly 40 KB/s. Immich's sync stream is a finite response that completes and
+  closes, so there is nothing to hold open. The recommendation stands, for the reason that
+  actually applies: it is a streaming endpoint, the shim yields line by line, and the client
+  applies batches as they arrive. The large-library case is now named as unverified rather
+  than asserted.
+
 - **Every tracked document was read against the 1.3.1 source and corrected.** No behaviour
   changed; what changed is that the documentation now describes what the code does.
   - `docs/upgrading.md` gains the **1.3.0 → 1.3.1** section it never got — the release was a
