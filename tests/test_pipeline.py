@@ -1214,6 +1214,61 @@ async def test_permanent_delete_opens_the_gate_and_touches_the_replacement(
     assert json.loads(touch.calls.last.request.content) == {"isFavorite": False}
 
 
+async def _finalize_inline(settings: Settings, store: JobStore) -> Job | None:
+    """The same finalise, in the ordering the `retention_days: 0` path really uses.
+
+    `_finalize` above reloads the job after the ledger write, which is how the sweeper
+    reaches the finaliser: it takes its jobs from `due_deletions()`, long after everything
+    about them was written. The pipeline's own inline call never reloads. It claims a job,
+    writes `source_checksum`/`owner_id` onto the *row* in step 2, and carries that same
+    object — still holding the values it was claimed with — down into `finalize_original`.
+    """
+    asset_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    await store.enqueue(asset_id, {"data": {"asset": {"id": asset_id, "type": "VIDEO"}}}, delay_seconds=0)
+    job = await store.claim_next()
+    assert job is not None
+    assert job.source_checksum is None  # claimed before step 2 wrote the ledger
+
+    await store.update(asset_id, source_checksum=ORIGINAL_HASH, owner_id=OWNER_ID)  # step 2
+    await store.update(asset_id, new_asset_id=REPLACEMENT_ID, new_checksum="replacement-hash=")  # step 6
+
+    client = ImmichClient(BASE, "k")
+    try:
+        await Pipeline(settings, client, store).finalize_original(job, REPLACEMENT_ID, "replacement-hash=")
+    finally:
+        await client.aclose()
+    return await store.get(asset_id)
+
+
+@respx.mock
+async def test_the_inline_delete_path_opens_the_gate_from_a_pre_ledger_job(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """`permanent` + `retention_days: 0` — the configuration the shim exists for.
+
+    Every shipped test of the gate entered `finalize_original` with a job reloaded after
+    the ledger write, which is the sweeper's calling convention, so the inline path had no
+    coverage at all — and there the gate never opened: the finaliser read the ledger pair
+    off an object that predated the write, found `None`, and returned before
+    `mark_original_freed`. The store holds what step 2 wrote, so the store is what decides.
+    """
+    settings.behavior.delete_mode = "permanent"
+    settings.behavior.retention_days = 0
+    settings.shim.enabled = True
+    _mock_verified_replacement(REPLACEMENT_ID, "replacement-hash=")
+    respx.delete(f"{BASE}/assets").mock(return_value=httpx.Response(204))
+    touch = respx.put(f"{BASE}/assets/{REPLACEMENT_ID}").mock(return_value=httpx.Response(204))
+
+    async with JobStore(settings.database_path) as store:
+        job = await _finalize_inline(settings, store)
+        assert job is not None
+        assert job.state is JobState.DONE
+        assert job.original_freed_at is not None
+        assert (await store.counters())[SHIM_TOUCHES] == 1
+
+    assert touch.call_count == 1
+
+
 @respx.mock
 async def test_the_touch_writes_back_the_value_it_read(settings: Settings, tmp_path: Path) -> None:
     """A favourited replacement must not be un-favourited by being re-offered."""

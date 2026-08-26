@@ -699,12 +699,20 @@ class Pipeline:
         the history. The touch is a write against the library, so it is only worth making
         when something is actually listening for the result.
 
+        The ledger pair is read back from the store, never off ``job``. Step 2 writes those
+        two columns to the row and the inline caller then carries the *same* object all the
+        way down here, so ``job.source_checksum`` still holds what it did when the job was
+        claimed — ``None`` on every job this service has ever processed. The sweeper's job
+        is freshly loaded and carries the same values as the row, so both callers read one
+        source of truth. Only the pair is stale; ``job.source_asset_id`` is the identity.
+
         Both counters are bumped here, exactly as the shim bumps both on the ``trash``
         path, and they part company where the writes do: ``shim_gates_opened`` follows the
         UPDATE and is therefore unconditional, ``shim_touches`` follows the touch and is
         therefore not.
         """
-        if not (job.source_checksum and job.owner_id):
+        current = await self._store.get(job.source_asset_id)
+        if current is None or not (current.source_checksum and current.owner_id):
             return  # A job from before the ledger existed. Nothing to translate to.
         if not await self._store.mark_original_freed(job.source_asset_id):
             return
