@@ -38,7 +38,7 @@ from .models import (
     WebhookAsset,
     WebhookPayload,
 )
-from .store import SHIM_TOUCHES, JobStore
+from .store import SHIM_GATES_OPENED, SHIM_TOUCHES, JobStore
 
 logger = logging.getLogger(__name__)
 
@@ -705,12 +705,18 @@ class Pipeline:
         claimed — ``None`` on every job this service has ever processed. The sweeper's job
         is freshly loaded and carries the same values as the row, so both callers read one
         source of truth. Only the pair is stale; ``job.source_asset_id`` is the identity.
+
+        Both counters are bumped here, exactly as the shim bumps both on the ``trash``
+        path, and they part company where the writes do: ``shim_gates_opened`` follows the
+        UPDATE and is therefore unconditional, ``shim_touches`` follows the touch and is
+        therefore not.
         """
         current = await self._store.get(job.source_asset_id)
         if current is None or not (current.source_checksum and current.owner_id):
             return  # A job from before the ledger existed. Nothing to translate to.
         if not await self._store.mark_original_freed(job.source_asset_id):
             return
+        await self._store.bump_counter(SHIM_GATES_OPENED)
         shim = self._settings.shim
         if not shim.enabled or shim.log_only or not shim.rewrite_sync_stream:
             return

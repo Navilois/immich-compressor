@@ -400,7 +400,12 @@ async def test_sync_route_opens_the_gate_and_touches_the_replacement(tmp_path: P
         job = await store.get(ORIGINAL_ID)
         assert job is not None and job.original_freed_at is not None
         assert touched == [REPLACEMENT_ID]
-        assert (await store.counters())[SHIM_GATES_OPENED] == 1
+        counters = await store.counters()
+        # Both, not one. An operator reading `shim_touches_total` is asking whether the
+        # re-offer works, and the answer must not depend on which `delete_mode` produced
+        # the touch — this path is the whole of it on a `trash` deployment.
+        assert counters[SHIM_GATES_OPENED] == 1
+        assert counters[SHIM_TOUCHES] == 1
     finally:
         await store.close()
 
@@ -421,6 +426,40 @@ async def test_a_failing_touch_leaves_the_gate_open(tmp_path: Path) -> None:
             assert http.post("/api/sync/stream", json={}).status_code == 200
         job = await store.get(ORIGINAL_ID)
         assert job is not None and job.original_freed_at is not None
+        counters = await store.counters()
+        # The two counters part company exactly here, which is what makes the pair worth
+        # reading: gates ahead of touches means the translation is armed but not delivered.
+        assert counters[SHIM_GATES_OPENED] == 1
+        assert counters[SHIM_TOUCHES] == 0
+    finally:
+        await store.close()
+
+
+async def test_a_gate_the_pipeline_already_opened_is_counted_once(tmp_path: Path) -> None:
+    """Both counters sit behind `mark_original_freed`, and it is first-write-wins.
+
+    The collision is real on a deployment that switched `delete_mode`: the pipeline performs
+    the permanent delete and opens that gate itself, and the purge for the same original
+    still goes past on the sync stream — up to one refresh interval before the shim's ledger
+    notices the row is already freed. The second observer must count nothing and touch
+    nothing, or one permanent delete reads as two.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=False)
+    upstream = Upstream()
+    upstream.lines = [delete_line()]
+    app, deps, touched = build(store, upstream)
+    # A ledger that has read the closed gate and will not look again for an hour.
+    deps.ledger = ChecksumLedger(store, 3600.0, clock=lambda: 0.0)
+    assert set((await deps.ledger.maps()).delete_watch) == {ORIGINAL_ID}
+    await store.mark_original_freed(ORIGINAL_ID)  # what the pipeline just did
+
+    try:
+        with TestClient(app) as http:
+            assert http.post("/api/sync/stream", json={}).status_code == 200
+        counters = await store.counters()
+        assert counters[SHIM_GATES_OPENED] == 0
+        assert counters[SHIM_TOUCHES] == 0
+        assert touched == []
     finally:
         await store.close()
 
@@ -570,17 +609,6 @@ def test_describe_names_the_live_routes() -> None:
     assert "log_only" in line
     assert "/api/sync/stream" in line
     assert "http://immich-server:2283" in line
-
-
-def test_touch_counter_is_bumped_by_the_pipeline_not_the_shim() -> None:
-    """Guards the split: the shim's own touch path counts gates, the pipeline counts touches.
-
-    Both write `shim_touches` would double-count a permanent delete, which is the number
-    an operator reads to decide whether the re-offer is working at all.
-    """
-    from immich_compressor import shim
-
-    assert SHIM_TOUCHES not in shim.__dict__
 
 
 # --------------------------------------------------------- mounting, through create_app

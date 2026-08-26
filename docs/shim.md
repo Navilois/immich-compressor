@@ -54,13 +54,20 @@ the shim passes that asset's lines through untouched.
 It depends on `delete_mode`, because the service only witnesses one of the two cases.
 
 **`delete_mode: permanent`.** The service deletes the original itself, so it knows the
-moment. It records the gate and immediately makes a no-op update to the replacement.
+moment. It records the gate there and then — whether or not the shim is running, because
+that is a fact about the server — and makes the no-op update if the shim is on and
+rewriting.
 
 **`delete_mode: trash` (the default).** The original goes to the trash and Immich deletes
 it for real when its retention window expires — up to 30 days later, inside Immich, with
 nothing reported back here. The shim watches for it instead: the purge produces a delete
 event on the sync stream, and the shim is in that stream. When it sees a delete for an
 original it replaced, it opens that gate and asks for the same no-op update.
+
+Both paths count the same two things — `shim_gates_opened_total` when the gate opens,
+`shim_touches_total` when the no-op update lands. Which of the two saw it is not in the
+counters and does not need to be. A deployment that switched `delete_mode` can have both
+observe the same original; the gate is first-write-wins, so it is still counted once.
 
 ### Why a no-op update is needed at all
 
@@ -125,9 +132,18 @@ Do these in order. Each step is readable in `immich-compressor report` and at `/
 2. **`log_only: true`.** Route the two paths here. `shim_requests_total` should start
    climbing. If it stays at zero, your reverse proxy is not sending anything here — fix that
    before changing bytes.
-3. **`log_only: false`, `rewrite_sync_stream: false`.** Gates start opening and the no-op
-   updates start firing. Watch `shim_gates_opened_total` and `shim_touches_total`. Nothing
-   is being rewritten yet, so a mistake at this point costs nothing.
+3. **`log_only: false`, `rewrite_sync_stream: false`.** Gates start opening. Watch
+   `shim_gates_opened_total`. Nothing is being rewritten yet, so a mistake at this point
+   costs nothing.
+
+   Whether `shim_touches_total` moves with it depends on `delete_mode`, and both answers
+   are correct. On `trash` the no-op updates fire alongside the gates, because the shim
+   makes one whenever it sees a purge. On `permanent` they are held back until step 4: the
+   touch exists to have a line re-sent for rewriting, and nothing is being rewritten yet.
+
+   On `trash`, expect this step to be quiet for a while regardless. A gate opens when
+   Immich purges an original, which is up to 30 days after this service trashed it.
+
 4. **`rewrite_sync_stream: true`.** The translation goes live. Watch your phone's backup
    counter after a permanent delete: it must not grow. The `re_uploaded` count must stop
    rising.
@@ -139,8 +155,8 @@ Do these in order. Each step is readable in `immich-compressor report` and at `/
 | `shim_requests_total` | Requests proxied. Zero while enabled means the reverse proxy is not routing here. |
 | `shim_lines_rewritten_total` | Sync lines whose checksum was translated. |
 | `shim_hashes_translated_total` | Checksums translated in either direction. |
-| `shim_gates_opened_total` | Originals observed to be gone for good. |
-| `shim_touches_total` | No-op updates made so a replacement is re-sent. Zero while gates are opening means the translation is armed but may never reach a device. |
+| `shim_gates_opened_total` | Originals observed to be gone for good, counted in both delete modes: the `permanent` delete this service performs, and the purge the shim sees go past. It follows the record, not the shim, so on `permanent` it climbs even with the shim off. |
+| `shim_touches_total` | No-op updates made so a replacement is re-sent. Zero while gates are opening means the translation is armed but may never reach a device — except at step 3 above on `delete_mode: permanent`, where it is held back on purpose. |
 | `shim_passthrough_errors_total` | Times Immich was unreachable and clients got a 502. Anything above zero means somebody saw a sync failure. |
 
 `re_uploaded` is the one to watch overall. It counts re-uploads that already happened, so

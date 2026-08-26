@@ -31,7 +31,7 @@ from immich_compressor.pipeline import (
     marker_blocks_reprocessing,
 )
 from immich_compressor.server import create_app
-from immich_compressor.store import SHIM_TOUCHES, JobStore
+from immich_compressor.store import SHIM_GATES_OPENED, SHIM_TOUCHES, JobStore
 
 BASE = "http://immich-test:2283/api"
 
@@ -1201,7 +1201,12 @@ async def test_permanent_delete_opens_the_gate_and_touches_the_replacement(
         assert job is not None
         assert job.state is JobState.DONE
         assert job.original_freed_at is not None
-        assert (await store.counters())[SHIM_TOUCHES] == 1
+        counters = await store.counters()
+        # Both, not one. `shim_gates_opened_total` is what step 3 of the rollout tells an
+        # operator to watch, and on a `permanent` deployment this is the only path that
+        # ever opens a gate — it staying at zero here would read as "nothing happening".
+        assert counters[SHIM_GATES_OPENED] == 1
+        assert counters[SHIM_TOUCHES] == 1
 
     assert touch.call_count == 1
     # The body must carry a field: an empty PUT is a plain read upstream and bumps no
@@ -1259,7 +1264,11 @@ async def test_the_inline_delete_path_opens_the_gate_from_a_pre_ledger_job(
         assert job is not None
         assert job.state is JobState.DONE
         assert job.original_freed_at is not None
-        assert (await store.counters())[SHIM_TOUCHES] == 1
+        counters = await store.counters()
+        # Both, on the one path that carries the whole of `permanent` + `retention_days: 0`.
+        # The sweeper is not involved here, so nothing else would ever count these.
+        assert counters[SHIM_GATES_OPENED] == 1
+        assert counters[SHIM_TOUCHES] == 1
 
     assert touch.call_count == 1
 
@@ -1292,6 +1301,9 @@ async def test_trash_mode_leaves_the_gate_closed(settings: Settings, tmp_path: P
     async with JobStore(settings.database_path) as store:
         job = await _finalize(settings, store)
         assert job is not None and job.original_freed_at is None
+        counters = await store.counters()
+        assert counters[SHIM_GATES_OPENED] == 0
+        assert counters[SHIM_TOUCHES] == 0
 
     assert touch.call_count == 0
 
@@ -1312,6 +1324,10 @@ async def test_the_gate_is_recorded_even_with_the_shim_off(settings: Settings, t
     async with JobStore(settings.database_path) as store:
         job = await _finalize(settings, store)
         assert job is not None and job.original_freed_at is not None
+        counters = await store.counters()
+        # The counter follows the UPDATE, so it is recorded on the same terms the gate is.
+        assert counters[SHIM_GATES_OPENED] == 1
+        assert counters[SHIM_TOUCHES] == 0
 
     assert touch.call_count == 0
 
@@ -1328,6 +1344,7 @@ async def test_a_pre_ledger_job_opens_no_gate(settings: Settings, tmp_path: Path
     async with JobStore(settings.database_path) as store:
         job = await _finalize(settings, store, checksum=None)
         assert job is not None and job.original_freed_at is None
+        assert (await store.counters())[SHIM_GATES_OPENED] == 0
 
     assert touch.call_count == 0
 
@@ -1347,4 +1364,6 @@ async def test_a_failing_touch_does_not_fail_the_job(settings: Settings, tmp_pat
         assert job.state is JobState.DONE
         # Still recorded: the ledger is right, so a later change to the asset re-offers it.
         assert job.original_freed_at is not None
-        assert (await store.counters())[SHIM_TOUCHES] == 0
+        counters = await store.counters()
+        assert counters[SHIM_GATES_OPENED] == 1
+        assert counters[SHIM_TOUCHES] == 0

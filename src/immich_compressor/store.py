@@ -472,6 +472,11 @@ class JobStore:
         deployment that switched ``delete_mode`` both can fire for the same row. The
         timestamp is only ever read as "is this set", so the earlier one is the honest one
         to keep.
+
+        This return value is also what keeps `SHIM_GATES_OPENED` and `SHIM_TOUCHES` honest:
+        both callers count both events, and both stop on a ``False`` from here. So the one
+        row cannot be counted twice even when the shim's ledger is up to a refresh interval
+        behind the delete the pipeline just performed.
         """
         async with self._conn.execute(
             "UPDATE jobs SET original_freed_at = ?, updated_at = ? "
