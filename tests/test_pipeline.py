@@ -1264,7 +1264,11 @@ async def test_the_inline_delete_path_opens_the_gate_from_a_pre_ledger_job(
         assert job is not None
         assert job.state is JobState.DONE
         assert job.original_freed_at is not None
-        assert (await store.counters())[SHIM_TOUCHES] == 1
+        counters = await store.counters()
+        # Both, on the one path that carries the whole of `permanent` + `retention_days: 0`.
+        # The sweeper is not involved here, so nothing else would ever count these.
+        assert counters[SHIM_GATES_OPENED] == 1
+        assert counters[SHIM_TOUCHES] == 1
 
     assert touch.call_count == 1
 
