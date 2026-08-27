@@ -14,7 +14,7 @@ original's checksum stops existing anywhere in Immich. The phone still holds the
 no match, and uploads it again. You get the original back, at full size, and the space the
 compression reclaimed is given away.
 
-Since 1.3.2 the pipeline *recognises* this: the returning bytes are skipped as
+Since 1.4.0 the pipeline *recognises* this: the returning bytes are skipped as
 `re_uploaded` rather than compressed a second time (see [faq.md](faq.md)). But recognising
 it does not prevent it — the upload still crosses the network, still costs a full round of
 thumbnails and machine learning on the server, and still leaves a duplicate in the library.
@@ -190,9 +190,9 @@ shim is not in front of.
   answers 403, the owner comes back unresolved, and the translation then does nothing at
   all. It fails open and stays silent, so the symptom is a re-upload that the shim looked
   like it should have caught. Grant `user.read` to any key whose uploads you want covered.
-- **No retroactive fix.** Replacements made before the ledger shipped in 1.3.2 carry no
+- **No retroactive fix.** Replacements made before the ledger shipped in 1.4.0 carry no
   record of what their original hashed to, and for an original that is already permanently
-  deleted that value cannot be recovered. The shim is complete from 1.3.2 onwards.
+  deleted that value cannot be recovered. The shim is complete from 1.4.0 onwards.
 - **The job store becomes load-bearing.** The translation is rebuilt from it every minute.
   Lose the database and the next update to a replaced asset sends its real checksum, the
   phone's mirror corrects itself, and the re-upload happens. Back it up.
