@@ -234,6 +234,28 @@ async def test_report_json_carries_the_counters_too(
     assert json.loads(capsys.readouterr().out)["webhooks"] == {"received": 2, "rejected": 1}
 
 
+async def test_report_json_publishes_the_pause_the_way_stats_does(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One shape for the latch, on both surfaces.
+
+    `/stats` and this command built the object independently, key by key. Whoever scripts
+    against the endpoint and then greps this output is reading the same incident, and must
+    not have to learn a second spelling of the same timestamp to do it.
+    """
+    async with JobStore(settings.database_path) as store:
+        await store.pause("201 assets queued from webhooks within 600s, over surge_threshold 200")
+        latched = await store.pause_state()
+    assert latched is not None
+
+    assert await _report(settings, as_json=True) == 0
+
+    paused = json.loads(capsys.readouterr().out)["paused"]
+    assert set(paused) == {"since", "reason"}
+    assert paused["since"] == latched.since.isoformat()
+    assert "surge_threshold 200" in paused["reason"]
+
+
 async def test_jobs_prints_the_error_of_a_failed_job(
     settings: Settings, capsys: pytest.CaptureFixture[str]
 ) -> None:

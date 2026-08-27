@@ -167,6 +167,45 @@ def test_the_endpoint_reports_a_latched_pause(settings: Settings) -> None:
         assert "immich_compressor_paused 1" in client.get("/metrics").text
 
 
+def test_stats_and_metrics_report_the_same_session_counters(settings: Settings) -> None:
+    """Two surfaces, one snapshot of the pipeline's counters.
+
+    They used to be assembled separately, field by field, from the same object. A counter
+    added to one is then invisible on the other until somebody notices — and the person
+    alerting on `session_failed_total` and the person reading `/stats` are looking at the
+    same incident.
+    """
+    app = create_app(settings)
+    with TestClient(app) as client:
+        stats = app.state.worker.pipeline.stats
+        stats.processed, stats.skipped, stats.failed = 7, 3, 2
+        stats.deleted, stats.bytes_saved = 5, 24024048
+
+        session = client.get("/stats").json()["session"]
+        exposition = client.get("/metrics").text
+
+    assert session == {"processed": 7, "skipped": 3, "failed": 2, "deleted": 5, "bytes_saved": 24024048}
+    for name, value in session.items():
+        assert f"immich_compressor_session_{name}_total {value}" in exposition
+
+
+def test_the_exposition_carries_only_the_settings_it_has_a_gauge_for(settings: Settings) -> None:
+    """`/stats` and `/metrics` share one settings snapshot, and it is the wider of the two.
+
+    `render` picks the three it can express as a number and drops the rest. Nothing may
+    fall through: `enabled_types` is a list, and a list rendered as a sample value is
+    exposition text no scraper can parse.
+    """
+    app = create_app(settings)
+    with TestClient(app) as client:
+        body = client.get("/metrics").text
+        published = client.get("/stats").json()["config"]
+
+    assert "config_dry_run" in body and "config_trash_original" in body
+    for ignored in set(published) - {"dry_run", "trash_original", "delete_mode"}:
+        assert ignored not in body
+
+
 def test_the_endpoint_needs_no_secret_and_exposes_no_asset_ids(settings: Settings) -> None:
     """It is unauthenticated on purpose, so it must carry counts and nothing else."""
     with TestClient(create_app(settings)) as client:

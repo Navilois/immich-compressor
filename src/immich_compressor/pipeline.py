@@ -130,6 +130,21 @@ class PipelineStats:
     # itself, not around the whole job, so a slow download does not read as a slow encoder.
     encode_seconds: Histogram = field(default_factory=Histogram)
 
+    def as_dict(self) -> dict[str, int]:
+        """The five counters, for ``/stats`` and ``/metrics``.
+
+        Written out rather than derived from the fields, because ``encode_seconds`` is a
+        histogram and belongs to neither surface: ``/stats`` cannot serialise it and
+        ``/metrics`` renders it through its own block.
+        """
+        return {
+            "processed": self.processed,
+            "skipped": self.skipped,
+            "failed": self.failed,
+            "deleted": self.deleted,
+            "bytes_saved": self.bytes_saved,
+        }
+
 
 class SurgeDetector:
     """Rolling count of assets newly queued from webhooks, for the surge breaker.

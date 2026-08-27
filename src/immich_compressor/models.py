@@ -308,6 +308,15 @@ class PauseState(BaseModel):
     reason: str
     since: datetime
 
+    def as_dict(self) -> dict[str, str]:
+        """The latch as ``/stats`` and ``report --json`` both publish it.
+
+        One shape, because the two are read as the same field: an operator who scripts
+        against the endpoint and then greps the CLI's JSON must not find the timestamp
+        under a different key.
+        """
+        return {"since": self.since.isoformat(), "reason": self.reason}
+
 
 class Job(BaseModel):
     """A row of the ``jobs`` table."""
