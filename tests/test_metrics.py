@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 from immich_compressor.config import Settings
 from immich_compressor.metrics import CONTENT_TYPE, Histogram, render
 from immich_compressor.server import create_app
+from immich_compressor.store import JobStore
 
 # One metric line: name, optional labels, then a value.
 SAMPLE_RE = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*(\{[^}]*\})? -?[0-9.eE+\-]+(\+Inf)?$")
@@ -34,6 +36,7 @@ def _render(**overrides: Any) -> str:
         "session": SESSION,
         "encode_seconds": Histogram(),
         "config": {"dry_run": False, "trash_original": True, "delete_mode": "trash"},
+        "paused": False,
         "version": "1.1.0",
     }
     body.update(overrides)
@@ -79,6 +82,12 @@ def test_the_settings_worth_alerting_on_are_exposed() -> None:
     assert "immich_compressor_config_permanent_delete 0" in inert
 
 
+def test_the_pause_is_a_number_here_and_not_only_in_healthz() -> None:
+    """A latched breaker stops everything, and /metrics is where that gets noticed."""
+    assert "immich_compressor_paused 0" in _render()
+    assert "immich_compressor_paused 1" in _render(paused=True)
+
+
 def test_the_histogram_buckets_are_cumulative_and_end_at_inf() -> None:
     histogram = Histogram()
     for seconds in (5.0, 45.0, 45.0, 5000.0):
@@ -111,6 +120,7 @@ def test_a_label_value_could_not_break_the_format() -> None:
         session=SESSION,
         encode_seconds=Histogram(),
         config={},
+        paused=False,
         version='1.0"0',
     )
     for line in body.splitlines():
@@ -126,6 +136,7 @@ def test_an_empty_store_still_renders_every_family() -> None:
         session={},
         encode_seconds=Histogram(),
         config={},
+        paused=False,
         version="1.1.0",
     )
     assert "immich_compressor_jobs_total 0" in body
@@ -144,6 +155,18 @@ def test_the_endpoint_serves_it(settings: Settings) -> None:
     assert "immich_compressor_jobs_total" in response.text
 
 
+def test_the_endpoint_reports_a_latched_pause(settings: Settings) -> None:
+    """The wiring, not the rendering: the number has to come from the store the app opens."""
+
+    async def latch() -> None:
+        async with JobStore(settings.database_path) as store:
+            await store.pause("201 assets queued from webhooks within 600s, over surge_threshold 200")
+
+    asyncio.run(latch())
+    with TestClient(create_app(settings)) as client:
+        assert "immich_compressor_paused 1" in client.get("/metrics").text
+
+
 def test_the_endpoint_needs_no_secret_and_exposes_no_asset_ids(settings: Settings) -> None:
     """It is unauthenticated on purpose, so it must carry counts and nothing else."""
     with TestClient(create_app(settings)) as client:
@@ -160,6 +183,7 @@ def test_shim_counters_are_exposed() -> None:
         session={},
         encode_seconds=Histogram(),
         config={},
+        paused=False,
         version="1.3.1",
     )
     assert "immich_compressor_shim_requests_total 12" in text

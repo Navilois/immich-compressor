@@ -79,6 +79,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `INSERT OR REPLACE` resolves the conflict by deleting the original's row instead,
   silently. Removing the gate turns four of these tests red.
 
+- **`/metrics` says when the surge breaker has latched.** The new
+  `immich_compressor_paused` gauge is 1 while the service is paused and 0 otherwise.
+  `/healthz` and `/stats` have always reported the latch, and neither is what a homelab
+  alerts on: measured on a live deployment on 2026-08-25, the breaker latched at 06:07 UTC
+  and the stop was noticed six hours later, with 13,134 jobs waiting behind it. Nothing else
+  about a paused service looks wrong — the container is healthy, the log is quiet, and the
+  queue simply stops moving.
+
+  ```yaml
+  - alert: ImmichCompressorPaused
+    expr: immich_compressor_paused == 1
+    for: 10m
+  ```
+
+  The reason is deliberately not a label: it is free text with counts in it, and as a label
+  that is unbounded cardinality. It stays in `/healthz`, in `resume` and in the log.
+
 ### Changed
 
 - **The surge breaker ships off (`behavior.surge_threshold: null`), and its suggested value
