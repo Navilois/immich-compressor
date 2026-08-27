@@ -515,8 +515,19 @@ def test_the_version_line_is_rewritten_once() -> None:
 
 # --- the chore end to end -----------------------------------------------------------
 
+# `testinstance` holds the volumes of docker-compose.test.yaml, owned by the uids inside
+# those containers. Without it here, running the live suite once leaves a tree that
+# copytree cannot read, and this test fails with a permission error ever after.
 IGNORED = shutil.ignore_patterns(
-    ".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist", "*.egg-info"
+    ".git",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    "*.egg-info",
+    "testinstance",
 )
 
 
