@@ -104,6 +104,7 @@ def render(
     session: dict[str, Any],
     encode_seconds: Histogram,
     config: dict[str, Any],
+    paused: bool,
     version: str,
 ) -> str:
     """Render everything the service knows into the text exposition format."""
@@ -241,6 +242,21 @@ def render(
         "Wall-clock time of the encoder command, since this process started.",
         "histogram",
         histogram,
+    )
+
+    # The latch, as a number. `/healthz` and `/stats` have always reported it, and neither
+    # is what a homelab alerts on: measured on a live deployment on 2026-08-25, the surge
+    # breaker latched at 06:07 UTC and the stop was noticed six hours later, with 13,134 jobs
+    # waiting behind it. Deliberately without the reason as a label — it is free text with
+    # counts in it, so as a label it is unbounded cardinality. The reason stays in
+    # `/healthz`, `resume` and the log.
+    lines += _block(
+        "paused",
+        "1 when the surge breaker has latched the service paused. Nothing is queued, "
+        "processed or deleted while this stands, and it survives a restart until "
+        "`immich-compressor resume --apply`.",
+        "gauge",
+        [_metric("paused", int(paused))],
     )
 
     # The three settings worth alerting on: a deployment that quietly went live, or one
