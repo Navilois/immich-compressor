@@ -25,6 +25,7 @@ from immich_compressor.encoder import (
     probe_exif,
     probe_hardware_encoder,
     run_command,
+    unmuxable_codec,
     verify_metadata,
 )
 
@@ -65,6 +66,38 @@ async def _make_clip(path: Path, *, seconds: int = 2, size: str = "320x240", bit
             "-shortest",
             "-metadata",
             "creation_time=2024-06-15T12:30:00Z",
+            str(path),
+        ],
+        timeout_s=180,
+    )
+    assert code == 0, stderr
+    return path
+
+
+async def _make_unmuxable_clip(path: Path, *, seconds: int = 2) -> Path:
+    """An AVI with `pcm_u8` audio: exactly what an old camera produces, and what MP4 has
+    no tag for. Measured on a live library, this codec alone was 108 of 172 failures."""
+    code, _, stderr = await run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc2=size=320x240:rate=15:duration={seconds}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={seconds}",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "5",
+            "-c:a",
+            "pcm_u8",
+            "-shortest",
             str(path),
         ],
         timeout_s=180,
@@ -220,6 +253,79 @@ async def test_sanity_rejects_when_there_is_no_gain(tmp_path: Path, behavior: Be
     )
     assert not sanity.ok
     assert any("no gain" in failure for failure in sanity.failures)
+
+
+async def test_audio_the_container_refuses_fails_by_default(tmp_path: Path, h265_preset: Preset) -> None:
+    """The shipped behaviour: the muxer refuses, the job fails, the original is untouched."""
+    clip = await _make_unmuxable_clip(tmp_path / "old-camera.avi")
+    work = tmp_path / "work"
+    work.mkdir()
+    copy_audio = h265_preset.model_copy(
+        update={"cmd": h265_preset.cmd.replace("-c:a aac -b:a 96k", "-c:a copy")}
+    )
+
+    with pytest.raises(EncodeError) as failure:
+        await encode(clip, copy_audio, work)
+
+    assert unmuxable_codec(str(failure.value)) == "pcm_u8"
+    assert "re-encoding the audio" not in str(failure.value)
+
+
+async def test_transcode_unsupported_audio_rescues_the_job(
+    tmp_path: Path, behavior: BehaviorSettings, h265_preset: Preset
+) -> None:
+    """Switched on, the same source produces a playable MP4 with AAC audio.
+
+    The video is encoded exactly once: the muxer refuses at header time, before a frame is
+    written, which is why retrying the whole command is cheap.
+    """
+    clip = await _make_unmuxable_clip(tmp_path / "old-camera.avi")
+    work = tmp_path / "work"
+    work.mkdir()
+    copy_audio = h265_preset.model_copy(
+        update={
+            "cmd": h265_preset.cmd.replace("-c:a aac -b:a 96k", "-c:a copy"),
+            "transcode_unsupported_audio": True,
+        }
+    )
+    source_probe = await probe(clip)
+
+    result = await encode(
+        clip,
+        copy_audio,
+        work,
+        transcode_unsupported_audio=copy_audio.effective_transcode_unsupported_audio(behavior),
+    )
+
+    assert result.probe.audio_streams == source_probe.audio_streams
+    assert result.probe.video_streams == 1
+    # The stream count is all the sanity gate can see of the audio, which is exactly why
+    # this is off by default.
+    sanity = await check_sanity(
+        source=clip,
+        result=result,
+        source_probe=source_probe,
+        behavior=behavior,
+        preset=copy_audio,
+        is_video=True,
+    )
+    assert sanity.ok, sanity.reason()
+
+
+async def test_a_failure_that_is_not_the_audio_is_not_retried(tmp_path: Path, h265_preset: Preset) -> None:
+    """The retry is for one diagnosis. Anything else fails on the first attempt, as before."""
+    work = tmp_path / "work"
+    work.mkdir()
+    junk = tmp_path / "junk.mp4"
+    junk.write_bytes(b"definitely not a video")
+    copy_audio = h265_preset.model_copy(
+        update={"cmd": h265_preset.cmd.replace("-c:a aac -b:a 96k", "-c:a copy")}
+    )
+
+    with pytest.raises(EncodeError) as failure:
+        await encode(junk, copy_audio, work, transcode_unsupported_audio=True)
+
+    assert "re-encoding the audio" not in str(failure.value)
 
 
 async def test_sanity_rejects_resolution_change(tmp_path: Path, behavior: BehaviorSettings) -> None:

@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import shlex
+from collections.abc import Sequence
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -43,6 +44,24 @@ OUTPUT_PLACEHOLDER = "{output}"
 # Suffixes ffmpeg uses for encoders that need a GPU.
 HARDWARE_ENCODER_SUFFIXES = ("_qsv", "_vaapi", "_nvenc")
 DEFAULT_RENDER_NODE = "/dev/dri/renderD128"
+
+# Every spelling ffmpeg accepts for "keep the audio stream as it is", and what
+# `transcode_unsupported_audio` puts in its place. 128 kbit/s AAC is not a new decision:
+# it is what the CPU preset in the catalog has always encoded audio to.
+AUDIO_COPY_OPTIONS = ("-c:a", "-codec:a", "-acodec")
+AUDIO_TRANSCODE_ARGV = ("-c:a", "aac", "-b:a", "128k")
+
+
+def audio_copy_index(argv: Sequence[str]) -> int | None:
+    """Where ``argv`` says to copy the audio stream, or ``None`` if it does not say so.
+
+    The index of the option, so the caller can replace the option and its value together.
+    """
+    for index, token in enumerate(argv[:-1]):
+        if token in AUDIO_COPY_OPTIONS and argv[index + 1] == "copy":
+            return index
+    return None
+
 
 # Shell syntax a preset cannot use, because commands are executed directly, without a shell.
 #
@@ -205,6 +224,20 @@ class BehaviorSettings(BaseModel):
     # "balanced" reproduces exactly what this project shipped before the catalog existed.
     quality: QualityLevel = "balanced"
 
+    # Re-encode the audio to AAC when the container refuses to carry it as it is, instead
+    # of failing the job. Off, because it is the one setting here that turns a job which
+    # cannot finish into one that can *delete an original*, and what it deletes is a
+    # lossless audio stream: the video is re-encoded either way, but PCM audio is bit-exact
+    # in the source and 128 kbit/s AAC in the replacement, and nothing downstream can see
+    # that — the sanity gate counts audio streams, it does not listen to them.
+    #
+    # What it fixes: the shipped video presets copy the audio stream, and MP4 has no
+    # mapping for several codecs an old camera or a DVD rip produces. ffmpeg's mp4 muxer
+    # refuses those at header time, before a frame is encoded. Measured on a live library
+    # on 2026-08-26: 119 of 172 failures in one backfill run, `pcm_u8` (108), `amr_nb` (9)
+    # and `pcm_dvd` (2).
+    transcode_unsupported_audio: bool = False
+
     # How many bytes a job has to actually save to be worth an asset lifecycle — a new
     # database row, thumbnails, a smart-search embedding, face detection, OCR and a
     # timeline entry, all of it permanent. Replaces the old `min_size_bytes`, which
@@ -342,6 +375,10 @@ class Preset(BaseModel):
     max_ratio: float | None = Field(default=None, gt=0, le=1.0)
     min_savings_bytes: int | None = Field(default=None, ge=0)
     require_date_time_original: bool | None = None
+    # Whether this preset may re-encode audio the container will not carry. ``None``
+    # inherits `behavior.transcode_unsupported_audio`. Needs a command that copies the
+    # audio stream, because that copy is what the retry rewrites.
+    transcode_unsupported_audio: bool | None = None
     # Skip a still whose source JPEG quality is at or below this value. Re-encoding an
     # already heavily compressed image buys a second generation of quantisation error and
     # usually a *larger* file. ``None`` disables the check.
@@ -388,6 +425,14 @@ class Preset(BaseModel):
                     f"preset {self.name!r}: normalize_orientation requires the command to "
                     "normalise the pixels itself — add -auto-orient"
                 )
+        # Only when this preset asks for it by name. Inherited from `behavior` it is simply
+        # inert on a command that already encodes its audio, or has none at all.
+        if self.transcode_unsupported_audio and audio_copy_index(argv) is None:
+            raise ConfigError(
+                f"preset {self.name!r}: transcode_unsupported_audio needs a command that "
+                "copies the audio stream — it replaces that copy with AAC when the "
+                "container refuses the source codec, and there is nothing here to replace"
+            )
         return self
 
     def accepts(self, filename: str) -> bool:
@@ -408,6 +453,11 @@ class Preset(BaseModel):
         if self.require_date_time_original is not None:
             return self.require_date_time_original
         return behavior.require_date_time_original
+
+    def effective_transcode_unsupported_audio(self, behavior: BehaviorSettings) -> bool:
+        if self.transcode_unsupported_audio is not None:
+            return self.transcode_unsupported_audio
+        return behavior.transcode_unsupported_audio
 
     @property
     def hardware_encoder(self) -> str | None:

@@ -203,6 +203,15 @@ NOTES: dict[str, str] = {
         "`balanced` reproduces exactly what this project shipped in 1.0.0. Ignored when "
         "`presets:` is written by hand."
     ),
+    "behavior.transcode_unsupported_audio": (
+        "Re-encode the audio to AAC when the container refuses to carry it as it is, "
+        "instead of failing the job. The shipped video presets copy the audio stream, and "
+        "MP4 has no mapping for several codecs an old camera or a DVD rip produces — "
+        "measured on a live library, `pcm_u8`, `amr_nb` and `pcm_dvd` were 119 of 172 "
+        "failures in one backfill run. Off by default: it is a lossy conversion of a "
+        "stream that was lossless in the source, on a job that then goes on to delete "
+        "that source."
+    ),
     "behavior.min_savings_bytes": (
         "How many bytes a job has to actually save to be worth a new asset — a database "
         "row, thumbnails, an embedding, faces, OCR and a timeline entry, all permanent. "
@@ -274,6 +283,11 @@ NOTES: dict[str, str] = {
         "in the built-in catalog: a replacement's timeline position comes from the "
         "`fileCreatedAt` sent at upload and the explicit `dateTimeOriginal` write "
         "afterwards, not from the file."
+    ),
+    "transcode_unsupported_audio": (
+        "Overrides `behavior.transcode_unsupported_audio` for this preset. `null` uses the "
+        "behavior value. Setting it to `true` needs a command that copies the audio "
+        "stream, because that copy is what the retry replaces."
     ),
     "min_source_quality": (
         "Skip a still whose source JPEG quality is below this. Quantisation error is "

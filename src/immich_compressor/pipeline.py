@@ -428,7 +428,12 @@ class Pipeline:
 
         # --- Step 4: encode ------------------------------------------------------
         started = time.monotonic()
-        result = await encoder.encode(source, preset, tmp)
+        result = await encoder.encode(
+            source,
+            preset,
+            tmp,
+            transcode_unsupported_audio=preset.effective_transcode_unsupported_audio(behavior),
+        )
         self.stats.encode_seconds.observe(time.monotonic() - started)
         logger.info(
             "encoded %s: %d -> %d bytes (ratio %.3f)",

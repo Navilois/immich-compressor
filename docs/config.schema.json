@@ -96,6 +96,11 @@
           "title": "Quality",
           "type": "string"
         },
+        "transcode_unsupported_audio": {
+          "default": false,
+          "title": "Transcode Unsupported Audio",
+          "type": "boolean"
+        },
         "min_savings_bytes": {
           "default": 1048576,
           "minimum": 0,
@@ -326,6 +331,18 @@
           ],
           "default": null,
           "title": "Require Date Time Original"
+        },
+        "transcode_unsupported_audio": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transcode Unsupported Audio"
         },
         "min_source_quality": {
           "anyOf": [

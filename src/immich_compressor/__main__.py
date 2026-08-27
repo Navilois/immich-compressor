@@ -246,7 +246,12 @@ async def _encode_local(settings: Settings, path: Path, asset_type: str) -> int:
     source_quality = None if is_video else await jpeg_quality(path)
 
     source_probe = await probe(path, is_still=not is_video)
-    result = await encode(path, preset, work_dir)
+    result = await encode(
+        path,
+        preset,
+        work_dir,
+        transcode_unsupported_audio=preset.effective_transcode_unsupported_audio(settings.behavior),
+    )
     metadata_differences = await verify_metadata(path, result.output_path) if preset.exiftool_copy else []
     sanity = await check_sanity(
         source=path,

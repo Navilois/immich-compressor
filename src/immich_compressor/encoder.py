@@ -18,7 +18,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import BehaviorSettings, Preset
+from .config import AUDIO_TRANSCODE_ARGV, BehaviorSettings, Preset, audio_copy_index
 
 logger = logging.getLogger(__name__)
 
@@ -745,8 +745,53 @@ async def probe_hardware_encoder(encoder_name: str, device: str, *, timeout_s: f
     return first_diagnostic_line(stderr) or f"ffmpeg exited {code}"
 
 
-async def encode(source: Path, preset: Preset, work_dir: Path) -> EncodeResult:
-    """Run the preset and return sizes plus a probe of the output."""
+# ffmpeg's mp4 muxer refusing an audio codec it has no tag for. Measured in the shipped
+# image (ffmpeg 7.1.5) on 2026-08-27, on a 60 s MJPEG-AVI carrying pcm_u8:
+#
+#   [mp4 @ 0x...] Could not find tag for codec pcm_u8 in stream #1, codec not currently
+#                 supported in container
+#
+# Only the first half of that sentence is matched: it is the part that names the codec and
+# the part every ffmpeg version has written the same way.
+_UNMUXABLE_CODEC = re.compile(r"Could not find tag for codec (?P<codec>\S+) in stream #\d+")
+
+
+def unmuxable_codec(stderr: str) -> str | None:
+    """The codec the container would not carry, or ``None`` if that is not the failure.
+
+    The refusal comes from writing the container header, before a single frame is encoded:
+    measured on a 68 MB source, the whole attempt exited 234 in 601 ms. That is what makes
+    the retry in :func:`encode` cheap enough to be worth doing blind.
+    """
+    match = _UNMUXABLE_CODEC.search(stderr)
+    return match.group("codec") if match else None
+
+
+def _with_transcoded_audio(argv: list[str]) -> list[str] | None:
+    """``argv`` with its audio copy replaced by an AAC encode, or ``None`` if it copies none."""
+    index = audio_copy_index(argv)
+    if index is None:
+        return None
+    return [*argv[:index], *AUDIO_TRANSCODE_ARGV, *argv[index + 2 :]]
+
+
+async def encode(
+    source: Path,
+    preset: Preset,
+    work_dir: Path,
+    *,
+    transcode_unsupported_audio: bool = False,
+) -> EncodeResult:
+    """Run the preset and return sizes plus a probe of the output.
+
+    With ``transcode_unsupported_audio``, a run that failed *because the container refused
+    the audio codec* is tried once more with the stream re-encoded to AAC instead of copied.
+    Measured on a live library on 2026-08-26, that is 119 of 172 failures in one backfill
+    run — `pcm_u8` from old camera AVIs, `amr_nb` and `pcm_dvd` — and MP4 has no mapping for
+    any of them. Off by default and per preset: it is a lossy conversion of a stream that
+    was lossless in the source, and the sanity gate counts audio streams rather than
+    listening to them, so nothing downstream would notice.
+    """
     if not source.is_file():
         raise EncodeError(f"source does not exist: {source}")
     orig_bytes = source.stat().st_size
@@ -758,8 +803,24 @@ async def encode(source: Path, preset: Preset, work_dir: Path) -> EncodeResult:
 
     argv = preset.argv(source, output)
     code, _, stderr = await run_command(argv, timeout_s=preset.timeout_s)
+
+    retried = False
+    if code != 0 and transcode_unsupported_audio and (refused := unmuxable_codec(stderr)):
+        retry_argv = _with_transcoded_audio(argv)
+        if retry_argv is not None:
+            logger.info(
+                "preset %r: %s cannot be copied into %s, re-encoding the audio to AAC",
+                preset.name,
+                refused,
+                preset.suffix,
+            )
+            output.unlink(missing_ok=True)
+            retried = True
+            code, _, stderr = await run_command(retry_argv, timeout_s=preset.timeout_s)
+
     if code != 0:
-        raise EncodeError(f"preset {preset.name!r} exited {code}: {stderr.strip()[-600:]}")
+        after = " (after re-encoding the audio to AAC)" if retried else ""
+        raise EncodeError(f"preset {preset.name!r} exited {code}{after}: {stderr.strip()[-600:]}")
     if not output.is_file() or output.stat().st_size == 0:
         raise EncodeError(f"preset {preset.name!r} produced no output")
 
