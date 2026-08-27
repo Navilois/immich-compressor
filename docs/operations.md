@@ -55,6 +55,7 @@ immich_compressor_encode_duration_seconds_bucket{le="60"} 3
 immich_compressor_encode_duration_seconds_bucket{le="+Inf"} 4
 immich_compressor_encode_duration_seconds_sum 418
 immich_compressor_encode_duration_seconds_count 4
+immich_compressor_paused 0
 immich_compressor_config_dry_run 0
 immich_compressor_config_trash_original 1
 immich_compressor_config_permanent_delete 1
@@ -67,6 +68,20 @@ Prometheus expects of a counter.
 The three `config_*` gauges are the ones worth alerting on. `config_dry_run 1` on a
 deployment you thought was live means nothing has been compressed for however long that has
 been true; `config_permanent_delete 1` means originals are being removed with no undo.
+
+`paused` deserves one too, and it is the only place a scrape can see the surge breaker.
+`/healthz` and `/stats` report the latch as well, but a homelab alerts on the exposition
+endpoint: on a live deployment on 2026-08-25 the breaker latched at 06:07 UTC with 13,134
+jobs behind it and the stop was noticed six hours later.
+
+```yaml
+- alert: ImmichCompressorPaused
+  expr: immich_compressor_paused == 1
+  for: 10m
+```
+
+The reason is deliberately not a label — it is free text with counts in it, and as a label
+that is unbounded cardinality. `immich-compressor resume` prints it, and so does `/healthz`.
 
 `webhooks_rejected_total` deserves an alert of its own. It counts webhooks refused for a
 bad or missing shared secret, and anything above zero means the workflow's `headerValue`
@@ -272,6 +287,10 @@ While it stands: workers claim nothing, the trash sweeper finalises nothing, and
 webhooks are refused as `paused`. Jobs already in the queue keep their state and wait. The
 latch lives in the database, not in memory — restarting the container is the first thing an
 operator reaches for, and it must not be the thing that clears a pause.
+
+Nothing else about the service changes, which is what makes the pause easy to miss: the
+container is healthy, the log is quiet, and the queue simply stops moving. `/metrics`
+carries `immich_compressor_paused 1` for exactly this — see the alert above.
 
 ```bash
 docker compose exec immich-compressor immich-compressor resume

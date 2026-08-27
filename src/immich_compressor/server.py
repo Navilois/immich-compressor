@@ -403,6 +403,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "trash_original": settings.behavior.trash_original,
                 "delete_mode": settings.behavior.delete_mode,
             },
+            paused=await store.pause_state() is not None,
             version=__version__,
         )
         return PlainTextResponse(body, media_type=METRICS_CONTENT_TYPE)
