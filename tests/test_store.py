@@ -384,6 +384,32 @@ async def test_replaced_source_asset_ids_is_not_capped(tmp_path: Path) -> None:
         assert len(await store.replaced_source_asset_ids()) == 250
 
 
+async def test_replaced_source_asset_ids_breaks_a_timestamp_tie_by_id(tmp_path: Path) -> None:
+    """Two originals finished in the same instant still come back in a defined order.
+
+    `updated_at` has no more resolution than the clock that wrote it, and a run that
+    finalises several jobs in one sweep can genuinely land them on the same value. Without
+    the second sort key the order is then whatever SQLite happens to return, and
+    `restore --all-pending` would hand Immich a different list every time it is asked.
+    """
+    import aiosqlite
+
+    path = tmp_path / "s.db"
+    async with JobStore(path) as store:
+        # Enqueued newest-id-first, so insertion order is the wrong answer.
+        for asset_id in ("c-third", "b-second", "a-first"):
+            await store.enqueue(asset_id, PAYLOAD, delay_seconds=0)
+            await store.update(asset_id, state=JobState.DONE, new_asset_id=f"copy-{asset_id}")
+
+    # Flatten the timestamps the way a single sweep would.
+    async with aiosqlite.connect(path) as db:
+        await db.execute("UPDATE jobs SET updated_at = '2026-08-27T10:00:00+00:00'")
+        await db.commit()
+
+    async with JobStore(path) as store:
+        assert await store.replaced_source_asset_ids() == ["a-first", "b-second", "c-third"]
+
+
 # --------------------------------------------------------------------- the ledger
 
 
