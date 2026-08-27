@@ -657,6 +657,13 @@ async def test_plain_still_is_not_flagged(tmp_path: Path) -> None:
         (6734.006734, 6734.006711),
         ("48.2082", "48.2082"),
         ("Canon", "Canon"),
+        # Measured on a live library on 2026-08-26: EXIF:ShutterSpeedValue failed 6 jobs on
+        # this. The printed form is itself a fraction, so it never parsed as a number and
+        # fell through to the exact comparison. Evaluated, the two differ by 6.9e-8.
+        ("1/999963365", "1/999963296"),
+        # Not measured, and a consequence of evaluating the fraction rather than a case
+        # anybody reported: the same value written two ways is the same value.
+        ("1/100", "0.01"),
     ],
 )
 def test_values_match_tolerates_re_approximation(before: object, after: object) -> None:
@@ -676,6 +683,17 @@ def test_values_match_tolerates_re_approximation(before: object, after: object) 
         ("Canon", "Nikon"),
         ("48.2082", ""),
         (48.2082, "north"),
+        # Every exposure time a camera can write. Two integer denominators only land inside
+        # the tolerance once they are past a million, so a real change of shutter speed is
+        # still a finding — which is what makes evaluating the fraction safe at all.
+        ("1/100", "1/101"),
+        ("1/8000", "1/7999"),
+        ("1/2", "1/3"),
+        # A denominator of zero is not a number, and must not raise on the way to saying so.
+        ("1/0", "1/2"),
+        # Two dates in a free-text caption. They are only equal if a fraction is allowed to
+        # carry '/2026' along as a unit, which is why it may not.
+        ("4/2/2026", "2/1/2026"),
     ],
 )
 def test_values_match_still_reports_a_real_difference(before: object, after: object) -> None:

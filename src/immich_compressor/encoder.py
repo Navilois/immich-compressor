@@ -77,31 +77,59 @@ _METADATA_IGNORED: frozenset[str] = frozenset(
 )
 
 # Relative tolerance for the metadata gate's numeric comparison. exiftool prints most
-# rationals in a form the re-approximation cannot reach (1/100, 48 deg 18' 16.32" N), but a
-# tag that prints as a raw decimal carries the drift into the printed string: measured on a
-# live library on 2026-08-24, EXIF:FocalPlaneYResolution moved 6734.006734 -> 6734.006711
-# (~3.4e-9 relative) on 24 of 67 encoded images, and EXIF:GPSAltitude '339.569 m' ->
-# '339.5690021 m' (~6.2e-9) on another. 1e-6 clears the largest of those by two orders of
-# magnitude and is still far below a difference any viewer could be shown: it is a change in
-# the 7th significant digit, which no EXIF value is meaningful to.
+# rationals in a form the re-approximation cannot reach (48 deg 18' 16.32" N, and any
+# fraction whose denominator is small), but a tag that prints as a raw decimal — or as a
+# fraction over a denominator in the billions — carries the drift into the printed string:
+# measured on a live library on 2026-08-24, EXIF:FocalPlaneYResolution moved 6734.006734 ->
+# 6734.006711 (~3.4e-9 relative) on 24 of 67 encoded images, EXIF:GPSAltitude '339.569 m' ->
+# '339.5690021 m' (~6.2e-9) on another, and on 2026-08-26 EXIF:ShutterSpeedValue
+# '1/999963365' -> '1/999963296' (~6.9e-8) on 6 more. 1e-6 clears the largest of those by an
+# order of magnitude and is still far below a difference any viewer could be shown: it is a
+# change in the 7th significant digit, which no EXIF value is meaningful to.
 _METADATA_REL_TOL = 1e-6
 
 # A number, optionally followed by a unit ("339.569 m"). Deliberately strict: digits are
-# required, so "inf" and "nan" are not numbers here, and the unit is whatever follows —
-# "1/100" parses as 1 with the unit "/100", which keeps fractions comparing by their
-# printed form.
+# required, so "inf" and "nan" are not numbers here, and the unit is whatever follows.
 _NUMBER_WITH_UNIT = re.compile(r"([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(.*)")
+
+# A whole value that is one fraction, which is how exiftool prints a rational whose value is
+# one: '1/100' for ExposureTime, '1/1000' for ShutterSpeedValue. To _NUMBER_WITH_UNIT above
+# that is the number 1 with the unit '/100', so two fractions compared character by character
+# and the re-approximation of a large denominator was a finding: measured on a live library
+# on 2026-08-26, EXIF:ShutterSpeedValue came back '1/999963365' -> '1/999963296' and failed 6
+# jobs in one backfill run.
+#
+# Evaluating the fraction costs nothing in discrimination. Two *integer* denominators can
+# only land inside _METADATA_REL_TOL of each other once the denominator passes a million, so
+# every exposure time a camera can write — 1/8000 at the fastest — still has to match
+# exactly; the drift measured above is 6.9e-8 of the value.
+#
+# Deliberately nothing after the denominator, not even a unit: '4/2/2026' would otherwise
+# parse as 2 with the unit '/2026' and compare equal to '2/1/2026', two different dates in a
+# free-text caption. A fraction with anything appended stays an exact comparison.
+_FRACTION = re.compile(r"(?P<numerator>[+-]?\d+)\s*/\s*(?P<denominator>\d+)")
 
 
 def _as_number(value: object) -> tuple[float, str] | None:
-    """``value`` as a (number, unit) pair, or ``None`` if it is not a number at all."""
+    """``value`` as a (number, unit) pair, or ``None`` if it is not a number at all.
+
+    A value that is one fraction is evaluated, and has no unit; everything else keeps
+    whatever follows the digits as its unit, and two values only compare when those agree.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, int | float):
         return float(value), ""
     if not isinstance(value, str):
         return None
-    match = _NUMBER_WITH_UNIT.fullmatch(value.strip())
+    text = value.strip()
+    fraction = _FRACTION.fullmatch(text)
+    if fraction is not None:
+        denominator = int(fraction.group("denominator"))
+        if denominator == 0:
+            return None
+        return int(fraction.group("numerator")) / denominator, ""
+    match = _NUMBER_WITH_UNIT.fullmatch(text)
     if match is None:
         return None
     return float(match.group(1)), match.group(2).strip()
@@ -168,9 +196,10 @@ def _values_match(before: object, after: object) -> bool:
     text keep comparing character by character, and a differing unit ('339.569 m' against
     '339.569 ft') is a difference like any other. Two numbers with the same unit are
     compared within :data:`_METADATA_REL_TOL`, because a tag whose printed form is a raw
-    decimal shows the rational re-approximation that :func:`verify_metadata` exists to
-    tolerate everywhere else. Two times are compared by :func:`_times_match`, because
-    exiftool writes an explicit zero UTC offset onto a time that carried none.
+    decimal — or a bare fraction, which :func:`_as_number` evaluates — shows the rational
+    re-approximation that :func:`verify_metadata` exists to tolerate everywhere else. Two
+    times are compared by :func:`_times_match`, because exiftool writes an explicit zero UTC
+    offset onto a time that carried none.
 
     Times are tried first: to :func:`_as_number` a time is the number in front of it with
     the rest as a unit, so '11:24:38+00:00' and '11:24:38' would be rejected on their units
@@ -595,6 +624,12 @@ async def verify_metadata(source: Path, target: Path, *, timeout_s: float = 120.
     any — are compared within :data:`_METADATA_REL_TOL` by :func:`_values_match`. Everything
     else, including a differing unit, still has to match exactly, and a tag that is gone is
     still gone.
+
+    A value that is one whole fraction is a number too, evaluated rather than read as its
+    first digit: measured on a live library on 2026-08-26, ``ShutterSpeedValue`` came back
+    '1/999963365' -> '1/999963296' and failed 6 jobs. The denominator has to be in the
+    millions before an integer one can move that little, so an exposure time still compares
+    exactly — see :data:`_FRACTION`.
 
     The other printed-form change measured is exiftool writing an explicit ``+00:00`` onto a
     time that carried none: on a live instance on 2026-08-26, ``IPTC:TimeCreated`` and
