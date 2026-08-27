@@ -182,6 +182,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `'15:46:30+01:00'` and `'+01:00'` against `'+02:00'` are both still findings — and so does
   the clock itself.
 
+- **The metadata gate no longer fails a job on a fraction that was re-approximated.** A value
+  that is one whole fraction is now evaluated instead of being read as the number in front of
+  the slash: `1/100` was a 1 carrying the unit `/100`, so two fractions were compared
+  character by character and the drift the tolerance exists for never reached them. Measured
+  on a live library on 2026-08-26, `EXIF:ShutterSpeedValue` came back `'1/999963365'` ->
+  `'1/999963296'` and failed **6 jobs** in the same backfill run. Evaluated, the two differ by
+  6.9e-8 — comfortably inside the tolerance that was already in the code.
+
+  This cannot loosen the gate on an exposure time. Two *integer* denominators only land within
+  1e-6 of each other once the denominator passes a million, so `1/8000` against `1/7999` is
+  still a finding, and so is `1/100` against `1/101`. A fraction with anything appended to it
+  is not treated as one at all: `4/2/2026` and `2/1/2026` are two dates in a caption, and they
+  still compare exactly.
+
 - **`XMP:Orientation` joined `EXIF:Orientation` on the metadata gate's ignore list.** It is
   the XMP mirror of the same tag, describing the same rotation of the same pixels, and
   `normalize_orientation` pins that rotation to 1 after `-auto-orient` has baked it into the

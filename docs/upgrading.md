@@ -234,6 +234,30 @@ Assets that already failed this way stay `failed` — as above, nothing is reque
 `reprocess <asset_id>` takes them one id at a time. `jobs --status failed` lists them with
 the error each one failed on.
 
+### The metadata gate stops failing jobs on a re-approximated fraction
+
+**Nothing to edit**, and it is the third change in this release to when the gate fires. A
+value that exiftool prints as one whole fraction — `1/100` for an exposure time — was read as
+the number in front of the slash with the rest treated as a unit, so two fractions were
+compared character by character and the tolerance above never reached them. Measured on a
+live library on 2026-08-26:
+
+```
+EXIF:ShutterSpeedValue changed: '1/999963365' -> '1/999963296'
+```
+
+**6 jobs** failed on that in the same backfill run. Evaluated, the two differ by 6.9e-8.
+
+A value that is one whole fraction is now evaluated and compared like any other number. This
+cannot loosen the gate on a real exposure time: two *integer* denominators only land within
+1e-6 of each other once the denominator passes a million, so `'1/8000'` against `'1/7999'`
+and `'1/100'` against `'1/101'` are both still findings. A fraction with anything after it is
+not treated as one at all — `'4/2/2026'` and `'2/1/2026'` are two dates in a caption, and
+they still compare exactly.
+
+Assets that already failed this way stay `failed` — as above, nothing is requeued, and
+`reprocess <asset_id>` takes them one id at a time.
+
 ## 1.3.0 → 1.3.1
 
 **Nothing to edit.** One line of output changed, on the command you reach for when something
