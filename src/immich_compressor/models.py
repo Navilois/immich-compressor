@@ -368,12 +368,34 @@ class LedgerEntry(BaseModel):
 
     @property
     def gate_is_open(self) -> bool:
-        """Whether the replacement may carry the original's checksum yet.
+        """Whether the original this replacement took over from has stopped existing.
 
-        Closed means the original may still exist somewhere as a row holding that
-        checksum, and writing it onto the replacement would collide.
+        Necessary, and on its own not sufficient. It answers a question about one asset,
+        once and for ever; the rule the shim has to keep is about the checksum, and any
+        asset can hold that. See :class:`ReturnedOriginal`.
         """
         return self.original_freed_at is not None
+
+
+class ReturnedOriginal(BaseModel):
+    """An asset holding the checksum of an original this service replaced, still present.
+
+    A device that kept the file can put it back, and the pipeline lets that stand: the job
+    stops at ``re_uploaded``, nothing is deleted and nothing is touched. So the checksum
+    the shim wants to hand to a replacement is live again under a new id, and handing it
+    over now would put two rows in the phone's mirror under one unique key — the same
+    collision the gate exists to prevent, arrived from the other direction.
+
+    One of these suppresses the translation for as long as it exists. It stops when its own
+    asset is deleted, which is recorded in the same ``original_freed_at`` column and means
+    there what it means on a ledger row: the asset named by ``source_asset_id`` is gone.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    owner_id: str
+    checksum: str
 
 
 class BackfillCandidate(BaseModel):

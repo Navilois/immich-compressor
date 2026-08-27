@@ -13,11 +13,22 @@ checksum into that one field. The phone finds a match and never queues the file.
 
 One invariant governs the whole module. **At most one mirrored row may hold a given
 checksum at any moment** — the app's mirror carries a partial UNIQUE index on
-``(owner_id, checksum)``. The original's own row holds it until the original is really
-gone, so the replacement may take it only after that, never before. That is what
-``LedgerEntry.gate_is_open`` means, and translating with a closed gate does not merely fail
-to help: it either silently destroys the original's mirror row or aborts the phone's whole
-sync batch with a constraint violation.
+``(owner_id, checksum)``. Translating in breach of it does not merely fail to help: it
+either silently destroys the other mirror row or aborts the phone's whole sync batch with
+a constraint violation.
+
+Two things can hold the checksum, so the shim waits on both:
+
+- **The original itself**, until it is really gone. That is ``LedgerEntry.gate_is_open``,
+  and it is set once, when the delete is observed.
+- **A copy of the original that came back afterwards.** The gate opening frees the
+  checksum; a device that still held the file can put it straight back, and the pipeline
+  lets that stand (``re_uploaded`` recognises it and touches nothing). The checksum is
+  then live again under a new id, and the translation has to stand down until *that* asset
+  is deleted in turn. That is :class:`~immich_compressor.models.ReturnedOriginal`.
+
+An open gate is not a licence to translate for ever. It records that one asset died once;
+the rule is about the checksum, and any asset can hold that.
 
 Everything here fails open. A parse error, a ledger error, an unreachable upstream — all of
 them forward what Immich said, unchanged. A shim that breaks sync is worse than the problem
@@ -28,7 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,7 +47,7 @@ import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
-from .models import LedgerEntry
+from .models import LedgerEntry, ReturnedOriginal
 from .store import (
     SHIM_GATES_OPENED,
     SHIM_HASHES_TRANSLATED,
@@ -92,30 +103,52 @@ DELETE_TYPES = frozenset({"AssetDeleteV1", "PartnerAssetDeleteV1"})
 
 @dataclass(slots=True)
 class TranslationMaps:
-    """The three lookups a request needs, built from the ledger in one pass.
+    """The four lookups a request needs, built from the store in one pass.
 
     A full sync stream is thousands of lines and every one of them asks the same two
     questions, so both are dict hits. The maps are one small entry per replaced asset.
     """
 
-    # new_asset_id -> the original's checksum. Only gates that are open.
+    # new_asset_id -> the original's checksum. Only gates that are open, and only while
+    # nothing else holds that checksum.
     sync_rewrite: dict[str, str] = field(default_factory=dict)
     # source_asset_id -> the entry whose gate that delete would open. Only closed gates.
     delete_watch: dict[str, LedgerEntry] = field(default_factory=dict)
     # (owner_id, original checksum) -> the replacement's checksum. Ungated: this one never
     # writes to a mirror, it only changes which hash a question is asked about.
     upload_check: dict[tuple[str, str], str] = field(default_factory=dict)
+    # asset id of a returned original -> the replacements whose translation it holds back.
+    # A delete for one of these frees the checksum and re-arms them. The value is empty
+    # when it currently blocks nothing, which is not the same as being absent: the row
+    # still has to stop suppressing once its asset goes, or a gate that opens later would
+    # find itself blocked by an asset nobody has.
+    claim_watch: dict[str, list[str]] = field(default_factory=dict)
+
+    @property
+    def suppressed(self) -> int:
+        """How many translations a returned original is currently holding back."""
+        return sum(len(blocked) for blocked in self.claim_watch.values())
 
     @classmethod
-    def build(cls, entries: list[LedgerEntry]) -> TranslationMaps:
+    def build(cls, entries: list[LedgerEntry], returned: Sequence[ReturnedOriginal] = ()) -> TranslationMaps:
         maps = cls()
+        live: dict[tuple[str, str], list[str]] = {}
+        for holder in returned:
+            live.setdefault((holder.owner_id, holder.checksum), []).append(holder.asset_id)
+            maps.claim_watch.setdefault(holder.asset_id, [])
         for entry in entries:
-            if entry.gate_is_open:
-                maps.sync_rewrite[entry.new_asset_id] = entry.source_checksum
-            else:
+            key = (entry.owner_id, entry.source_checksum)
+            if not entry.gate_is_open:
                 maps.delete_watch[entry.source_asset_id] = entry
+            elif key in live:
+                # The gate opened, and then the checksum came back on a new asset. Waiting
+                # is the only safe move: the phone's mirror has room for one row per key.
+                for asset_id in live[key]:
+                    maps.claim_watch[asset_id].append(entry.new_asset_id)
+            else:
+                maps.sync_rewrite[entry.new_asset_id] = entry.source_checksum
             if entry.new_checksum:
-                maps.upload_check[(entry.owner_id, entry.source_checksum)] = entry.new_checksum
+                maps.upload_check[key] = entry.new_checksum
         return maps
 
 
@@ -128,6 +161,9 @@ class LineOutcome:
     # Ledger entries whose gate this line should open, i.e. originals whose purge just
     # went past. Returned rather than acted on so the rewrite stays a pure function.
     gate_opens: tuple[LedgerEntry, ...] = ()
+    # Asset ids of returned originals this line says are gone, so whatever they were
+    # holding back can be armed again. Returned rather than acted on for the same reason.
+    claims_released: tuple[str, ...] = ()
 
 
 def rewrite_sync_line(line: bytes, maps: TranslationMaps, *, translate: bool = True) -> LineOutcome:
@@ -161,9 +197,15 @@ def rewrite_sync_line(line: bytes, maps: TranslationMaps, *, translate: bool = T
 
     if record.get("type") in DELETE_TYPES:
         asset_id = data.get("assetId")
-        entry = maps.delete_watch.get(asset_id) if isinstance(asset_id, str) else None
-        # Emitted unchanged either way: the phone still has to learn the original is gone.
-        return LineOutcome(line, gate_opens=(entry,) if entry else ())
+        if not isinstance(asset_id, str):
+            return LineOutcome(line)
+        entry = maps.delete_watch.get(asset_id)
+        # Emitted unchanged either way: the phone still has to learn the asset is gone.
+        return LineOutcome(
+            line,
+            gate_opens=(entry,) if entry else (),
+            claims_released=(asset_id,) if asset_id in maps.claim_watch else (),
+        )
 
     asset_id = data.get("id")
     checksum = data.get("checksum")
@@ -186,7 +228,10 @@ def translate_upload_check(body: bytes, owner_id: str | None, maps: TranslationM
     self-healing: if the replacement has itself been deleted, Immich says ``accept`` and
     the client uploads, which is correct.
 
-    Needs no gate. It never writes to any mirror.
+    Needs no gate, and no suppression either — the two things that hold the sync stream
+    back. It never writes to any mirror, so there is no unique index to violate: when a
+    returned original holds the checksum the client is asking about, Immich answers
+    ``duplicate`` to the original question and to the translated one alike.
 
     Returns the body to forward and how many hashes were translated; on anything
     unexpected it returns the original body and zero.
@@ -238,11 +283,24 @@ class ChecksumLedger:
         now = self._clock()
         if self._loaded_at is None or now - self._loaded_at >= self._refresh_seconds:
             try:
-                self._maps = TranslationMaps.build(await self._store.ledger_entries())
+                rebuilt = TranslationMaps.build(
+                    await self._store.ledger_entries(), await self._store.returned_originals()
+                )
             except Exception:
                 # Keep serving the previous maps. A stale translation is a missed
                 # prevention; a raised exception here would be a broken sync.
                 logger.exception("shim: could not refresh the ledger, keeping the previous maps")
+            else:
+                if rebuilt.suppressed != self._maps.suppressed:
+                    # The one state in here an operator cannot read off a counter: the shim
+                    # is deliberately doing nothing, and silence would look like a fault.
+                    logger.info(
+                        "shim: %d translation(s) held back by a returned original that still "
+                        "holds the checksum (was %d)",
+                        rebuilt.suppressed,
+                        self._maps.suppressed,
+                    )
+                self._maps = rebuilt
             self._loaded_at = now
         return self._maps
 
@@ -425,6 +483,52 @@ async def _open_gates(ready: _Ready, entries: tuple[LedgerEntry, ...]) -> None:
             await ready.store.bump_counter(SHIM_TOUCHES)
 
 
+async def _release_claims(ready: _Ready, maps: TranslationMaps, asset_ids: tuple[str, ...]) -> None:
+    """Record that a returned original is gone, and re-arm what it was holding back.
+
+    The mirror image of `_open_gates`, and it needs the same no-op update for the same
+    reason: nothing has changed about the replacement since the client last saw it, so
+    without one the line this now wants to rewrite would never be offered again.
+
+    `SHIM_GATES_OPENED` deliberately does not move. No gate opens here — the original's
+    gate opened when the original died and has stayed open. What was blocked was the
+    translation, and what is counted is the write that unblocks it.
+    """
+    deps = ready.deps
+    for asset_id in asset_ids:
+        blocked = maps.claim_watch.get(asset_id, [])
+        if deps.log_only:
+            logger.info(
+                "shim (log_only): would stop %s suppressing %d translation(s)",
+                asset_id,
+                len(blocked),
+            )
+            continue
+        if not await ready.store.mark_original_freed(asset_id):
+            continue
+        ready.ledger.invalidate()
+        logger.info(
+            "the returned copy %s is gone; the %d translation(s) it held back are armed again",
+            asset_id,
+            len(blocked),
+        )
+        for new_asset_id in blocked:
+            try:
+                assert deps.touch is not None
+                await deps.touch(new_asset_id)
+            except Exception:
+                # As in `_open_gates`: the record is correct and only the re-offer is
+                # missing. Not worth failing a client's sync over.
+                logger.warning(
+                    "shim: could not touch %s to have it re-sent; the translation is armed but "
+                    "the client may not see it until that asset changes for another reason",
+                    new_asset_id,
+                    exc_info=True,
+                )
+            else:
+                await ready.store.bump_counter(SHIM_TOUCHES)
+
+
 async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator[bytes]:
     """Rewrite the JSON Lines response as it arrives, one line at a time.
 
@@ -436,6 +540,10 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
     pending = b""
     rewritten = 0
     gate_opens: list[LedgerEntry] = []
+    claims_released: list[str] = []
+    # Bound before the try so the dispatch after it never reads an unassigned name; the
+    # real maps are the first thing loaded inside.
+    maps = TranslationMaps()
     try:
         maps = await ready.ledger.maps()
         async for chunk in upstream.aiter_bytes():
@@ -446,12 +554,14 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
                 rewritten += outcome.rewritten
                 if deps.watch_deletes:
                     gate_opens.extend(outcome.gate_opens)
+                    claims_released.extend(outcome.claims_released)
                 yield outcome.data
         if pending:
             outcome = rewrite_sync_line(pending, maps, translate=translate)
             rewritten += outcome.rewritten
             if deps.watch_deletes:
                 gate_opens.extend(outcome.gate_opens)
+                claims_released.extend(outcome.claims_released)
             yield outcome.data
     except httpx.HTTPError:
         logger.warning("shim: the sync stream ended early", exc_info=True)
@@ -466,6 +576,8 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
         await ready.store.bump_counter(SHIM_HASHES_TRANSLATED, rewritten)
     if gate_opens:
         await _open_gates(ready, tuple(gate_opens))
+    if claims_released:
+        await _release_claims(ready, maps, tuple(claims_released))
 
 
 def build_router(deps: ShimDeps) -> APIRouter:
