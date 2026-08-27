@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from immich_compressor.config import ConfigError, Preset, Settings, ShimSettings, load_settings
+from immich_compressor.config import (
+    BehaviorSettings,
+    ConfigError,
+    Preset,
+    Settings,
+    ShimSettings,
+    load_settings,
+)
 
 _PRESETS = """
 presets:
@@ -150,6 +157,43 @@ def test_shell_metacharacters_inside_a_token_are_argument_text(cmd: str) -> None
     assert argv[0] == "ffmpeg"
     # The metacharacter never becomes an argument of its own — that is the whole point.
     assert not any(token in {"|", ">", "<"} for token in argv)
+
+
+def test_transcode_unsupported_audio_needs_a_command_that_copies_audio() -> None:
+    """The retry rewrites the audio copy. A preset with none has nothing to rewrite, and a
+    setting that silently does nothing is worse than one that refuses at startup."""
+    with pytest.raises(ConfigError, match="copies the audio stream"):
+        Preset(
+            name="stills",
+            type="IMAGE",
+            cmd="magick {input} -quality 82 {output}",
+            suffix=".cmp.jpg",
+            transcode_unsupported_audio=True,
+        )
+
+    for spelling in ("-c:a copy", "-codec:a copy", "-acodec copy"):
+        preset = Preset(
+            name="video",
+            type="VIDEO",
+            cmd=f"ffmpeg -i {{input}} -c:v libx265 {spelling} {{output}}",
+            suffix=".cmp.mp4",
+            transcode_unsupported_audio=True,
+        )
+        assert preset.transcode_unsupported_audio is True
+
+    # Inherited rather than named, it is simply inert on a preset that copies no audio.
+    inherited = Preset(
+        name="stills",
+        type="IMAGE",
+        cmd="magick {input} -quality 82 {output}",
+        suffix=".cmp.jpg",
+    )
+    assert inherited.transcode_unsupported_audio is None
+    assert inherited.effective_transcode_unsupported_audio(BehaviorSettings()) is False
+    assert (
+        inherited.effective_transcode_unsupported_audio(BehaviorSettings(transcode_unsupported_audio=True))
+        is True
+    )
 
 
 def test_suffix_must_start_with_dot() -> None:

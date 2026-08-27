@@ -113,6 +113,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages. `--failed` and `--reason` select the two states and are refused together, and
   `requeue` on its own still means exactly what it did before.
 
+- **`behavior.transcode_unsupported_audio` re-encodes audio the container will not carry,
+  instead of failing the job.** The video presets copy the audio stream — the point of the
+  exercise is the video, and a copy is free and lossless — and MP4 has no mapping for some of
+  what an old camera or a DVD rip produces. Measured on a live library on 2026-08-26, ffmpeg's
+  muxer refused **119 of the 172** failures in one backfill run on that alone: `pcm_u8` (108),
+  `amr_nb` (9) and `pcm_dvd` (2).
+
+  ```
+  [mp4 @ 0x...] Could not find tag for codec pcm_u8 in stream #1, codec not currently
+                supported in container
+  ```
+
+  The first attempt is unchanged and still copies. Only a run that failed *with that
+  diagnosis* is retried, with the copy replaced by 128 kbit/s AAC — the bitrate the CPU preset
+  has always used. Measured in the shipped image on 2026-08-27, the refusal comes from writing
+  the container header before a single frame is encoded: on a 68 MB source the whole first
+  attempt exited in 601 ms, which is what makes retrying it cheap. There is a per-preset
+  override, and setting it on a preset whose command copies no audio is refused at startup.
+
+  **It ships off**, and stays a deliberate decision, because it is the one setting here that
+  turns a job which cannot finish into one that deletes an original — and what it deletes is a
+  lossless audio stream. Nothing downstream can see that: the sanity gate counts audio
+  streams, it does not listen to them. The container log names every file it happens to.
+
+  Not verified: how many of those 119 then pass the sanity and metadata gates. What this
+  removes is the muxer's refusal.
+
 ### Changed
 
 - **The surge breaker ships off (`behavior.surge_threshold: null`), and its suggested value

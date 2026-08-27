@@ -70,6 +70,13 @@ behavior:
   # -cq number. `balanced` is what this project shipped in 1.0.0.
   quality: balanced
 
+  # Re-encode the audio to 128 kbit/s AAC when the container refuses to carry it as it is,
+  # instead of failing the job. The video presets copy the audio stream, and MP4 has no
+  # mapping for what an old camera AVI or a DVD rip carries (pcm_u8, amr_nb, pcm_dvd). Off:
+  # it is a lossy conversion of a stream that was lossless, on a job that then deletes the
+  # original. Only a run the container has already refused is retried.
+  transcode_unsupported_audio: false
+
   retention_days: 7          # how long a replaced original survives; 0 = remove at once
   initial_delay_seconds: 300 # let Immich finish thumbnails/ML/OCR before touching an asset
 

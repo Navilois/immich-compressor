@@ -234,6 +234,32 @@ Assets that already failed this way stay `failed` — as above, nothing is reque
 `jobs --status failed` lists them with the error each one failed on, and
 `requeue --failed --error-contains TimeCreated --apply` brings that set back together.
 
+### Videos that failed on their audio codec can be rescued — but not by default
+
+**Read this one if `jobs --status failed` shows `Could not find tag for codec`.** The video
+presets copy the audio stream, and MP4 cannot carry some of what an old camera or a DVD rip
+produces, so ffmpeg's muxer refuses the file before a frame is encoded. Measured on a live
+library on 2026-08-26, that was **119 of 172** failures in one backfill run — `pcm_u8` (108),
+`amr_nb` (9), `pcm_dvd` (2).
+
+**Nothing changes unless you write the setting.** It is off because it turns a job that
+cannot finish into one that deletes an original, and the audio it re-encodes was lossless in
+the source:
+
+```yaml
+behavior:
+  transcode_unsupported_audio: true
+```
+
+Then bring the jobs that already failed back — every one of them still has its original:
+
+```bash
+immich-compressor requeue --failed --error-contains "Could not find tag for codec" --apply
+```
+
+The first attempt still copies the audio. Only a run the container refused is retried, with
+the audio re-encoded to 128 kbit/s AAC, and the log names every file that happens to.
+
 ### The metadata gate stops failing jobs on a re-approximated fraction
 
 **Nothing to edit**, and it is the third change in this release to when the gate fires. A

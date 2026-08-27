@@ -213,6 +213,19 @@ So sizing the container is the only thing you have to do — raise `cpus` in
 `docker-compose.override.yaml` and the thread count follows. There is no second number to
 keep in sync.
 
+## The audio caveat
+
+All three GPU presets copy the audio stream rather than re-encoding it — the point of the
+exercise is the video, and a copy is both free and lossless. MP4 has no mapping for some of
+what an old camera or a DVD rip produces, and ffmpeg's muxer refuses those files when it
+writes the header. Measured on a live library on 2026-08-26, that was **119 of 172** failures
+in one backfill run: `pcm_u8` (108), `amr_nb` (9) and `pcm_dvd` (2).
+
+`behavior.transcode_unsupported_audio: true` re-encodes the audio to 128 kbit/s AAC on
+exactly those jobs and leaves every other job copying as before — see
+[troubleshooting.md](troubleshooting.md#videos-fail-with-could-not-find-tag-for-codec). The
+CPU preset already encodes audio to AAC unconditionally, so it never meets this at all.
+
 ## The VAAPI caveat
 
 The VAAPI preset does not carry `-map 0`: its filter chain does not survive extra streams,

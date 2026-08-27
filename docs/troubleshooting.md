@@ -51,6 +51,38 @@ specific to your camera, `behavior.metadata_verify: warn` downgrades the gate to
 — but only while `delete_mode` is `trash`, because a warning cannot undo a force-deleted
 original. The startup validation enforces that pairing.
 
+## Videos fail with `Could not find tag for codec`
+
+```
+preset 'video-h265' exited 234: [mp4 @ 0x...] Could not find tag for codec pcm_u8 in
+stream #1, codec not currently supported in container
+```
+
+The video presets copy the audio stream instead of re-encoding it, and MP4 has no mapping
+for some of what an old camera or a DVD rip produces. ffmpeg's muxer refuses the file while
+writing the header, before a frame is encoded, so the job fails and the original is
+untouched. Measured on a live library on 2026-08-26, this was **119 of 172** failures in one
+backfill run: `pcm_u8` (108), `amr_nb` (9) and `pcm_dvd` (2).
+
+```yaml
+behavior:
+  transcode_unsupported_audio: true
+```
+
+The first attempt is still a stream copy; only a run the container refused is retried, with
+the audio re-encoded to 128 kbit/s AAC. Afterwards, bring the jobs that already failed back:
+
+```bash
+immich-compressor requeue --failed --error-contains "Could not find tag for codec"
+immich-compressor requeue --failed --error-contains "Could not find tag for codec" --apply
+```
+
+**It ships off because it is lossy.** `pcm_u8` and `pcm_dvd` are uncompressed in the source
+and are not after this, and nothing downstream can see the difference — the sanity gate
+counts audio streams, it does not listen to them. On a job that goes on to delete the
+original, that is a decision to take deliberately. The container log names every file it
+happens to.
+
 ## Tuning a preset
 
 `encode` runs the preset and the sanity gate against a local file, and never talks to
@@ -168,10 +200,12 @@ docker compose exec immich-compressor immich-compressor jobs --status failed
 
 `last_error` carries the reason. The same rows come out of `GET /jobs?status=failed`, if
 you have published a port and have an HTTP client on the host — the image has none. After
-fixing the cause:
+fixing the cause, one asset at a time, or every job that failed the same way at once:
 
 ```bash
 docker compose exec immich-compressor immich-compressor reprocess <assetId>
+docker compose exec immich-compressor immich-compressor requeue --failed \
+    --error-contains "Could not find tag for codec" --apply
 ```
 
 Note that this does **not** remove the `compressor` marker on the server, so an
