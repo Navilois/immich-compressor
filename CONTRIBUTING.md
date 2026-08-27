@@ -42,8 +42,18 @@ docker compose --env-file testinstance/.env -f docker-compose.test.yaml up -d
 
 export E2E_IMMICH_URL=http://127.0.0.1:2283/api
 export E2E_IMMICH_KEY=<api key from that instance>
+
+# The two sync-stream tests need a session token: Immich refuses API keys on every
+# /sync route, whatever the key is scoped to. Same account as the key above.
+export E2E_IMMICH_EMAIL=<that account's email>
+export E2E_IMMICH_PASSWORD=<that account's password>
+
 make test-live
 ```
+
+Without the last two the sync tests skip rather than fail, and a skip is not a pass — check
+the summary line, or run `make test-live` with `-rs` to see what did not execute. The
+behaviour behind this is [#17](docs/immich-api-notes.md).
 
 `docker-compose.test.yaml` brings up a complete Immich stack under the separate compose
 project `immich-test`. Machine learning sits behind the `ml` profile because it costs about

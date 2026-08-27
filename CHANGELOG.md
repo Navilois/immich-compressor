@@ -65,6 +65,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backfilled: the original they would describe is already gone. Recognition is therefore
   complete only from this version onwards.
 
+- **A test that reproduces the Immich app's local mirror and replays the shim's output
+  through it.** `tests/test_app_mirror.py` builds `remote_asset_entity` from the app's own
+  schema — `STRICT`, `WITHOUT ROWID`, and the partial `UNIQUE (owner_id, checksum)` index —
+  and drives it with the same upsert the app performs, so the constraint the whole gate
+  exists to respect is enforced in CI rather than argued about. It needs no live Immich and
+  no phone.
+
+  Its negative control forces the ungated rewrite and pins down both failure modes, which
+  turn out to depend on whether the phone has already mirrored the replacement: with the row
+  present the unique index aborts the batch and drift's `rethrow` carries the failure into
+  the client's sync, taking healthy lines in the same batch with it; with the row absent,
+  `INSERT OR REPLACE` resolves the conflict by deleting the original's row instead,
+  silently. Removing the gate turns four of these tests red.
+
 - **`requeue --failed` brings a batch of failed jobs back.** Until now `requeue` covered only
   the `skipped` state, and the other terminal one had no bulk route at all: a failed job has
   spent its attempts, so the worker's own backoff never returns to it, and every gate fix was
@@ -112,6 +126,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The shim no longer relays Immich's `Date`, which arrived as a duplicate.** Uvicorn writes
+  its own `Date` and `Server` and appends the application's rather than replacing them, so
+  every proxied response carried two `Date` headers whose values disagreed by a second —
+  a field RFC 9110 defines as a singleton — and nginx logged `upstream sent duplicate header
+  line: "date: ..."` on each one. Both are now dropped from the relayed set along with the
+  hop-by-hop headers. `Server` is latent rather than observed, since Immich sends
+  `X-Powered-By` and no `Server`, but anything in front of Immich would duplicate the same
+  way. Everything that describes the response rather than the hop — `X-Correlation-ID`,
+  `Vary`, `Content-Type` — still comes through untouched.
+
+- **The live test behind the shim's delivery claim never actually ran.** Immich refuses API
+  keys on every `/sync` route — `403 {"message": "Sync endpoints cannot be used with API
+  keys"}`, whatever the key is scoped to — so
+  `test_live_touch_makes_the_sync_stream_reoffer_an_asset` hit the 403, called
+  `pytest.skip`, and reported green without executing a single assertion. It now logs in
+  with `E2E_IMMICH_EMAIL` / `E2E_IMMICH_PASSWORD` and passes against a live v3.1.0: the
+  no-op `isFavorite` write-back does re-offer the asset on the next sync pass, and with the
+  touch removed the pass comes back empty, so the control discriminates. The shim itself
+  was never affected — on its proxied routes it relays the caller's own credentials and
+  never substitutes this service's key. See
+  [#17](docs/immich-api-notes.md).
+
+- **The live suite's sync helper acked one line per response, which drained nothing.** Every
+  response ends with `SyncCompleteV1`, whose ack advances no asset checkpoint; six
+  consecutive passes acking only the last line returned the identical nine lines. It now
+  acks the last line of each type, the way a real client does, and drains the same backlog
+  in one pass. `make test-live` also gained `-rs`, so a skip is visible rather than
+  counted as green. See [#18](docs/immich-api-notes.md).
+
 - **The gate the checksum-translation shim waits on now really opens after a `permanent`
   delete.** With `delete_mode: permanent` and `retention_days: 0` the pipeline deletes the
   original inline and recorded nothing: `original_freed_at` stayed empty on every job it
@@ -156,6 +199,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `'15:46:30+01:00'` and `'+01:00'` against `'+02:00'` are both still findings — and so does
   the clock itself.
 
+- **The metadata gate no longer fails a job on a fraction that was re-approximated.** A value
+  that is one whole fraction is now evaluated instead of being read as the number in front of
+  the slash: `1/100` was a 1 carrying the unit `/100`, so two fractions were compared
+  character by character and the drift the tolerance exists for never reached them. Measured
+  on a live library on 2026-08-26, `EXIF:ShutterSpeedValue` came back `'1/999963365'` ->
+  `'1/999963296'` and failed **6 jobs** in the same backfill run. Evaluated, the two differ by
+  6.9e-8 — comfortably inside the tolerance that was already in the code.
+
+  This cannot loosen the gate on an exposure time. Two *integer* denominators only land within
+  1e-6 of each other once the denominator passes a million, so `1/8000` against `1/7999` is
+  still a finding, and so is `1/100` against `1/101`. A fraction with anything appended to it
+  is not treated as one at all: `4/2/2026` and `2/1/2026` are two dates in a caption, and they
+  still compare exactly.
+
 - **`XMP:Orientation` joined `EXIF:Orientation` on the metadata gate's ignore list.** It is
   the XMP mirror of the same tag, describing the same rotation of the same pixels, and
   `normalize_orientation` pins that rotation to 1 after `-auto-orient` has baked it into the
@@ -164,6 +221,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `'Horizontal (normal)'` on 2 jobs.
 
 ### Documentation
+
+- **The shim's `proxy_buffering` warning now says what was measured.** `docs/shim.md`
+  claimed that with buffering on "nginx holds the sync stream and the app stalls waiting for
+  a response that never finishes arriving". It does not: measured on v3.1.0 against a
+  423-line, 265 KB response, buffering on and off were indistinguishable — first byte inside
+  20 ms either way, byte-identical output, no stall — with a fast client and again with one
+  reading at roughly 40 KB/s. Immich's sync stream is a finite response that completes and
+  closes, so there is nothing to hold open. The recommendation stands, for the reason that
+  actually applies: it is a streaming endpoint, the shim yields line by line, and the client
+  applies batches as they arrive. The large-library case is now named as unverified rather
+  than asserted.
+
+- **Note 17 no longer claims owner resolution works for every credential.** It said
+  `GET /users/me` "answers 200 for an API key, so it works whichever credential the caller
+  presents" — measured, but only with the key holding `all` that the note's table used.
+  Note 13 in the same document already recorded the other half: a key scoped to just the
+  permissions this service needs gets **403 Missing required permission: user.read**.
+  Measured again on 2026-08-27 against a live instance, this time through the shim: with
+  such a key the owner comes back unresolved, `translate_upload_check` translates nothing,
+  and a replaced original's checksum returns `accept` where its replacement earns
+  `reject`/`duplicate`. The upload-check translation is therefore a silent no-op for a
+  narrowly scoped key. Phones are unaffected — they present a session token, and the app
+  does not use that route — but `immich-go` and the CLI are, so `docs/shim.md` now lists it
+  under Limits and says to grant `user.read`.
 
 - **Every tracked document was read against the 1.3.1 source and corrected.** No behaviour
   changed; what changed is that the documentation now describes what the code does.

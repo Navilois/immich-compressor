@@ -119,9 +119,24 @@ location @immich { proxy_pass http://immich-server:2283; }
 location / { proxy_pass http://immich-server:2283; }
 ```
 
-`proxy_buffering off` is not optional. With buffering on, nginx holds the sync stream and
-the app stalls waiting for a response that never finishes arriving. If you use Caddy or
-Traefik, find their equivalent before you route anything.
+`proxy_buffering off` is the setting this was tested with, and the one to use. The reason is
+narrower than this page used to claim.
+
+It said the app stalls on a response that never finishes arriving. That is not what happens.
+Measured on v3.1.0 against a 423-line, 265 KB sync response, buffering on and off were
+indistinguishable — first byte inside 20 ms either way, byte-identical output, no stall —
+with a fast client and again with one reading at roughly 40 KB/s. Immich's sync stream is a
+*finite* response that completes and closes, so there is nothing for nginx to hold open.
+
+What remains true is that this is a streaming endpoint and `proxy_buffering off` is the
+setting that matches it: the shim rewrites and yields one line at a time, and the client
+applies batches as they arrive rather than at the end. Buffering also lets nginx spool a
+response larger than `proxy_buffers` to a temporary file — documented nginx behaviour, but
+**not observed here**: no temp file appeared at 265 KB even with the slow client, and the
+size a first sync of a large library reaches has not been tested. Treat the large-library
+case as unverified in both directions.
+
+If you use Caddy or Traefik, find their equivalent before you route anything.
 
 ## Rolling it out
 
@@ -169,6 +184,12 @@ shim is not in front of.
   a VPN, on a second hostname — never passes through the shim and is unaffected.
 - **`bulk-upload-check` does not help phones.** The mobile app does not use that route. It
   covers `immich-go`, the CLI and the web uploader.
+- **`bulk-upload-check` needs a credential that resolves an owner.** Its ledger lookup is
+  scoped by owner, so the shim asks `GET /users/me` first. A session token, or an API key
+  holding `user.read`, answers 200; a key scoped to only the permissions this service needs
+  answers 403, the owner comes back unresolved, and the translation then does nothing at
+  all. It fails open and stays silent, so the symptom is a re-upload that the shim looked
+  like it should have caught. Grant `user.read` to any key whose uploads you want covered.
 - **No retroactive fix.** Replacements made before the ledger shipped in 1.3.2 carry no
   record of what their original hashed to, and for an original that is already permanently
   deleted that value cannot be recovered. The shim is complete from 1.3.2 onwards.
