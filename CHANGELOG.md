@@ -202,6 +202,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applies batches as they arrive. The large-library case is now named as unverified rather
   than asserted.
 
+- **Note 17 no longer claims owner resolution works for every credential.** It said
+  `GET /users/me` "answers 200 for an API key, so it works whichever credential the caller
+  presents" — measured, but only with the key holding `all` that the note's table used.
+  Note 13 in the same document already recorded the other half: a key scoped to just the
+  permissions this service needs gets **403 Missing required permission: user.read**.
+  Measured again on 2026-08-27 against a live instance, this time through the shim: with
+  such a key the owner comes back unresolved, `translate_upload_check` translates nothing,
+  and a replaced original's checksum returns `accept` where its replacement earns
+  `reject`/`duplicate`. The upload-check translation is therefore a silent no-op for a
+  narrowly scoped key. Phones are unaffected — they present a session token, and the app
+  does not use that route — but `immich-go` and the CLI are, so `docs/shim.md` now lists it
+  under Limits and says to grant `user.read`.
+
 - **Every tracked document was read against the 1.3.1 source and corrected.** No behaviour
   changed; what changed is that the documentation now describes what the code does.
   - `docs/upgrading.md` gains the **1.3.0 → 1.3.1** section it never got — the release was a

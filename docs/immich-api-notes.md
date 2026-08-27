@@ -322,18 +322,29 @@ Measured on v3.1.0 on 2026-08-26, against a throwaway instance, with a key holdi
 | `POST /sync/stream` | `x-api-key` | `403 {"message": "Sync endpoints cannot be used with API keys"}` |
 | `POST /sync/ack` | `x-api-key` | `403`, same message |
 | `POST /sync/stream` | `Authorization: Bearer <session token>` | `200` |
-| `GET /users/me` | `x-api-key` | `200` |
+| `GET /users/me` | `x-api-key` holding `all` | `200` — but see note 13 for a scoped key |
 
 This is not a permission that can be granted — the refusal names the *credential type*, and
 a key scoped to `all` is refused exactly like a narrow one. Sync is for logged-in clients,
 and the phone is a logged-in client.
 
-Two consequences, and only one of them is a problem:
+Three consequences:
 
-**The shim is unaffected.** On its two proxied routes it is a pipe: it relays the caller's
-own credentials verbatim and never substitutes this service's key, so the phone's session
-token is what reaches Immich. Owner resolution is unaffected too — it asks `GET /users/me`,
-which answers 200 for an API key, so it works whichever credential the caller presents.
+**The shim's relaying is unaffected.** On its two proxied routes it is a pipe: it relays
+the caller's own credentials verbatim and never substitutes this service's key, so the
+phone's session token is what reaches Immich.
+
+**Owner resolution is not**, and only the upload-check direction needs it. It asks
+`GET /users/me`, and note 13 above is the one that governs: a session token or a key
+holding `user.read` answers 200, but a key scoped to just the permissions this service
+needs answers **403**. An unresolved owner makes `translate_upload_check` translate nothing
+and forward the body unchanged — fail-open, so nothing breaks, but the upload-check
+translation is a silent no-op for that caller. Measured on 2026-08-27 against the
+production instance: this service's own key gets 403 on `/users/me`, and a replaced
+original's checksum consequently came back `accept` through the shim instead of the
+`reject`/`duplicate` its replacement earns. The phone is unaffected — it presents a session
+token, and it does not use that route at all ([shim.md](shim.md#limits)). A key-based
+client that wants the translation must hold `user.read`.
 
 **The live test was affected**, and silently. `tests/test_e2e_live.py` drove the sync stream
 with `E2E_IMMICH_KEY`, got a 403, and called `pytest.skip` — so

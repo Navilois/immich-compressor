@@ -184,6 +184,12 @@ shim is not in front of.
   a VPN, on a second hostname — never passes through the shim and is unaffected.
 - **`bulk-upload-check` does not help phones.** The mobile app does not use that route. It
   covers `immich-go`, the CLI and the web uploader.
+- **`bulk-upload-check` needs a credential that resolves an owner.** Its ledger lookup is
+  scoped by owner, so the shim asks `GET /users/me` first. A session token, or an API key
+  holding `user.read`, answers 200; a key scoped to only the permissions this service needs
+  answers 403, the owner comes back unresolved, and the translation then does nothing at
+  all. It fails open and stays silent, so the symptom is a re-upload that the shim looked
+  like it should have caught. Grant `user.read` to any key whose uploads you want covered.
 - **No retroactive fix.** Replacements made before the ledger shipped in 1.3.2 carry no
   record of what their original hashed to, and for an original that is already permanently
   deleted that value cannot be recovered. The shim is complete from 1.3.2 onwards.
