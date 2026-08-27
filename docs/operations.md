@@ -111,6 +111,7 @@ docker compose exec immich-compressor immich-compressor <command>
 | `jobs [--status S] [--limit N] [--json]` | list jobs and, for the failed ones, `last_error` |
 | `reprocess <assetId>` | re-queue one asset |
 | `requeue --reason <r> [--apply]` | re-queue everything skipped for one reason. Dry until `--apply` |
+| `requeue --failed [--error-contains TEXT] [--apply]` | re-queue everything that failed, or only the jobs whose error contains `TEXT`. Dry until `--apply` |
 | `backfill [scan\|run\|status]` | work through the library that was there before this service. `run` is the default and is dry until `--apply` |
 | `resume [--apply]` | show why the surge breaker paused the service, and clear it. Reports until `--apply` |
 | `restore <assetId>… \| --all-pending` | pull originals back out of the trash. Restores what Immich still has and counts the ids it no longer knows; exits 3 when some could not come back |
@@ -316,6 +317,19 @@ locally and no webhook will fire for them again.
 immich-compressor requeue --reason no_gain           # look first
 immich-compressor requeue --reason no_gain --apply
 ```
+
+A changed encoder or metadata gate leaves the same problem in the other terminal state. A
+failed job has used up its attempts, so the worker's backoff never returns to it:
+
+```bash
+immich-compressor requeue --failed --error-contains ShutterSpeedValue
+immich-compressor requeue --failed --error-contains ShutterSpeedValue --apply
+```
+
+`--error-contains` matches a plain substring of the `last_error` that `jobs --status failed`
+prints — not a pattern, so `%` and `_` in an ffmpeg message mean themselves. Without it,
+every failed job comes back, which is rarely what you want: the ones that failed on a broken
+source file will simply fail again.
 
 ## Backups
 

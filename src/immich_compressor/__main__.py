@@ -441,6 +441,15 @@ def cmd_reprocess(args: argparse.Namespace) -> int:
     return asyncio.run(_reprocess(settings, args.asset_id))
 
 
+def _print_requeue_plan(asset_ids: list[str], description: str) -> None:
+    """What a dry run of either requeue mode prints."""
+    for asset_id in asset_ids[:20]:
+        print(f"[dry] would re-queue {asset_id}")
+    if len(asset_ids) > 20:
+        print(f"[dry] ... and {len(asset_ids) - 20} more")
+    print(f"{len(asset_ids)} job(s) {description} — pass --apply to re-queue")
+
+
 async def _requeue(settings: Settings, reason: SkipReason, apply: bool) -> int:
     """Re-run assets that a *previous* version of a guard or the sanity gate rejected."""
     async with JobStore(settings.database_path) as store:
@@ -449,21 +458,44 @@ async def _requeue(settings: Settings, reason: SkipReason, apply: bool) -> int:
             print(f"no jobs skipped as {reason.value}")
             return 0
         if not apply:
-            for asset_id in asset_ids[:20]:
-                print(f"[dry] would re-queue {asset_id}")
-            if len(asset_ids) > 20:
-                print(f"[dry] ... and {len(asset_ids) - 20} more")
-            print(f"{len(asset_ids)} job(s) skipped as {reason.value} — pass --apply to re-queue")
+            _print_requeue_plan(asset_ids, f"skipped as {reason.value}")
             return 0
         await store.requeue_skipped(reason)
     print(f"re-queued {len(asset_ids)} job(s) previously skipped as {reason.value}")
     return 0
 
 
+async def _requeue_failed(settings: Settings, error_contains: str | None, apply: bool) -> int:
+    """Re-run jobs a *previous* version of a gate, the encoder or the server failed.
+
+    The counterpart of :func:`_requeue` for the other terminal state. A failed job has spent
+    its attempts, so nothing brings it back on its own, and a gate fix without this is
+    recovered one `reprocess` call at a time.
+    """
+    described = "failed" if error_contains is None else f"failed with {error_contains!r} in the error"
+    async with JobStore(settings.database_path) as store:
+        asset_ids = await store.failed_asset_ids(error_contains=error_contains)
+        if not asset_ids:
+            print(f"no jobs {described}")
+            return 0
+        if not apply:
+            _print_requeue_plan(asset_ids, described)
+            return 0
+        await store.requeue_failed(error_contains=error_contains)
+    print(f"re-queued {len(asset_ids)} job(s) that {described}")
+    return 0
+
+
 def cmd_requeue(args: argparse.Namespace) -> int:
+    # Before the config is read: a usage error is not a reason to also demand an API key.
+    if args.error_contains is not None and not args.failed:
+        print("--error-contains selects failed jobs by their error; it needs --failed", file=sys.stderr)
+        return 2
     settings = _load(args)
     _configure_logging(settings.log_level)
-    return asyncio.run(_requeue(settings, SkipReason(args.reason), args.apply))
+    if args.failed:
+        return asyncio.run(_requeue_failed(settings, args.error_contains, args.apply))
+    return asyncio.run(_requeue(settings, SkipReason(args.reason or SkipReason.NO_GAIN.value), args.apply))
 
 
 async def _resume(settings: Settings, apply: bool) -> int:
@@ -836,11 +868,28 @@ def build_parser() -> argparse.ArgumentParser:
     reprocess_parser.add_argument("asset_id")
     reprocess_parser.set_defaults(func=cmd_reprocess)
 
-    requeue_parser = sub.add_parser("requeue", help="re-queue every job that was skipped for one reason")
-    requeue_parser.add_argument(
+    requeue_parser = sub.add_parser(
+        "requeue", help="re-queue jobs a previous version of a guard, a gate or the encoder rejected"
+    )
+    # Skipped and failed are two terminal states and a run selects one of them. `--reason`
+    # defaults to None rather than to no_gain so that argparse can see it was passed at all:
+    # a value equal to the default is not a conflict to it, and `--failed --reason no_gain`
+    # would slip through the group. `cmd_requeue` resolves the None, so `requeue` on its own
+    # still means what it always did.
+    requeue_target = requeue_parser.add_mutually_exclusive_group()
+    requeue_target.add_argument(
         "--reason",
-        default=SkipReason.NO_GAIN.value,
+        default=None,
         choices=[reason.value for reason in SkipReason],
+        help=f"re-queue jobs skipped for this reason (default: {SkipReason.NO_GAIN.value})",
+    )
+    requeue_target.add_argument(
+        "--failed", action="store_true", help="re-queue failed jobs instead of skipped ones"
+    )
+    requeue_parser.add_argument(
+        "--error-contains",
+        metavar="TEXT",
+        help="with --failed: only jobs whose recorded error contains TEXT",
     )
     requeue_parser.add_argument("--apply", action="store_true", help="actually re-queue (default: dry)")
     requeue_parser.set_defaults(func=cmd_requeue)

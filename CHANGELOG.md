@@ -96,6 +96,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The reason is deliberately not a label: it is free text with counts in it, and as a label
   that is unbounded cardinality. It stays in `/healthz`, in `resume` and in the log.
 
+- **`requeue --failed` brings a batch of failed jobs back.** Until now `requeue` covered only
+  the `skipped` state, and the other terminal one had no bulk route at all: a failed job has
+  spent its attempts, so the worker's own backoff never returns to it, and every gate fix was
+  recovered one `reprocess <asset_id>` call at a time. `--error-contains TEXT` narrows the set
+  to the jobs whose recorded error contains that text, which is how a fix to one gate is
+  applied to exactly the jobs that gate rejected:
+
+  ```bash
+  immich-compressor requeue --failed --error-contains ShutterSpeedValue           # look first
+  immich-compressor requeue --failed --error-contains ShutterSpeedValue --apply
+  ```
+
+  Dry until `--apply`, like every other command that changes something. The match is a plain
+  substring of `last_error`, not a pattern — ffmpeg and exiftool both put `%` and `_` in their
+  messages. `--failed` and `--reason` select the two states and are refused together, and
+  `requeue` on its own still means exactly what it did before.
+
 ### Changed
 
 - **The surge breaker ships off (`behavior.surge_threshold: null`), and its suggested value

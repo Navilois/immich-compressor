@@ -111,6 +111,49 @@ async def test_requeue_skipped_only_touches_the_named_reason(tmp_path: Path) -> 
         assert await store.requeue_skipped(SkipReason.NO_GAIN) == []
 
 
+async def test_requeue_failed_only_touches_the_error_it_names(tmp_path: Path) -> None:
+    """A gate fix has to reach the jobs that gate failed, and leave the rest where they are."""
+    async with JobStore(tmp_path / "s.db") as store:
+        for asset_id, error in (
+            ("shutter-1", "EXIF:ShutterSpeedValue changed: '1/999963365' -> '1/999963296'"),
+            ("shutter-2", "EXIF:ShutterSpeedValue changed: '1/999963365' -> '1/999963301'"),
+            ("broken", "exiftool: Error reading OtherImageStart data in IFD0"),
+        ):
+            await store.enqueue(asset_id, PAYLOAD, delay_seconds=0)
+            await store.update(asset_id, attempts=3)
+            await store.mark_failed(asset_id, error)
+        await store.enqueue("skipped", PAYLOAD, delay_seconds=0)
+        await store.mark_skipped("skipped", SkipReason.NO_GAIN)
+
+        assert await store.failed_asset_ids(error_contains="ShutterSpeedValue") == [
+            "shutter-1",
+            "shutter-2",
+        ]
+        # A substring, not a pattern: the wildcards of LIKE are ordinary characters here.
+        assert await store.failed_asset_ids(error_contains="%ShutterSpeedValue%") == []
+
+        requeued = await store.requeue_failed(error_contains="ShutterSpeedValue")
+        assert sorted(requeued) == ["shutter-1", "shutter-2"]
+
+        for asset_id in requeued:
+            job = await store.get(asset_id)
+            assert job is not None
+            assert job.state is JobState.QUEUED
+            assert job.last_error is None
+            # The attempts are what the worker's backoff counts, so a re-run needs them
+            # cleared or the job is claimed once and abandoned again.
+            assert job.attempts == 0
+
+        untouched = await store.get("broken")
+        assert untouched is not None
+        assert untouched.state is JobState.FAILED
+        assert (await store.get("skipped")).state is JobState.SKIPPED  # type: ignore[union-attr]
+
+        # Second run has nothing left to do, and without a filter the rest comes back.
+        assert await store.requeue_failed(error_contains="ShutterSpeedValue") == []
+        assert await store.requeue_failed() == ["broken"]
+
+
 async def test_due_deletions(tmp_path: Path) -> None:
     async with JobStore(tmp_path / "s.db") as store:
         await store.enqueue("late", PAYLOAD, delay_seconds=0)

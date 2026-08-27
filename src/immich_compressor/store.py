@@ -166,6 +166,23 @@ def _parse(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def _failed_predicate(error_contains: str | None) -> tuple[str, tuple[Any, ...]]:
+    """The ``WHERE`` clause selecting failed jobs, and its parameters.
+
+    Shared so that the listing and the update behind a requeue can never drift apart and
+    re-queue a different set than the one that was shown.
+
+    ``instr`` rather than ``LIKE``: what an operator types is a substring of an error
+    message, not a pattern, and ffmpeg and exiftool both put ``%`` and ``_`` in theirs.
+    """
+    if error_contains is None:
+        return "state = ?", (JobState.FAILED.value,)
+    return (
+        "state = ? AND last_error IS NOT NULL AND instr(last_error, ?) > 0",
+        (JobState.FAILED.value, error_contains),
+    )
+
+
 class JobStore:
     """Async SQLite job store. One instance per process."""
 
@@ -373,6 +390,30 @@ class JobStore:
         await self._conn.commit()
         return asset_ids
 
+    async def requeue_failed(self, *, error_contains: str | None = None) -> list[str]:
+        """Put every failed job back into the queue, or only those the error names.
+
+        The counterpart of :meth:`requeue_skipped` for the other terminal state, and needed
+        for the same reason: when a gate or the encoder changes, the jobs its previous
+        version rejected are parked locally and no webhook will fire for them again. A failed
+        job has also used up its attempts, which is why the worker's own backoff never comes
+        back to it — ``attempts = 0`` is what makes this a re-run rather than a no-op.
+
+        Returns the asset ids that were re-queued.
+        """
+        asset_ids = await self.failed_asset_ids(error_contains=error_contains)
+        if not asset_ids:
+            return []
+        predicate, parameters = _failed_predicate(error_contains)
+        now = _iso(_now())
+        await self._conn.execute(
+            "UPDATE jobs SET state = ?, skip_reason = NULL, attempts = 0, last_error = NULL, "  # noqa: S608 - predicate is a literal
+            f"run_after = ?, updated_at = ? WHERE {predicate}",
+            (JobState.QUEUED.value, now, now, *parameters),
+        )
+        await self._conn.commit()
+        return asset_ids
+
     async def delete(self, source_asset_id: str) -> bool:
         cursor = await self._conn.execute("DELETE FROM jobs WHERE source_asset_id = ?", (source_asset_id,))
         await self._conn.commit()
@@ -507,6 +548,15 @@ class JobStore:
         async with self._conn.execute(
             "SELECT source_asset_id FROM jobs WHERE state = ? AND skip_reason = ? ORDER BY updated_at ASC",
             (JobState.SKIPPED.value, reason.value),
+        ) as cursor:
+            return [row["source_asset_id"] for row in await cursor.fetchall()]
+
+    async def failed_asset_ids(self, *, error_contains: str | None = None) -> list[str]:
+        """Every asset parked in ``failed``, or only those whose error contains a string."""
+        predicate, parameters = _failed_predicate(error_contains)
+        async with self._conn.execute(
+            f"SELECT source_asset_id FROM jobs WHERE {predicate} ORDER BY updated_at ASC",  # noqa: S608 - predicate is a literal
+            parameters,
         ) as cursor:
             return [row["source_asset_id"] for row in await cursor.fetchall()]
 

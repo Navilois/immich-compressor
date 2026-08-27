@@ -198,9 +198,9 @@ loosens: a tag that is missing from the output is still a finding, a value that 
 is still a finding, a differing unit (`339.569 m` against `339.569 ft`) is still a finding,
 and text tags such as `Make` and `Model` still have to match exactly.
 
-Assets that already failed this way stay `failed` — the fix does not requeue anything. There
-is no bulk retry for failed jobs, so they come back one id at a time with
-`reprocess <asset_id>`.
+Assets that already failed this way stay `failed` — the fix does not requeue anything. Bring
+them back in one go with `requeue --failed --error-contains FocalPlaneYResolution --apply`,
+which is new in this release; `reprocess <asset_id>` still takes them one id at a time.
 
 ### The metadata gate stops failing jobs on a time that gained a `+00:00`
 
@@ -230,9 +230,9 @@ tag has always been there: `normalize_orientation` pins the rotation to 1 once `
 has baked it into the pixels, and the XMP mirror describes exactly that rotation. Measured on
 the same instance: `'Rotate 270 CW'` -> `'Horizontal (normal)'` on 2 jobs.
 
-Assets that already failed this way stay `failed` — as above, nothing is requeued, and
-`reprocess <asset_id>` takes them one id at a time. `jobs --status failed` lists them with
-the error each one failed on.
+Assets that already failed this way stay `failed` — as above, nothing is requeued.
+`jobs --status failed` lists them with the error each one failed on, and
+`requeue --failed --error-contains TimeCreated --apply` brings that set back together.
 
 ### The metadata gate stops failing jobs on a re-approximated fraction
 
@@ -255,8 +255,8 @@ and `'1/100'` against `'1/101'` are both still findings. A fraction with anythin
 not treated as one at all — `'4/2/2026'` and `'2/1/2026'` are two dates in a caption, and
 they still compare exactly.
 
-Assets that already failed this way stay `failed` — as above, nothing is requeued, and
-`reprocess <asset_id>` takes them one id at a time.
+Assets that already failed this way stay `failed` — as above, nothing is requeued.
+`requeue --failed --error-contains ShutterSpeedValue --apply` brings that set back together.
 
 ## 1.3.0 → 1.3.1
 
