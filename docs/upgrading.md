@@ -11,7 +11,7 @@ and minor releases arrive that way and a breaking change never does. The
 
 Job state lives in a volume and survives. Schema changes are applied automatically on open.
 
-## Unreleased
+## 1.3.1 → 1.4.0
 
 ### The surge breaker is now off by default — check whether you were relying on it
 
