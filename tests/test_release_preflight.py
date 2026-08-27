@@ -87,8 +87,16 @@ def test_the_setting_being_off_stops_the_release(tmp_path: Path) -> None:
         # narrowed token gets back and is not a `false`.
         ("null\n", "", 0, "an absent key"),
         ("", "", 0, "an empty answer"),
-        # A refused read. `gh` exits non-zero and says why on stderr.
-        ("", "gh: Resource not accessible by integration (HTTP 403)\n", 1, "a refused read"),
+        # The real one, and the only one that happens in this repository: `GITHUB_TOKEN`
+        # has no `administration: read`, so the endpoint answers 403 every time. Measured
+        # on run 33095211048. `gh` prints the body on stdout and its own line on stderr,
+        # which is how the old step ended up with both the body and the word `unknown`.
+        (
+            '{"message":"Resource not accessible by integration","status":"403"}',
+            "gh: Resource not accessible by integration (HTTP 403)\n",
+            1,
+            "a refused read",
+        ),
     ],
 )
 def test_anything_that_is_not_false_continues(
