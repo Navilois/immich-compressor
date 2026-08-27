@@ -24,6 +24,7 @@ from immich_compressor.__main__ import (
     _jobs,
     _report,
     _reprocess,
+    _requeue_failed,
     build_parser,
 )
 from immich_compressor.config import Settings
@@ -54,6 +55,55 @@ def test_backfill_without_a_mode_still_means_run() -> None:
     args = build_parser().parse_args(["backfill", "--type", "VIDEO", "--limit", "50", "--apply"])
     assert (args.mode, args.type, args.limit, args.apply) == ("run", "VIDEO", 50, True)
     assert build_parser().parse_args(["backfill", "scan", "--rescan"]).mode == "scan"
+
+
+def test_requeue_selects_one_terminal_state() -> None:
+    """`requeue` alone still means what it always did, and the two states never mix."""
+    default = build_parser().parse_args(["requeue"])
+    # None, not "no_gain": argparse does not count a value equal to the default as passed,
+    # so a real default here would let `--failed --reason no_gain` through the group.
+    assert (default.reason, default.failed, default.error_contains) == (None, False, None)
+
+    failed = build_parser().parse_args(["requeue", "--failed", "--error-contains", "Shutter"])
+    assert (failed.failed, failed.error_contains) == (True, "Shutter")
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["requeue", "--failed", "--reason", "no_gain"])
+
+
+async def test_requeue_failed_is_dry_until_apply(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command that undoes a gate's old verdicts must show them before it acts."""
+    async with JobStore(settings.database_path) as store:
+        await store.enqueue("shutter-1", {}, delay_seconds=0)
+        await store.mark_failed("shutter-1", "EXIF:ShutterSpeedValue changed: '1/999963365' -> '1/999963296'")
+        await store.enqueue("broken", {}, delay_seconds=0)
+        await store.mark_failed("broken", "exiftool: Error reading OtherImageStart data in IFD0")
+
+    assert await _requeue_failed(settings, "ShutterSpeedValue", False) == 0
+    out = capsys.readouterr().out
+    assert "[dry] would re-queue shutter-1" in out
+    assert "broken" not in out
+    assert "--apply" in out
+
+    assert await _requeue_failed(settings, "ShutterSpeedValue", True) == 0
+    assert "re-queued 1 job(s)" in capsys.readouterr().out
+
+    async with JobStore(settings.database_path) as store:
+        assert (await store.get("shutter-1")).state is JobState.QUEUED  # type: ignore[union-attr]
+        assert (await store.get("broken")).state is JobState.FAILED  # type: ignore[union-attr]
+
+    assert await _requeue_failed(settings, "ShutterSpeedValue", True) == 0
+    assert "no jobs failed with 'ShutterSpeedValue' in the error" in capsys.readouterr().out
+
+
+def test_requeue_refuses_an_error_filter_without_the_state_it_filters() -> None:
+    """`--error-contains` on its own would silently re-queue skipped jobs instead."""
+    args = argparse.Namespace(
+        config=None, reason="no_gain", failed=False, error_contains="Shutter", apply=True
+    )
+    assert main.cmd_requeue(args) == 2
 
 
 @respx.mock
