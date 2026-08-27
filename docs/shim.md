@@ -38,16 +38,23 @@ version of this available today.
 ## The one rule that makes it work
 
 The phone's mirror allows **exactly one row per (owner, checksum)** — it enforces a unique
-index. The original's own row holds its checksum for as long as the original exists, even
-while it sits in the trash.
+index. So the rule the shim has to keep is this one:
 
-So the replacement can only be given that checksum *after* the original is really gone. Do
-it earlier and the phone's database either silently drops the original's row or refuses the
-write and aborts the whole sync batch.
+> A replacement may be handed the original's checksum only while **no other asset of the
+> same owner holds that checksum**.
 
-That is what the **gate** is. Every replacement in the job store carries an
-`original_freed_at` timestamp, empty until the original stops existing. Until it is set,
-the shim passes that asset's lines through untouched.
+Get it wrong and the phone's database either silently drops the other row or refuses the
+write and aborts the whole sync batch — not the one line, the batch, and the sync stops
+making progress because the failure comes before the checkpoint is acked.
+
+Two different assets can be that other holder, and the shim waits for both.
+
+**The original itself**, until it is really gone — even while it sits in the trash, its row
+is still there holding the checksum. That is what the **gate** is: every replacement in the
+job store carries an `original_freed_at` timestamp, empty until the original stops
+existing, and until it is set the shim passes that asset's lines through untouched.
+
+**A copy the device uploaded again**, after the gate opened. That one is below.
 
 ## How the gate opens
 
@@ -68,6 +75,44 @@ Both paths count the same two things — `shim_gates_opened_total` when the gate
 `shim_touches_total` when the no-op update lands. Which of the two saw it is not in the
 counters and does not need to be. A deployment that switched `delete_mode` can have both
 observe the same original; the gate is first-write-wins, so it is still counted once.
+
+## When the checksum comes back
+
+An open gate says the original is gone. It does not say the checksum is free for ever, and
+those are not the same claim.
+
+A device that still holds the file uploads it again — that is the whole situation this page
+exists for, and it keeps happening for every file the shim was not yet in front of. Immich
+accepts the upload, because at that moment nothing holds the hash. The result is a **new
+asset carrying the original's checksum**. This service recognises it and stops there:
+`re_uploaded` deletes nothing and changes nothing, by design. So the checksum is live
+again, under a new id, while the gate for the replacement is still open.
+
+Translating now breaks the rule exactly as badly as translating too early. It has been seen
+on a real device:
+
+```
+Error: updateAssetsV2 - user
+SqliteException(2067): UNIQUE constraint failed:
+  remote_asset_entity.owner_id, remote_asset_entity.checksum
+```
+
+and the sync then stopped advancing at all, because the batch dies before its ack and the
+server re-sends the same batch.
+
+So the shim holds that translation back for as long as the returned copy exists. **This
+costs the user nothing**: while the copy is there it is itself the match the phone is
+looking for, so the local file is not a backup candidate anyway. The prevention the shim
+provides is already being provided by the duplicate.
+
+When the copy is deleted in turn, its delete goes past on the same sync stream. The shim
+records it against that copy's own job row, makes the same no-op update on the replacement,
+and the translation is armed again — otherwise removing the duplicate would simply start
+the upload cycle over.
+
+Nothing here is counted, because nothing happened. It is logged instead, on the line that
+says how many translations are currently held back, and it changes only when the number
+changes.
 
 ### Why a no-op update is needed at all
 
@@ -178,6 +223,10 @@ Do these in order. Each step is readable in `immich-compressor report` and at `/
 after the shim is live it should stop rising. Whatever still arrives names a client the
 shim is not in front of.
 
+There is no counter for a translation held back by a returned copy, because nothing
+happens when one is: the log line naming the current number is the place to look, and the
+script in [upgrading.md](upgrading.md) is how to check the library rather than the record.
+
 ## Limits
 
 - **Coverage follows routing.** A client that reaches Immich directly — over the LAN, over
@@ -192,7 +241,14 @@ shim is not in front of.
   like it should have caught. Grant `user.read` to any key whose uploads you want covered.
 - **No retroactive fix.** Replacements made before the ledger shipped in 1.4.0 carry no
   record of what their original hashed to, and for an original that is already permanently
-  deleted that value cannot be recovered. The shim is complete from 1.4.0 onwards.
+  deleted that value cannot be recovered. Those replacements are never translated.
+- **A returned copy suppresses a translation only if this service saw it arrive.** The
+  recognition is a `re_uploaded` job row, so a copy that came in while the service was
+  stopped — or one the ingest guards refused before any row was written, a disabled asset
+  type for instance — holds the checksum without leaving a record that says so. The
+  translation for that checksum is then made while the copy is live, which is the collision
+  above. [upgrading.md](upgrading.md) has a read-only script that lists any of these against
+  your own library.
 - **The job store becomes load-bearing.** The translation is rebuilt from it every minute.
   Lose the database and the next update to a replaced asset sends its real checksum, the
   phone's mirror corrects itself, and the re-upload happens. Back it up.

@@ -17,7 +17,16 @@ from typing import Any, Self
 
 import aiosqlite
 
-from .models import TERMINAL_STATES, BackfillCandidate, Job, JobState, LedgerEntry, PauseState, SkipReason
+from .models import (
+    TERMINAL_STATES,
+    BackfillCandidate,
+    Job,
+    JobState,
+    LedgerEntry,
+    PauseState,
+    ReturnedOriginal,
+    SkipReason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +149,10 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     # back as a new asset can be recognised instead of compressed a second time.
     ("source_checksum", "TEXT"),
     ("owner_id", "TEXT"),
-    # The shim's gate. Set once, when the original stops existing on the server; until
-    # then the replacement must not be handed the original's checksum. See `LedgerEntry`.
+    # Set once, when the asset this row is about stops existing on the server. On a
+    # replacement's row that is the shim's gate opening; on a `re_uploaded` row it is the
+    # returned copy going, which frees the checksum it was holding. Both readings are the
+    # same fact. See `LedgerEntry` and `ReturnedOriginal`.
     ("original_freed_at", "TEXT"),
 )
 
@@ -504,20 +515,55 @@ class JobStore:
             for row in rows
         ]
 
-    async def mark_original_freed(self, source_asset_id: str, *, when: datetime | None = None) -> bool:
-        """Open the gate for one replacement. Returns ``False`` when it already was.
+    async def returned_originals(self) -> list[ReturnedOriginal]:
+        """Assets that brought a replaced original's checksum back, and are still here.
 
-        First write wins. The two callers reach this from opposite directions — the
-        pipeline right after a ``permanent`` delete it performed itself, the shim when it
-        sees the purge for a trashed original go past on the sync stream — and on a
-        deployment that switched ``delete_mode`` both can fire for the same row. The
-        timestamp is only ever read as "is this set", so the earlier one is the honest one
-        to keep.
+        The other half of what the shim's maps are built from, and the reason
+        `ledger_entries` alone is not enough. `_check_re_upload` parks a returning file at
+        ``re_uploaded`` and deliberately leaves it alone, so its checksum — which is some
+        replacement's ``source_checksum`` — is live on the server again under a new id. A
+        translation for that checksum has to wait for this row's own asset to go, and
+        ``original_freed_at`` is where that is recorded, meaning here exactly what it means
+        on a ledger row.
+
+        Not filtered by state: a row carrying this reason is skipped by construction, and
+        the direction to err in is suppressing a translation that would have been safe
+        rather than making one that is not.
+        """
+        async with self._conn.execute(
+            "SELECT source_asset_id, owner_id, source_checksum FROM jobs "
+            "WHERE skip_reason = ? AND source_checksum IS NOT NULL AND owner_id IS NOT NULL "
+            "AND original_freed_at IS NULL",
+            (SkipReason.RE_UPLOADED.value,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            ReturnedOriginal(
+                asset_id=row["source_asset_id"],
+                owner_id=row["owner_id"],
+                checksum=row["source_checksum"],
+            )
+            for row in rows
+        ]
+
+    async def mark_original_freed(self, source_asset_id: str, *, when: datetime | None = None) -> bool:
+        """Record that this asset has stopped existing. Returns ``False`` when it already had.
+
+        First write wins. Three callers reach it, and the first two arrive from opposite
+        directions at the same row — the pipeline right after a ``permanent`` delete it
+        performed itself, the shim when it sees the purge for a trashed original go past on
+        the sync stream — so on a deployment that switched ``delete_mode`` both can fire for
+        one replacement. The timestamp is only ever read as "is this set", so the earlier
+        one is the honest one to keep.
+
+        The third is the shim seeing a delete for a `ReturnedOriginal`, whose row is not a
+        replacement at all. Same column, same meaning, different consequence: no gate opens,
+        a suppressed translation is re-armed instead.
 
         This return value is also what keeps `SHIM_GATES_OPENED` and `SHIM_TOUCHES` honest:
-        both callers count both events, and both stop on a ``False`` from here. So the one
-        row cannot be counted twice even when the shim's ledger is up to a refresh interval
-        behind the delete the pipeline just performed.
+        every caller stops on a ``False`` from here, so one row cannot be counted twice even
+        when the shim's ledger is up to a refresh interval behind the delete the pipeline
+        just performed.
         """
         async with self._conn.execute(
             "UPDATE jobs SET original_freed_at = ?, updated_at = ? "

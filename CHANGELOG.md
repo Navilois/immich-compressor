@@ -143,6 +143,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The shim no longer hands out a checksum that a re-upload has brought back to life.**
+  Its gate answers "was the original observed to be gone?", once and for ever. The rule the
+  app's mirror actually enforces is narrower — one row per `(owner, checksum)` — and an
+  original that a device uploads again after the gate opened puts that checksum back on the
+  server under a new id. The pipeline recognises the returning file and, by design, leaves
+  it alone: `re_uploaded` deletes nothing. So the checksum was live again while the shim
+  went on presenting it for the replacement, and a device syncing both met
+  `SqliteException(2067): UNIQUE constraint failed: remote_asset_entity.owner_id,
+  remote_asset_entity.checksum` — which aborts the whole batch before its checkpoint is
+  acked, so the same batch arrives again and the device stops making progress at all.
+
+  The ledger now reads the `re_uploaded` rows alongside the replacements and holds back any
+  translation whose checksum another live asset of the same owner is holding. That costs
+  nothing while it lasts: the returning copy is itself the match the device is looking for,
+  so the local file is not a backup candidate anyway. When that copy is deleted in turn, the
+  shim sees the delete on the same stream, records it in the same `original_freed_at`
+  column — which has always meant "the asset this row is about is gone" — makes the same
+  no-op update, and the translation is armed again.
+
+  `shim_gates_opened_total` deliberately does not move for any of this: no gate opens, so
+  counting one would overstate the number of originals this service has seen go. The no-op
+  update is counted as `shim_touches_total`, because that is what it is. The
+  `bulk-upload-check` direction is not held back either, and that asymmetry is intended —
+  it rewrites a question rather than a mirror row, and while the copy is live Immich answers
+  `duplicate` to either form of it.
+
+  `tests/test_app_mirror.py` replays this through Immich's own mobile schema: both failure
+  orderings — the batch aborted, and the quieter one where `INSERT OR REPLACE` destroys the
+  other row without an error — and the suppression that prevents them.
+
 - **The shim no longer relays Immich's `Date`, which arrived as a duplicate.** Uvicorn writes
   its own `Date` and `Server` and appends the application's rather than replacing them, so
   every proxied response carried two `Date` headers whose values disagreed by a second —

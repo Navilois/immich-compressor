@@ -18,7 +18,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from immich_compressor.models import LedgerEntry
+from immich_compressor.models import LedgerEntry, ReturnedOriginal, SkipReason
 from immich_compressor.shim import (
     ChecksumLedger,
     OwnerResolver,
@@ -44,6 +44,9 @@ REPLACEMENT_HASH = "z9K1aQq0PPnB1sVXhF2mQ7t0abc="
 OWNER = "11111111-1111-4111-8111-111111111111"
 ORIGINAL_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 REPLACEMENT_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+# The original, uploaded a second time by a device that still held the file. A new id, and
+# `ORIGINAL_HASH` live on the server again.
+COPY_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 
 PAYLOAD = {"type": "AssetV1", "trigger": "AssetMetadataExtraction", "data": {"asset": {"id": "a"}}}
 
@@ -59,6 +62,12 @@ def entry(*, freed: bool) -> LedgerEntry:
         new_checksum=REPLACEMENT_HASH,
         original_freed_at=datetime.now(UTC) if freed else None,
     )
+
+
+def returned(
+    asset_id: str = COPY_ID, *, checksum: str = ORIGINAL_HASH, owner: str = OWNER
+) -> ReturnedOriginal:
+    return ReturnedOriginal(asset_id=asset_id, owner_id=owner, checksum=checksum)
 
 
 def asset_line(asset_id: str = REPLACEMENT_ID, checksum: str = REPLACEMENT_HASH) -> bytes:
@@ -186,6 +195,101 @@ def test_translate_off_leaves_an_open_gate_untranslated() -> None:
     assert rewrite_sync_line(line, maps, translate=False).data == line
 
 
+# ------------------------------------------------------- the original, back on a new id
+
+
+def test_a_returned_original_suppresses_the_translation() -> None:
+    """The second way to break the one invariant, and the reason the gate is not enough.
+
+    The gate opened honestly: the original really was deleted. Then a device that still had
+    the file put it back, the pipeline recognised it and — correctly — left it alone, and
+    the checksum is live again on a new id. Handing it to the replacement now puts two rows
+    in the phone's mirror under one unique key.
+    """
+    maps = TranslationMaps.build([entry(freed=True)], [returned()])
+    line = asset_line()
+
+    assert maps.sync_rewrite == {}
+    assert maps.suppressed == 1
+    outcome = rewrite_sync_line(line, maps)
+    assert outcome.rewritten is False
+    assert outcome.data == line
+
+
+def test_a_returned_original_of_another_owner_does_not_suppress() -> None:
+    """The index is on ``(owner_id, checksum)``, and so is the suppression."""
+    other = returned(owner="99999999-9999-4999-8999-999999999999")
+    maps = TranslationMaps.build([entry(freed=True)], [other])
+    assert maps.sync_rewrite == {REPLACEMENT_ID: ORIGINAL_HASH}
+    assert maps.suppressed == 0
+
+
+def test_a_returned_original_of_another_checksum_does_not_suppress() -> None:
+    maps = TranslationMaps.build([entry(freed=True)], [returned(checksum="something-else=")])
+    assert maps.sync_rewrite == {REPLACEMENT_ID: ORIGINAL_HASH}
+    assert maps.suppressed == 0
+
+
+def test_a_suppressed_entry_is_in_neither_the_rewrite_nor_the_delete_watch() -> None:
+    """Its gate is open and stays open. What it waits on now is the copy, not the original."""
+    maps = TranslationMaps.build([entry(freed=True)], [returned()])
+    assert maps.sync_rewrite == {}
+    assert maps.delete_watch == {}
+    assert maps.claim_watch == {COPY_ID: [REPLACEMENT_ID]}
+
+
+def test_a_closed_gate_with_a_returned_original_still_watches_both() -> None:
+    """A re-upload can arrive before the purge does — on `trash`, up to 30 days before.
+
+    The delete watch has to survive it, or the gate never opens at all; and the copy has to
+    be watched even though it currently blocks nothing, so that the gate opening later does
+    not walk straight into the collision.
+    """
+    maps = TranslationMaps.build([entry(freed=False)], [returned()])
+    assert set(maps.delete_watch) == {ORIGINAL_ID}
+    assert maps.claim_watch == {COPY_ID: []}
+    assert maps.suppressed == 0
+
+
+def test_the_delete_of_a_returned_original_releases_its_claim() -> None:
+    maps = TranslationMaps.build([entry(freed=True)], [returned()])
+    line = delete_line(COPY_ID)
+    outcome = rewrite_sync_line(line, maps)
+
+    assert outcome.data == line, "a delete is never rewritten"
+    assert outcome.claims_released == (COPY_ID,)
+    assert outcome.gate_opens == ()
+
+
+def test_a_delete_of_an_unrelated_asset_releases_nothing() -> None:
+    maps = TranslationMaps.build([entry(freed=True)], [returned()])
+    outcome = rewrite_sync_line(delete_line("cccccccc-cccc-4ccc-8ccc-cccccccccccc"), maps)
+    assert outcome.claims_released == ()
+
+
+def test_a_delete_without_a_string_asset_id_is_forwarded_untouched() -> None:
+    line = json.dumps({"type": "AssetDeleteV1", "data": {"assetId": None}}).encode() + b"\n"
+    outcome = rewrite_sync_line(line, TranslationMaps.build([entry(freed=True)], [returned()]))
+    assert outcome.data == line
+    assert outcome.gate_opens == () and outcome.claims_released == ()
+
+
+def test_upload_check_is_not_suppressed_by_a_returned_original() -> None:
+    """The asymmetry, on purpose. This direction rewrites a *question*, not a mirror row.
+
+    With the copy live, Immich answers ``duplicate`` whichever hash is asked about, so the
+    translation changes nothing and costs nothing. Gating it here would only make the two
+    directions differ for no reason.
+    """
+    maps = TranslationMaps.build([entry(freed=True)], [returned()])
+    body = json.dumps({"assets": [{"id": "local-1", "checksum": ORIGINAL_HASH}]}).encode()
+
+    forwarded, translated = translate_upload_check(body, OWNER, maps)
+
+    assert translated == 1
+    assert json.loads(forwarded)["assets"][0]["checksum"] == REPLACEMENT_HASH
+
+
 # ------------------------------------------------------------------- the upload check
 
 
@@ -228,7 +332,7 @@ def test_upload_check_survives_a_malformed_body(body: bytes) -> None:
 # ------------------------------------------------------------------------- the ledger
 
 
-async def seeded_store(path: Path, *, freed: bool) -> JobStore:
+async def seeded_store(path: Path, *, freed: bool, came_back: bool = False) -> JobStore:
     store = JobStore(path)
     await store.open()
     await store.enqueue(ORIGINAL_ID, PAYLOAD, delay_seconds=0)
@@ -241,6 +345,12 @@ async def seeded_store(path: Path, *, freed: bool) -> JobStore:
     )
     if freed:
         await store.mark_original_freed(ORIGINAL_ID)
+    if came_back:
+        # Exactly what `_check_re_upload` leaves behind: the returning asset's own row,
+        # carrying the original's checksum, skipped and otherwise untouched.
+        await store.enqueue(COPY_ID, PAYLOAD, delay_seconds=0)
+        await store.update(COPY_ID, source_checksum=ORIGINAL_HASH, owner_id=OWNER)
+        await store.mark_skipped(COPY_ID, SkipReason.RE_UPLOADED)
     return store
 
 
@@ -269,6 +379,23 @@ async def test_ledger_invalidate_forces_a_reload(tmp_path: Path) -> None:
         ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
         await ledger.maps()
         await store.mark_original_freed(ORIGINAL_ID)
+        ledger.invalidate()
+        assert (await ledger.maps()).sync_rewrite == {REPLACEMENT_ID: ORIGINAL_HASH}
+    finally:
+        await store.close()
+
+
+async def test_ledger_reads_the_returned_originals_too(tmp_path: Path) -> None:
+    """Both halves come from the same refresh, so they can never disagree by an interval."""
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    try:
+        ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
+        maps = await ledger.maps()
+        assert maps.sync_rewrite == {}
+        assert maps.claim_watch == {COPY_ID: [REPLACEMENT_ID]}
+
+        # The copy goes; the translation it was holding back comes back on the next load.
+        await store.mark_original_freed(COPY_ID)
         ledger.invalidate()
         assert (await ledger.maps()).sync_rewrite == {REPLACEMENT_ID: ORIGINAL_HASH}
     finally:
@@ -502,6 +629,121 @@ async def test_a_gate_the_pipeline_already_opened_is_counted_once(tmp_path: Path
         counters = await store.counters()
         assert counters[SHIM_GATES_OPENED] == 0
         assert counters[SHIM_TOUCHES] == 0
+        assert touched == []
+    finally:
+        await store.close()
+
+
+async def test_the_route_does_not_translate_while_the_copy_holds_the_checksum(tmp_path: Path) -> None:
+    """The bug this exists to prevent, at the level a client would meet it.
+
+    An open gate and a returned original together: the shim used to hand the checksum over
+    anyway, and the phone's next batch died on ``UNIQUE constraint failed:
+    remote_asset_entity.owner_id, remote_asset_entity.checksum``.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    upstream = Upstream()
+    upstream.lines = [asset_line()]
+    app, _, _ = build(store, upstream)
+    try:
+        with TestClient(app) as http:
+            response = http.post("/api/sync/stream", json={})
+
+        assert response.content == asset_line(), "byte-identical, not merely equivalent"
+        counters = await store.counters()
+        assert counters[SHIM_LINES_REWRITTEN] == 0
+        assert counters[SHIM_HASHES_TRANSLATED] == 0
+    finally:
+        await store.close()
+
+
+async def test_the_route_releases_a_claim_and_touches_what_it_unblocked(tmp_path: Path) -> None:
+    """The re-arm, end to end: the copy is deleted, the replacement is re-offered.
+
+    Without the touch this would be inert for exactly the reason `_open_gates` needs one —
+    nothing has changed about the replacement, so it would never be sent again and the
+    translation would never reach the device.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    upstream = Upstream()
+    upstream.lines = [delete_line(COPY_ID)]
+    app, _, touched = build(store, upstream)
+    try:
+        with TestClient(app) as http:
+            response = http.post("/api/sync/stream", json={})
+        assert response.content == delete_line(COPY_ID)
+
+        copy = await store.get(COPY_ID)
+        assert copy is not None and copy.original_freed_at is not None
+        assert touched == [REPLACEMENT_ID]
+        counters = await store.counters()
+        assert counters[SHIM_TOUCHES] == 1
+        # No gate opens here. The original's gate opened when the original died; this only
+        # lifts what was standing on top of it, and counting it twice would overstate the
+        # number of originals this service has seen go.
+        assert counters[SHIM_GATES_OPENED] == 0
+
+        assert (await store.returned_originals()) == []
+    finally:
+        await store.close()
+
+
+async def test_a_claim_already_released_is_not_touched_twice(tmp_path: Path) -> None:
+    """First-write-wins, from the second observer's side.
+
+    Two devices sync at once and both see the same delete go past. Whichever gets there
+    second is holding maps built before the release, so it still believes the copy is live —
+    and must count nothing and touch nothing, or one deleted copy reads as two.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    upstream = Upstream()
+    upstream.lines = [delete_line(COPY_ID)]
+    app, deps, touched = build(store, upstream)
+    try:
+        # A ledger that has read the suppression and will not look again for an hour.
+        deps.ledger = ChecksumLedger(store, 3600.0, clock=lambda: 0.0)
+        assert (await deps.ledger.maps()).claim_watch == {COPY_ID: [REPLACEMENT_ID]}
+        await store.mark_original_freed(COPY_ID)  # what the other stream just did
+
+        with TestClient(app) as http:
+            assert http.post("/api/sync/stream", json={}).status_code == 200
+        assert touched == []
+        assert (await store.counters())[SHIM_TOUCHES] == 0
+    finally:
+        await store.close()
+
+
+async def test_a_failing_touch_still_leaves_the_claim_released(tmp_path: Path) -> None:
+    """The record is the durable part; the re-offer is best effort, as it is for a gate."""
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    upstream = Upstream()
+    upstream.lines = [delete_line(COPY_ID)]
+    app, deps, _ = build(store, upstream)
+
+    async def explode(asset_id: str) -> None:
+        raise RuntimeError("immich said no")
+
+    deps.touch = explode
+    try:
+        with TestClient(app) as http:
+            assert http.post("/api/sync/stream", json={}).status_code == 200
+        copy = await store.get(COPY_ID)
+        assert copy is not None and copy.original_freed_at is not None
+        assert (await store.counters())[SHIM_TOUCHES] == 0
+    finally:
+        await store.close()
+
+
+async def test_log_only_does_not_release_a_claim(tmp_path: Path) -> None:
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    upstream = Upstream()
+    upstream.lines = [delete_line(COPY_ID)]
+    app, _, touched = build(store, upstream, log_only=True)
+    try:
+        with TestClient(app) as http:
+            http.post("/api/sync/stream", json={})
+        copy = await store.get(COPY_ID)
+        assert copy is not None and copy.original_freed_at is None
         assert touched == []
     finally:
         await store.close()

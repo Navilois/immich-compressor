@@ -563,6 +563,67 @@ async def test_mark_original_freed_ignores_an_unknown_asset(tmp_path: Path) -> N
         assert await store.mark_original_freed("never-heard-of-it") is False
 
 
+async def _returned(store: JobStore, asset_id: str, *, checksum: str | None, owner: str | None) -> None:
+    """A `re_uploaded` row: the same bytes back again, recognised and left alone."""
+    await store.enqueue(asset_id, PAYLOAD, delay_seconds=0)
+    await store.update(asset_id, source_checksum=checksum, owner_id=owner)
+    await store.mark_skipped(asset_id, SkipReason.RE_UPLOADED)
+
+
+async def test_returned_originals_lists_only_the_ones_still_holding_a_checksum(tmp_path: Path) -> None:
+    """Four ways not to qualify, one way to qualify.
+
+    A row only suppresses a translation while it can actually hold the checksum: it has to
+    name one, it has to name an owner, it has to be the reason that never deletes anything,
+    and its own asset has to still exist.
+    """
+    async with JobStore(tmp_path / "s.db") as store:
+        await _returned(store, "came-back", checksum=LEDGER_HASH, owner=LEDGER_OWNER)
+        await _returned(store, "no-checksum", checksum=None, owner=LEDGER_OWNER)
+        await _returned(store, "no-owner", checksum="x=", owner=None)
+        await _returned(store, "gone-since", checksum="y=", owner=LEDGER_OWNER)
+        await store.mark_original_freed("gone-since")
+        # A different skip reason is a different situation and holds nothing back.
+        await store.enqueue("too-small", PAYLOAD, delay_seconds=0)
+        await store.update("too-small", source_checksum="z=", owner_id=LEDGER_OWNER)
+        await store.mark_skipped("too-small", SkipReason.TOO_SMALL)
+
+        returned = await store.returned_originals()
+        assert [(r.asset_id, r.owner_id, r.checksum) for r in returned] == [
+            ("came-back", LEDGER_OWNER, LEDGER_HASH)
+        ]
+
+
+async def test_a_returned_original_is_never_also_a_ledger_entry(tmp_path: Path) -> None:
+    """The two reads the shim's maps are built from cannot describe the same row.
+
+    A ledger row carries a replacement; a re-upload is recognised before anything is made,
+    so it carries none. That is what keeps one asset id out of both watches, and it is why
+    ``original_freed_at`` can mean "this asset is gone" on either without ambiguity.
+    """
+    async with JobStore(tmp_path / "s.db") as store:
+        await _replaced(store, "replaced", checksum=LEDGER_HASH, owner=LEDGER_OWNER)
+        await _returned(store, "came-back", checksum=LEDGER_HASH, owner=LEDGER_OWNER)
+
+        ledger_ids = {entry.source_asset_id for entry in await store.ledger_entries()}
+        returned_ids = {row.asset_id for row in await store.returned_originals()}
+
+        assert ledger_ids == {"replaced"}
+        assert returned_ids == {"came-back"}
+        assert ledger_ids & returned_ids == set()
+
+
+async def test_marking_a_returned_original_gone_drops_it_from_the_list(tmp_path: Path) -> None:
+    """The re-arm, at the storage layer. Same column, same first-write-wins."""
+    async with JobStore(tmp_path / "s.db") as store:
+        await _returned(store, "came-back", checksum=LEDGER_HASH, owner=LEDGER_OWNER)
+        assert len(await store.returned_originals()) == 1
+
+        assert await store.mark_original_freed("came-back") is True
+        assert await store.returned_originals() == []
+        assert await store.mark_original_freed("came-back") is False
+
+
 async def test_shim_counters_are_zero_filled(tmp_path: Path) -> None:
     """ "0 requests" is a diagnosis — it means the reverse proxy is not routing to us."""
     async with JobStore(tmp_path / "s.db") as store:

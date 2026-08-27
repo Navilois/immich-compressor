@@ -73,6 +73,85 @@ zero until the routes are mounted. `shim_touches_total` is the pair to read agai
 gates ahead of touches means the translation is armed but is not being delivered — expected
 while `shim.rewrite_sync_stream` is still `false`, worth investigating once it is `true`.
 
+### If a device's sync is failing on a UNIQUE constraint
+
+**Only concerns a deployment that ran `main` with `shim.rewrite_sync_stream: true` and has
+had originals uploaded back to it.** With the shim off, or with nothing re-uploaded, there
+is nothing here to do.
+
+The symptom is a device that stops syncing entirely, with:
+
+```
+Error: updateAssetsV2 - user
+SqliteException(2067): UNIQUE constraint failed:
+  remote_asset_entity.owner_id, remote_asset_entity.checksum
+```
+
+repeating every few seconds on the same batch. The batch fails before it acknowledges its
+checkpoint, so the server sends it again, and the device mirrors nothing new and backs up
+nothing new for as long as it lasts.
+
+The cause is the one described under [When the checksum comes
+back](shim.md#when-the-checksum-comes-back): a device put an original back after its gate
+had opened, and the shim went on presenting that same checksum for the replacement.
+**Upgrading is the whole fix.** The shim stops presenting a checksum another live asset
+holds, the next batch applies, and no asset has to be deleted for that to happen.
+
+To see whether your library has any — read-only, safe with the service running. It asks
+`immich.base_url`, which is Immich itself and not the proxied path, so the answer is
+Immich's and not the shim's:
+
+```bash
+docker compose exec immich-compressor python3 -c "
+import json, sqlite3, urllib.request
+from immich_compressor.config import load_settings
+settings = load_settings().immich
+key, base = settings.api_key.get_secret_value(), settings.base_url
+db = sqlite3.connect('file:/var/lib/immich-compressor/state.db?mode=ro', uri=True)
+rows = db.execute('SELECT source_checksum, new_asset_id FROM jobs '
+                  'WHERE source_checksum IS NOT NULL AND new_asset_id IS NOT NULL '
+                  'AND owner_id IS NOT NULL AND original_freed_at IS NOT NULL').fetchall()
+by_checksum = {}
+for checksum, new_id in rows: by_checksum.setdefault(checksum, []).append(new_id)
+checksums, live = list(by_checksum), []
+for i in range(0, len(checksums), 500):
+    batch = checksums[i:i + 500]
+    body = json.dumps({'assets': [{'id': c, 'checksum': c} for c in batch]}).encode()
+    req = urllib.request.Request(base + '/assets/bulk-upload-check', data=body, method='POST',
+                                 headers={'x-api-key': key, 'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=120) as response: out = json.load(response)
+    for result in out['results']:
+        if result.get('assetId'): live.append((result['id'], result['assetId']))
+print('open gates:', len(rows), '| collisions:', len(live))
+for checksum, asset_id in live:
+    print(' ', checksum, 'is live again as', asset_id, '-> was presented for', by_checksum[checksum])
+"
+```
+
+A healthy library prints `collisions: 0`. Anything above zero is a device whose sync is
+about to break or already has, and after the upgrade each of those translations is simply
+held back instead.
+
+**Removing the duplicates is optional, and it is what reclaims the space.** They are exact
+copies of originals this service already replaced, so nothing unique is in them — but that
+is a judgement about your library and not one this page can make for you, and on
+`delete_mode: permanent` there is no way back. If you do remove them, delete them
+*permanently*: the shim re-arms each translation when it sees that asset's delete go past on
+a sync stream, and only a permanent delete produces one. A duplicate moved to the trash
+keeps its row and its checksum in the mirror, so the translation correctly stays held back —
+that is behaviour of the app's own schema, reproduced in `tests/test_app_mirror.py`, not
+something measured against a device.
+
+Two things are worth knowing before you do:
+
+- The re-arm needs a client to actually sync through the shim, because that is where the
+  delete is seen. Nothing is lost if none does; the translation is armed the next time one
+  does.
+- Whether the first batch after a cleanup applies cleanly has not been established — the
+  delete for the duplicate and the upsert for the replacement can land in one batch, and
+  their order within it was not checked. A batch that fails once and succeeds on the retry
+  is harmless.
+
 ### If you already ran the unreleased permanent-delete build
 
 **Only concerns a deployment that ran `main` between the shim landing and this fix, with

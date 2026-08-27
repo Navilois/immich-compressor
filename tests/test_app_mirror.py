@@ -8,6 +8,11 @@ in this repository checks that the gate is *consulted*. This one checks that the
 *right* — that an open gate produces an upsert the app accepts, and that a closed one is
 the only thing standing between a user and a broken sync.
 
+The original's row is not the only thing that can hold the checksum, and the second half of
+this file is about the other one: a copy the device uploaded again after the gate opened.
+The pipeline recognises it and leaves it alone, so it sits there holding the hash under a
+new id, and a translation that only consults the gate walks straight into the same index.
+
 It needs no live Immich and no phone. The mirror is a SQLite database built from Immich's
 own schema, driven by the same three operations the app performs, so the damage a premature
 translation would do happens here instead of on someone's device.
@@ -45,7 +50,7 @@ from typing import Any
 
 import pytest
 
-from immich_compressor.models import LedgerEntry
+from immich_compressor.models import LedgerEntry, ReturnedOriginal
 from immich_compressor.shim import TranslationMaps, rewrite_sync_line
 
 OWNER = "11111111-1111-4111-8111-111111111111"
@@ -53,6 +58,9 @@ OTHER_OWNER = "22222222-2222-4222-8222-222222222222"
 ORIGINAL_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 REPLACEMENT_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 UNRELATED_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+# The original, uploaded again by a device that still held the file. Its checksum really is
+# `ORIGINAL_HASH`; nothing about it is a translation.
+COPY_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 
 # Base64 SHA-1, the shape Immich actually puts on the wire.
 ORIGINAL_HASH = "02MpaJkpzGHNbGwxWtencVNK7uY="
@@ -269,9 +277,15 @@ class Mirror:
         return row is None
 
 
-def translate(line: bytes, entries: list[LedgerEntry]) -> bytes:
-    """The shim's own rewrite, driven by a ledger built the way the shim builds it."""
-    return rewrite_sync_line(line, TranslationMaps.build(entries)).data
+def came_back(asset_id: str = COPY_ID, checksum: str = ORIGINAL_HASH) -> ReturnedOriginal:
+    return ReturnedOriginal(asset_id=asset_id, owner_id=OWNER, checksum=checksum)
+
+
+def translate(
+    line: bytes, entries: list[LedgerEntry], returned: list[ReturnedOriginal] | None = None
+) -> bytes:
+    """The shim's own rewrite, driven by maps built the way the shim builds them."""
+    return rewrite_sync_line(line, TranslationMaps.build(entries, returned or [])).data
 
 
 @pytest.fixture
@@ -432,3 +446,115 @@ def test_the_gate_is_the_only_thing_preventing_both(mirror: Mirror) -> None:
 
     with pytest.raises(sqlite3.IntegrityError):
         mirror.apply(translate(line, [ledger(freed=True)]))
+
+
+# --------------------------------------------------------------------------------------
+# The original, back on a new id.
+#
+# Everything above assumes that once the original's row is gone the checksum stays gone.
+# It does not: the device that still holds the file uploads it again, Immich accepts it
+# because nothing holds the hash any more, and the pipeline stops at `re_uploaded` without
+# deleting anything. Two rows want one unique key again, and the gate — set once, months
+# ago — says nothing about it.
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def settled(mirror: Mirror) -> Mirror:
+    """What the shim was aiming for: the original gone, the replacement holding its hash."""
+    mirror.apply(translate(delete_line(ORIGINAL_ID), [ledger(freed=False)]))
+    mirror.apply(translate(asset_line(REPLACEMENT_ID, REPLACEMENT_HASH), [ledger(freed=True)]))
+    return mirror
+
+
+def mirrored_both() -> Mirror:
+    """A device that has seen the replacement and the returned copy, each with its own hash."""
+    m = Mirror()
+    m.apply(asset_line(REPLACEMENT_ID, REPLACEMENT_HASH), asset_line(COPY_ID, ORIGINAL_HASH))
+    return m
+
+
+def test_the_returned_copy_lands_on_top_of_a_finished_translation(settled: Mirror) -> None:
+    """Failure mode one, and the quiet one — no exception anywhere.
+
+    The copy's line is not a translation and the shim does not touch it. It carries a new
+    ``id``, so there is nothing to conflict on there, ``OR REPLACE`` resolves the checksum
+    index by deleting the row that held it, and the replacement disappears from the mirror
+    while it is very much alive on the server.
+    """
+    assert settled.holders_of(ORIGINAL_HASH) == [REPLACEMENT_ID]
+
+    settled.apply(asset_line(COPY_ID, ORIGINAL_HASH))
+
+    assert settled.checksum_of(REPLACEMENT_ID) is None, "the replacement's row was destroyed"
+    assert settled.holders_of(ORIGINAL_HASH) == [COPY_ID]
+
+
+def test_the_touched_replacement_aborts_the_batch_once_the_copy_is_mirrored() -> None:
+    """Failure mode two, and the one that was reported from a device.
+
+    ``SqliteException(2067): UNIQUE constraint failed: remote_asset_entity.owner_id,
+    remote_asset_entity.checksum`` on ``updateAssetsV2``. The no-op update that re-offers
+    the replacement is what puts the line back on the stream; translating it while the copy
+    holds the hash is what kills the batch, healthy lines included.
+    """
+    m = mirrored_both()
+    healthy = asset_line(UNRELATED_ID, UNRELATED_HASH)
+    forced = asset_line(REPLACEMENT_ID, ORIGINAL_HASH)
+
+    with pytest.raises(sqlite3.IntegrityError, match="owner_id"):
+        m.apply(healthy, forced)
+
+    assert m.checksum_of(UNRELATED_ID) is None, "the whole batch rolled back, healthy line included"
+    assert m.holders_of(ORIGINAL_HASH) == [COPY_ID]
+
+
+def test_knowing_about_the_copy_is_the_only_thing_preventing_both() -> None:
+    """The same open gate, the same line, the same mirror. Only the second input differs."""
+    m = mirrored_both()
+    line = asset_line(REPLACEMENT_ID, REPLACEMENT_HASH)
+
+    ungated = translate(line, [ledger(freed=True)])
+    assert json.loads(ungated)["data"]["checksum"] == ORIGINAL_HASH
+    with pytest.raises(sqlite3.IntegrityError):
+        m.apply(ungated)
+
+    held_back = translate(line, [ledger(freed=True)], [came_back()])
+    assert held_back == line, "byte-identical while the copy is there"
+    m.apply(held_back)
+
+    assert m.holders_of(ORIGINAL_HASH) == [COPY_ID]
+    assert m.checksum_of(REPLACEMENT_ID) == REPLACEMENT_HASH
+
+
+def test_holding_the_translation_back_costs_the_user_nothing() -> None:
+    """Why waiting is free: the copy is itself the match that stops the upload.
+
+    The translation exists to make ``getCandidates`` find something for the local file.
+    While the returned copy is on the server, it already does.
+    """
+    assert mirrored_both().is_backup_candidate(ORIGINAL_HASH) is False
+
+
+def test_deleting_the_copy_re_arms_the_translation() -> None:
+    """The cleanup an operator performs, and what has to happen after it.
+
+    Removing the duplicate frees the checksum and puts the local file back in the upload
+    queue — so the translation has to come back with it, or the device simply uploads the
+    same bytes again and the whole cycle repeats.
+    """
+    m = mirrored_both()
+    maps = TranslationMaps.build([ledger(freed=True)], [came_back()])
+
+    outcome = rewrite_sync_line(delete_line(COPY_ID), maps)
+    assert outcome.data == delete_line(COPY_ID), "a delete is never rewritten"
+    assert outcome.claims_released == (COPY_ID,)
+
+    m.apply(outcome.data)
+    assert m.is_backup_candidate(ORIGINAL_HASH) is True, "control: the file would upload again"
+
+    # The copy is recorded as gone, so the next rebuild leaves the claim out.
+    m.apply(translate(asset_line(REPLACEMENT_ID, REPLACEMENT_HASH), [ledger(freed=True)]))
+
+    assert m.holders_of(ORIGINAL_HASH) == [REPLACEMENT_ID]
+    assert m.is_backup_candidate(ORIGINAL_HASH) is False
