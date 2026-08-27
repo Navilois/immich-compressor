@@ -133,36 +133,20 @@ def render(
         [_metric("jobs_skipped", count, {"reason": reason}) for reason, count in sorted(by_reason.items())],
     )
 
-    lines += _block(
-        "jobs_total",
-        "Jobs in the store, all states.",
-        "gauge",
-        [_metric("jobs_total", store_stats.get("total", 0))],
-    )
-    lines += _block(
-        "compressed_assets",
-        "Assets with a verified replacement.",
-        "gauge",
-        [_metric("compressed_assets", store_stats.get("compressed_assets", 0))],
-    )
-    lines += _block(
-        "original_bytes",
-        "Total size of the originals that were replaced.",
-        "gauge",
-        [_metric("original_bytes", store_stats.get("original_bytes", 0))],
-    )
-    lines += _block(
-        "compressed_bytes",
-        "Total size of their replacements.",
-        "gauge",
-        [_metric("compressed_bytes", store_stats.get("compressed_bytes", 0))],
-    )
-    lines += _block(
-        "saved_bytes",
-        "Difference between the two. Space is only reclaimed once the original is gone.",
-        "gauge",
-        [_metric("saved_bytes", store_stats.get("saved_bytes", 0))],
-    )
+    # Unlabelled gauges, straight out of the store's own summary: the metric name, the key
+    # it is read from, and what it means. The two only differ for `jobs_total`.
+    for name, source_key, help_text in (
+        ("jobs_total", "total", "Jobs in the store, all states."),
+        ("compressed_assets", "compressed_assets", "Assets with a verified replacement."),
+        ("original_bytes", "original_bytes", "Total size of the originals that were replaced."),
+        ("compressed_bytes", "compressed_bytes", "Total size of their replacements."),
+        (
+            "saved_bytes",
+            "saved_bytes",
+            "Difference between the two. Space is only reclaimed once the original is gone.",
+        ),
+    ):
+        lines += _block(name, help_text, "gauge", [_metric(name, store_stats.get(source_key, 0))])
 
     # Webhook counters, from the database rather than from this process: a mismatched
     # shared secret writes nothing else anywhere, so `rate(webhooks_rejected_total[5m]) > 0`
@@ -208,12 +192,14 @@ def render(
         source_key = name.removesuffix("_total")
         lines += _block(name, help_text, "counter", [_metric(name, counters.get(source_key, 0))])
 
-    # Session counters: reset on restart, which is what a counter is allowed to do.
+    # Session counters: reset on restart, which is what a counter is allowed to do. Keyed
+    # by the field `PipelineStats.as_dict` publishes, which is also the metric's own name.
     for name, help_text in (
         ("processed", "Assets compressed and uploaded since this process started."),
         ("skipped", "Assets skipped since this process started."),
         ("failed", "Jobs that failed since this process started."),
         ("deleted", "Originals removed since this process started."),
+        ("bytes_saved", "Bytes saved since this process started."),
     ):
         lines += _block(
             f"session_{name}_total",
@@ -221,12 +207,6 @@ def render(
             "counter",
             [_metric(f"session_{name}_total", session.get(name, 0))],
         )
-    lines += _block(
-        "session_bytes_saved_total",
-        "Bytes saved since this process started.",
-        "counter",
-        [_metric("session_bytes_saved_total", session.get("bytes_saved", 0))],
-    )
 
     histogram = [
         _metric("encode_duration_seconds_bucket", count, {"le": f"{edge:g}"})
@@ -261,18 +241,13 @@ def render(
 
     # The three settings worth alerting on: a deployment that quietly went live, or one
     # that quietly did not.
-    lines += _block(
-        "config_dry_run",
-        "1 when the service is in dry-run mode and changes nothing.",
-        "gauge",
-        [_metric("config_dry_run", int(bool(config.get("dry_run"))))],
-    )
-    lines += _block(
-        "config_trash_original",
-        "1 when verified originals are removed.",
-        "gauge",
-        [_metric("config_trash_original", int(bool(config.get("trash_original"))))],
-    )
+    for name, source_key, help_text in (
+        ("config_dry_run", "dry_run", "1 when the service is in dry-run mode and changes nothing."),
+        ("config_trash_original", "trash_original", "1 when verified originals are removed."),
+    ):
+        lines += _block(name, help_text, "gauge", [_metric(name, int(bool(config.get(source_key))))])
+    # Not in that loop: this one is a comparison rather than a flag. `delete_mode` is a
+    # word, and only one of its values is the one worth waking somebody up for.
     lines += _block(
         "config_permanent_delete",
         "1 when originals bypass the trash and cannot be restored.",

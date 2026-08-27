@@ -9,7 +9,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from immich_compressor.config import Settings
-from immich_compressor.metrics import CONTENT_TYPE, Histogram, render
+from immich_compressor.metrics import CONTENT_TYPE, PREFIX, Histogram, render
 from immich_compressor.server import create_app
 from immich_compressor.store import JobStore
 
@@ -58,6 +58,48 @@ def test_every_family_declares_its_help_and_type() -> None:
     assert families == helped
     for family in families:
         assert family.startswith("immich_compressor_")
+
+
+def test_the_published_families_are_exactly_these() -> None:
+    """The scrape surface, written down.
+
+    A family is a public interface: dropping or renaming one silently empties whatever
+    dashboard and alert was built on it, and nothing else in this suite would notice —
+    the checks around it all pass on a body that is one family short. This is the list
+    that has to be changed on purpose, in the same commit as the metric.
+    """
+    families = {line.split()[2] for line in _render().splitlines() if line.startswith("# TYPE")}
+    assert families == {
+        f"{PREFIX}_{name}"
+        for name in (
+            "build_info",
+            "jobs",
+            "jobs_skipped",
+            "jobs_total",
+            "compressed_assets",
+            "original_bytes",
+            "compressed_bytes",
+            "saved_bytes",
+            "webhooks_received_total",
+            "webhooks_rejected_total",
+            "shim_requests_total",
+            "shim_lines_rewritten_total",
+            "shim_hashes_translated_total",
+            "shim_gates_opened_total",
+            "shim_touches_total",
+            "shim_passthrough_errors_total",
+            "session_processed_total",
+            "session_skipped_total",
+            "session_failed_total",
+            "session_deleted_total",
+            "session_bytes_saved_total",
+            "encode_duration_seconds",
+            "paused",
+            "config_dry_run",
+            "config_trash_original",
+            "config_permanent_delete",
+        )
+    }
 
 
 def test_the_numbers_come_from_the_store() -> None:
