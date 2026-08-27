@@ -30,34 +30,42 @@ jobs:
       # finding that out after the chore has run and a branch has been pushed is the worst
       # time to find it out. Checked first, before any work.
       #
-      # The read needs no permissions of its own: `GITHUB_TOKEN` reaches this endpoint with
-      # the two scopes above and nothing else. Verified on run 32662877060, which read the
-      # setting, found it off, and stopped in nine seconds with the path to it. An earlier
-      # attempt to ask for `administration: read` here was worse than unnecessary — it is
-      # not a valid scope, so the whole file stopped parsing and `workflow_dispatch`
-      # answered HTTP 422. `scripts/check-workflows.py` now catches that.
+      # Only a *definite* `false` stops the run, and everything else continues. What this
+      # endpoint answers a workflow token has already changed once: on run 32662877060
+      # (2026-08-23) it reported the setting as `false` and this step stopped correctly,
+      # and on run 33064246203 (2026-08-27) it stopped again while the setting was on —
       #
-      # A refused read is still not treated as a failure: an organisation policy can narrow
-      # what the token sees, and guessing from a refusal would turn a working release into a
-      # blocked one. Only a definite `false` fails here. The step that actually needs the
-      # setting reports it either way.
+      #   $ gh api repos/Navilois/immich-compressor/actions/permissions/workflow
+      #   {"default_workflow_permissions":"read","can_approve_pull_request_reviews":true}
+      #
+      # — so 1.4.0 was released by hand. An absent key (which `--jq` prints as `null`), an
+      # empty answer or a refused read are all *not* evidence that the setting is off, and
+      # the old `case` treated every one of them as if it were. An organisation policy can
+      # narrow what the token sees, and guessing from that would keep blocking a release
+      # that would have worked.
+      #
+      # The step says what it read, because the old one did not, and that is why a false
+      # negative could not be told from a real one in the log. The step that actually needs
+      # the setting reports it either way.
+      #
+      # `administration: read` is not the fix: it reads like a scope and is not one, so the
+      # whole file stops parsing and `workflow_dispatch` answers HTTP 422.
+      # `scripts/check-workflows.py` catches that.
       - name: GitHub Actions is allowed to open pull requests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          allowed=$(gh api "repos/$GITHUB_REPOSITORY/actions/permissions/workflow" \
-            --jq .can_approve_pull_request_reviews 2>/dev/null || echo unknown)
-          case "$allowed" in
-            true)
-              ;;
-            unknown)
-              echo "::notice::could not read the setting; continuing, and the last step will report it"
-              ;;
-            *)
-              echo "::error::Settings > Actions > General > Workflow permissions > 'Allow GitHub Actions to create and approve pull requests' is off. This workflow cannot open the release pull request without it."
-              exit 1
-              ;;
-          esac
+          if answer=$(gh api "repos/$GITHUB_REPOSITORY/actions/permissions/workflow" \
+              --jq .can_approve_pull_request_reviews 2>&1); then
+            echo "::notice::can_approve_pull_request_reviews reads as '$answer'"
+          else
+            echo "::notice::could not read the setting: $(echo "$answer" | tr '\n' ' ' | cut -c1-200)"
+            answer=unread
+          fi
+          if [ "$answer" = "false" ]; then
+            echo "::error::Settings > Actions > General > Workflow permissions > 'Allow GitHub Actions to create and approve pull requests' is off. This workflow cannot open the release pull request without it."
+            exit 1
+          fi
       # `next` reads the commits since the newest tag, so it needs them.
       - uses: actions/checkout@v7
         with:
