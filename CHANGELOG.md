@@ -76,6 +76,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **The README leads with the production run and covers the shim.** It opened on
+  `Is this safe?` and carried a five-job sample report, so a visitor met the risk before the
+  result and never saw a number worth the install. It now opens on the measured backfill —
+  22,586 assets, 118.66 GiB reclaimed from a 259 GB library, disk 95 % to 73 % used — with the
+  per-lane table, the refusals, what the run cost and the read-only audit two days later that
+  found no byte-identical pair in 53,855 assets. The safety chain keeps every claim it had and
+  moves below the quickstart, which is where it answers a question the reader is now asking.
+
+  Four things the code has done since 1.3.0 were missing from it entirely: the
+  [shim](docs/shim.md), which had no mention on the page or in the documentation table, the
+  `re_uploaded` recognition in front of it, `transcode_unsupported_audio`, and the surge
+  breaker. The re-upload problem is the objection this project gets asked about most, so it is
+  now its own section with both answers in it. No claim was carried over unverified: the
+  numbers come from the job store's own byte records and the live-API checks recorded with
+  them, and the skip counts are given as an ordering rather than a partition because the
+  per-reason figures and the per-lane totals in that record do not reconcile.
+
 - **`LOG_LEVEL` is documented.** It is the environment override for `log_level` like any
   other setting, but `serve` also reads it *before* it loads the settings, so it is the only
   way to raise or silence the startup lines that explain the encoder decision — a
