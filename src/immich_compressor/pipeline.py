@@ -401,7 +401,17 @@ class Pipeline:
                 logger.info(
                     "upload of %s reported duplicate of %s — leaving original alone", asset_id, upload.id
                 )
-                await self._store.update(asset_id, new_asset_id=upload.id)
+                # With `source_checksum` and `owner_id` already written in step 2, this row
+                # is a full ledger entry the moment `new_asset_id` lands — so the shim will
+                # build a `sync_rewrite` for it either way. `upload_check` is the half that
+                # is built from `new_checksum` alone, and it is the half that matters here:
+                # it is what answers a device asking "do you already have this hash?" during
+                # the window before the rewritten row has reached its mirror.
+                await self._store.update(
+                    asset_id,
+                    new_asset_id=upload.id,
+                    new_checksum=await self._duplicate_checksum(upload.id, result.checksum),
+                )
                 raise SkipJob(SkipReason.DUPLICATE, f"server already has this file as {upload.id}")
 
             new_asset_id = upload.id
@@ -734,6 +744,42 @@ class Pipeline:
             return
         tags = await self._client.upsert_tags(names)
         await self._client.tag_assets([tag.id for tag in tags], [new_asset_id])
+
+    async def _duplicate_checksum(self, new_asset_id: str, encoded: str) -> str | None:
+        """The checksum the server actually holds for the asset it answered ``duplicate`` with.
+
+        Read back, not inferred. ``encoded`` is what *this* run produced, and the two are
+        equal only if Immich's duplicate detection is purely checksum-based — plausible,
+        unverified here, and not something this value may rest on. The shim's
+        `upload_check` map restates a device's "do you already have this hash?" in terms of
+        it, so a hash the server does not hold turns that answer into the very re-upload the
+        translation exists to prevent. Storing nothing is strictly better than storing that.
+
+        Best effort, for the same reason: a read that fails leaves the column NULL, which is
+        what this path wrote before and costs only the `upload_check` half of a translation.
+        The skip stands either way.
+        """
+        try:
+            detail = await self._client.get_asset(new_asset_id)
+        except ImmichError as exc:
+            logger.warning(
+                "could not read back the checksum of duplicate %s: %s — the shim gets no "
+                "upload-check translation for this row",
+                new_asset_id,
+                exc,
+            )
+            return None
+        if detail.checksum and detail.checksum != encoded:
+            # The server matched this upload to an asset by something other than its bytes.
+            # The stored value is still the right one — it is what the server has — but the
+            # assumption the paragraph above declines to make just failed, visibly.
+            logger.warning(
+                "duplicate %s holds checksum %s, not the %s this run encoded — storing the server's value",
+                new_asset_id,
+                detail.checksum,
+                encoded,
+            )
+        return detail.checksum
 
     async def _safe_mark(
         self,

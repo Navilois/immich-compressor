@@ -43,6 +43,89 @@ a device while its job waits in the queue.
 gate at once and exposes all of them, which is a far larger change than the stall it would
 end.
 
+### A `duplicate` skip used to record half a translation, and the upgrade does not repair it
+
+Also only relevant if you run the shim, and there is nothing to configure here either.
+
+A job that ends in `duplicate` — Immich answering "I already have this file" to the
+compressed upload — recorded the replacement's id but not its checksum. That row still
+counts as a ledger entry, so the shim rewrites the replacement's sync line with the
+original's checksum exactly as it always did. What it could not do is translate that device's
+`bulk-upload-check` question, which is built from the missing column alone. In the window
+between the original's delete reaching the mirror and the re-offered replacement arriving,
+the device asks about the original's hash, the question goes through untouched, and Immich
+answers *accept*.
+
+These rows are not rare where they occur and absent everywhere else: they appear when a
+device re-uploads originals this service had already replaced, so the compressor re-encodes
+each one and Immich matches the result against the `.cmp` file already there. That is the
+same event the shim exists to prevent, which is the awkward part — the rows a re-upload wave
+produces were the rows least protected against the next one.
+
+This release writes the column going forward. It does not touch what is already there. Count
+first — read-only and safe with the service up:
+
+```bash
+docker compose exec immich-compressor python3 -c "
+import sqlite3
+db = sqlite3.connect('file:/var/lib/immich-compressor/state.db?mode=ro', uri=True)
+print(db.execute('SELECT COUNT(*) FROM jobs WHERE skip_reason = \'duplicate\' '
+                 'AND new_checksum IS NULL AND new_asset_id IS NOT NULL '
+                 'AND source_checksum IS NOT NULL AND owner_id IS NOT NULL').fetchone()[0],
+      'rows with no upload-check translation')
+"
+```
+
+Zero is the ordinary answer. The three `IS NOT NULL` clauses are the ledger predicate: a
+`duplicate` row missing any of them predates the ledger, is not translated either way, and
+cannot be backfilled — there is nothing left to identify the original by.
+
+They can be backfilled, because the value is still on the server. Each row's `new_asset_id`
+names a live asset and `GET /assets/{id}` reports its `checksum` in exactly the encoding this
+column stores — checked on the deployment where this was found against 400 rows that already
+had one, equal in all 400. Nothing in your library is written; this is the job store only,
+and the shim picks the rows up on its next map build.
+
+```bash
+docker compose stop immich-compressor
+docker compose run --rm --entrypoint python3 immich-compressor -c "
+import json, sqlite3, urllib.error, urllib.request
+from immich_compressor.config import load_settings
+settings = load_settings().immich
+key, base = settings.api_key.get_secret_value(), settings.base_url
+db = sqlite3.connect('/var/lib/immich-compressor/state.db')
+rows = db.execute('SELECT source_asset_id, new_asset_id FROM jobs '
+                  'WHERE skip_reason = \'duplicate\' AND new_checksum IS NULL '
+                  'AND new_asset_id IS NOT NULL AND source_checksum IS NOT NULL '
+                  'AND owner_id IS NOT NULL').fetchall()
+filled = missing = 0
+for source_id, new_id in rows:
+    request = urllib.request.Request(base + '/assets/' + new_id, headers={'x-api-key': key})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            checksum = json.load(response).get('checksum')
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (400, 404): raise
+        missing += 1
+        continue
+    if not checksum: continue
+    db.execute('UPDATE jobs SET new_checksum = ? WHERE source_asset_id = ?', (checksum, source_id))
+    filled += 1
+db.commit()
+print(filled, 'filled |', missing, 'replacements the server no longer has')
+"
+docker compose start immich-compressor
+```
+
+A row the server cannot answer for is left alone rather than guessed at, and re-running the
+command is safe: it selects on `new_checksum IS NULL`, so a second pass sees only what the
+first could not fill.
+
+Leaving all of them alone is defensible too. They are no worse than they have been since the
+shim shipped, `sync_rewrite` still covers them, and the gap only bites a device that
+re-uploads inside a specific window. What you cannot do is treat the count as noise if it is
+large: a large count means a re-upload wave already happened once on that deployment.
+
 ### `log_level` is now a closed set, and `TRACE` is not in it
 
 Nothing to do if yours is `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. Case is still

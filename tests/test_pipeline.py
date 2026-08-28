@@ -30,6 +30,7 @@ from immich_compressor.pipeline import (
     marker_blocks_reprocessing,
 )
 from immich_compressor.server import create_app
+from immich_compressor.shim import TranslationMaps
 from immich_compressor.store import SHIM_GATES_OPENED, SHIM_TOUCHES, JobStore
 
 BASE = "http://immich-test:2283/api"
@@ -515,25 +516,135 @@ async def test_live_source_state_beats_the_stale_payload(
     assert b"added-later" in upsert.calls.last.request.content
 
 
+# The asset Immich says it already has, and the checksum it reports for it. The value is
+# deliberately not the one the encode produces: these tests are about *which* of the two the
+# pipeline stores, and two equal strings could not tell them apart. Whether a live Immich can
+# ever answer `duplicate` with an asset whose bytes differ is not claimed here either way —
+# the point is that the stored value comes from the server rather than from an assumption.
+DUPLICATE_OF = "existing-1"
+DUPLICATE_HASH = "already-on-the-server="
+
+
+async def _run_duplicate_upload(
+    settings: Settings,
+    store: JobStore,
+    payload: dict[str, Any],
+    clip: Path,
+    *,
+    source_checksum: str | None = None,
+    owner_id: str | None = None,
+) -> Job | None:
+    """Drive one job to the point where Immich answers ``duplicate`` to the upload."""
+    asset_id = payload["data"]["asset"]["id"]
+    payload["data"]["asset"]["exifInfo"]["fileSizeInByte"] = clip.stat().st_size
+
+    _mock_no_marker(asset_id)
+    _mock_asset_detail(asset_id, checksum=source_checksum, owner_id=owner_id)
+    _mock_asset_detail(DUPLICATE_OF, checksum=DUPLICATE_HASH)
+    respx.get(f"{BASE}/assets/{asset_id}/original").mock(
+        return_value=httpx.Response(200, content=clip.read_bytes())
+    )
+    respx.post(f"{BASE}/assets").mock(
+        return_value=httpx.Response(200, json={"id": DUPLICATE_OF, "status": "duplicate"})
+    )
+
+    client = ImmichClient(BASE, "k")
+    try:
+        await Pipeline(settings, client, store).run_job(await _seed(store, payload))
+    finally:
+        await client.aclose()
+    return await store.get(asset_id)
+
+
 @needs_ffmpeg
 @respx.mock
 async def test_duplicate_upload_leaves_the_original_alone(
     settings: Settings, video_payload_raw: dict[str, Any], tmp_path: Path
 ) -> None:
     settings.behavior.trash_original = True
+    clip = await _make_clip(tmp_path / "src.mp4")
+
+    copy = respx.put(f"{BASE}/assets/copy")
+    delete = respx.delete(f"{BASE}/assets")
+
+    async with JobStore(settings.database_path) as store:
+        job = await _run_duplicate_upload(settings, store, video_payload_raw, clip)
+
+    assert job is not None
+    assert job.skip_reason is SkipReason.DUPLICATE
+    assert copy.call_count == 0
+    assert delete.call_count == 0
+    # The id alone is what this path used to write, and it is what makes the row a ledger
+    # entry. The checksum is read back from the asset the server deduplicated against, not
+    # taken from the file this run encoded — see `Pipeline._duplicate_checksum`.
+    assert job.new_asset_id == DUPLICATE_OF
+    assert job.new_checksum == DUPLICATE_HASH
+
+
+@needs_ffmpeg
+@respx.mock
+async def test_duplicate_upload_records_the_checksum_the_shim_translates_with(
+    settings: Settings, video_payload_raw: dict[str, Any], tmp_path: Path
+) -> None:
+    """The consequence of the column, and the reason it is not cosmetic.
+
+    A `duplicate` row satisfies `_LEDGER_PREDICATE` on its `new_asset_id` alone, so the shim
+    counts it as a full ledger entry. But `upload_check` — the map that restates a device's
+    "do you already have this hash?" in terms of the replacement — is built from
+    `new_checksum` and nothing else. Left NULL, the row is a ledger entry with one of its two
+    translations missing, and the missing one is the fallback for exactly the window a
+    re-upload wave lands in: after the mirror has seen the original's delete, before it has
+    received the re-offered replacement.
+
+    Note which half is present here. Nothing was deleted, so the gate is shut and the entry
+    is still waiting in `delete_watch`; `upload_check` is populated regardless because it is
+    ungated. That is the half this row could always have had.
+    """
+    settings.behavior.trash_original = True
+    asset_id = video_payload_raw["data"]["asset"]["id"]
+    clip = await _make_clip(tmp_path / "src.mp4")
+
+    async with JobStore(settings.database_path) as store:
+        job = await _run_duplicate_upload(
+            settings, store, video_payload_raw, clip, source_checksum="c3Vt", owner_id="user-1"
+        )
+        entries = await store.ledger_entries()
+        maps = TranslationMaps.build(entries)
+
+    assert job is not None
+    assert job.skip_reason is SkipReason.DUPLICATE
+    assert [entry.new_asset_id for entry in entries] == [DUPLICATE_OF]
+    assert maps.upload_check == {("user-1", "c3Vt"): DUPLICATE_HASH}
+    assert maps.sync_rewrite == {}
+    assert set(maps.delete_watch) == {asset_id}
+
+
+@needs_ffmpeg
+@respx.mock
+async def test_an_unreadable_duplicate_still_skips_rather_than_fails(
+    settings: Settings, video_payload_raw: dict[str, Any], tmp_path: Path
+) -> None:
+    """The read-back is best effort, in the same sense `_safe_mark` is.
+
+    Its value is an improvement on a row that nothing else depends on: the skip is decided,
+    the original is untouched, and a NULL column is what this path wrote for every release
+    up to this one. Letting a failed GET raise would turn a decided skip into a retried job
+    and, on the next attempt, another encode of a file the server already has.
+    """
+    settings.behavior.trash_original = True
     asset_id = video_payload_raw["data"]["asset"]["id"]
     clip = await _make_clip(tmp_path / "src.mp4")
     video_payload_raw["data"]["asset"]["exifInfo"]["fileSizeInByte"] = clip.stat().st_size
 
     _mock_no_marker(asset_id)
-    _mock_asset_detail(asset_id)
+    _mock_asset_detail(asset_id, checksum="c3Vt", owner_id="user-1")
+    respx.get(f"{BASE}/assets/{DUPLICATE_OF}").mock(return_value=httpx.Response(404))
     respx.get(f"{BASE}/assets/{asset_id}/original").mock(
         return_value=httpx.Response(200, content=clip.read_bytes())
     )
     respx.post(f"{BASE}/assets").mock(
-        return_value=httpx.Response(200, json={"id": "existing-1", "status": "duplicate"})
+        return_value=httpx.Response(200, json={"id": DUPLICATE_OF, "status": "duplicate"})
     )
-    copy = respx.put(f"{BASE}/assets/copy")
     delete = respx.delete(f"{BASE}/assets")
 
     async with JobStore(settings.database_path) as store:
@@ -541,11 +652,18 @@ async def test_duplicate_upload_leaves_the_original_alone(
         await Pipeline(settings, client, store).run_job(await _seed(store, video_payload_raw))
         await client.aclose()
         job = await store.get(asset_id)
+        maps = TranslationMaps.build(await store.ledger_entries())
 
     assert job is not None
+    assert job.state is JobState.SKIPPED
     assert job.skip_reason is SkipReason.DUPLICATE
-    assert copy.call_count == 0
+    assert job.new_asset_id == DUPLICATE_OF
+    assert job.new_checksum is None
     assert delete.call_count == 0
+    # Exactly the old shape, and no worse: the row is still a ledger entry watching for its
+    # original's delete, and it is only `upload_check` that goes without.
+    assert set(maps.delete_watch) == {asset_id}
+    assert maps.upload_check == {}
 
 
 @needs_ffmpeg
