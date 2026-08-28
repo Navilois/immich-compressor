@@ -26,9 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/upgrading.md` said whether it applies cleanly "has not been established", because
   the delete for the duplicate and the upsert for the replacement can land together and
   their order within a batch had not been checked. Measured on 2026-08-28 against a live
-  v3.1.0 instance and the Android app: 69 returned originals removed permanently, the next
+  v3.1.0 instance and the Android app: 69 duplicates removed permanently, the next
   pass delivered all 69 deletes in one 10,955-byte response, the device acked it, and the
-  shim re-armed all 69 translations in under two seconds — no `updateAssetsV2` failure and
+  shim re-armed all 69 translations inside 1.5 seconds — no `updateAssetsV2` failure and
   no retry. `shim_gates_opened_total` stayed put and `shim_touches_total` rose by exactly
   69, both as the fix intends.
 
