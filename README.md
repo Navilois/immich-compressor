@@ -14,8 +14,8 @@ and never delete one before its replacement has been verified.**
 ## 118.66 GiB, one library, zero originals lost
 
 Over three days in August 2026 this service worked through a **259 GB production Immich
-library** — 48,958 photos and 4,717 videos, no backup of the image files, one 452 G
-partition and nothing to move to.
+library** — 48,958 photos and 4,717 videos, one 452 G partition with nothing to move to, and
+the originals backed up on a separate disk outside Immich.
 
 | | |
 |---|---|
@@ -30,6 +30,26 @@ That run was `delete_mode: permanent`, `retention_days: 0`: every completed job 
 original immediately and irreversibly, after a four-step verification chain confirmed the
 replacement on the live server. It is the strictest setting this project has, and it is not
 where you start. [The numbers in full](#what-that-run-actually-looked-like).
+
+---
+
+## Why this exists
+
+Immich is a Google Photos replacement, and a Google Photos replacement compresses. Immich
+deliberately does not: its transcoding produces a **playback copy** and leaves the original
+untouched — exactly right for a photo library, and the reason the disk underneath one only
+ever grows.
+
+This was written for the case where that trade is the wrong one: **the originals are backed
+up elsewhere**, on a separate disk that is not Immich. The copy Immich holds does not have
+to be the archival one, so it can be smaller — as long as nothing is lost in making it
+smaller. Not a tag, not an album, not a rotation, not a place in the timeline. And as long
+as it reaches the library that is already there, not just the next upload.
+
+Everything else — the sanity gate, the metadata diff, the four-step verification chain, the
+checksum ledger — is a consequence of that second paragraph.
+**[docs/motivation.md](docs/motivation.md)** is the full list of what had to be true before
+this could be pointed at a real library.
 
 ---
 
@@ -380,6 +400,7 @@ Details, calibration and the CPU-budget fix: **[docs/hardware.md](docs/hardware.
 | [troubleshooting.md](docs/troubleshooting.md) | When nothing happens |
 | [architecture.md](docs/architecture.md) | The ten steps, idempotency, module map |
 | [immich-api-notes.md](docs/immich-api-notes.md) | **Verified Immich v3 API behaviour** — worth reading for any Immich integration |
+| [motivation.md](docs/motivation.md) | The problem it was built for, and the ten things that had to be true |
 | [faq.md](docs/faq.md) | Including why not to just run ffmpeg in a cron job |
 | [upgrading.md](docs/upgrading.md) | Version to version |
 

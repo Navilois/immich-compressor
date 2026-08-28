@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **The project says why it exists.** `docs/motivation.md` is new: the situation the service
+  was written for — the originals backed up on a separate disk outside Immich, and Immich as the
+  Google Photos replacement that compression is part of — and the ten conditions that predate the
+  code, each pointing at the part of the documentation that answers it. The README gains a short
+  `Why this exists` section above `What it is`, and the documentation table gains a row. R10, "no
+  proxy in front of Immich", is recorded as the one condition not fully met: the
+  checksum-translation shim is the exception it names, and `immich-app/immich#29922` — open, with
+  no reviews and conflicting with `main` when checked on 2026-08-28 — is the upstream change that
+  would remove the need for it.
+
+- **The README described the production library as having no backup of the image files.** It
+  has one: the originals of that 259 GB library are backed up on a separate disk, outside
+  Immich. The sentence overstated the stakes of the run in the most-read paragraph of the
+  project, and it inverted the assumption the whole design rests on — that Immich is not the
+  archive, which is what makes replacing an original reasonable rather than reckless.
+
 - **A pull request is twelve check runs, not ten.** `CONTRIBUTING.md` and `CLAUDE.md` both
   carried the older number, from before the matrix and the image build grew. Counted on the
   merged pull requests themselves — `gh pr checks 67`, and 66, 65 and 63 alongside it, list
