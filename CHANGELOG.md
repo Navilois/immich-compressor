@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `duplicate` upload now records the replacement's checksum, not only its id.** When
+  Immich answers `duplicate` to the compressed upload, the row left behind already carries
+  `source_checksum`, `owner_id` and `new_asset_id`, which is the whole of the ledger
+  predicate — so the shim counts it as a full ledger entry. Only half of one worked. The
+  `sync_rewrite` map, which hands the original's checksum to the replacement's sync line,
+  was built as always; `upload_check`, which restates a device's "do you already have these
+  hashes?" in terms of the replacement, is built from `new_checksum` alone and that column
+  was never written on this path. `upload_check` is the fallback for the window after the
+  client's mirror has seen the original's delete and before it has received the re-offered
+  replacement row, and the re-arm is two-pass by construction, so that window always exists.
+  Inside it the question went untranslated and Immich answered *accept*. Measured on a live
+  deployment (Immich v3, compressor 1.4.0) on 2026-08-28: 1,257 rows — every `duplicate`
+  skip on it, all from one re-upload wave the day before — were ledger entries with no
+  `new_checksum`, and backfilling them by hand took `upload_check` from 7,952 entries to
+  9,209, equal to the ledger-entry count. The value is read back from `GET /assets/{id}`
+  rather than taken from the file the run just encoded: whether Immich's duplicate detection
+  makes those two necessarily equal is not something this service has verified, and a
+  checksum the server does not hold would make `upload_check` restate the device's question
+  as a hash nothing answers for. A read-back that fails leaves the column NULL and says so
+  in the log — the same shape this path had before — and the skip itself is unaffected. Rows
+  already written are not repaired; `docs/upgrading.md` has the count and the backfill.
+
 - **The shim no longer hands a checksum to a replacement while a re-upload that arrived
   minutes ago still holds it.** 1.4.0 stopped translating once the pipeline had recognised
   a returned original, but the recognition is a job row and the job is `queued` — carrying
