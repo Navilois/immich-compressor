@@ -98,6 +98,8 @@ behavior:
   #            defensible while delete_mode is 'trash' and the delete can be undone
   metadata_verify: strict
 
+# DEBUG, INFO, WARNING, ERROR or CRITICAL, in any case. Anything else is refused at
+# startup: an unknown name used to become INFO here and then break `serve` inside uvicorn.
 log_level: INFO
 
 # presets:

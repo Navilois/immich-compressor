@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unusable `log_level` is refused when the settings load, instead of half-applied.** The
+  setting was a bare string with two consumers that disagreed about what it may say:
+  `_configure_logging` resolves a name it does not know to `INFO`, while `serve` hands the same
+  value to uvicorn, which raises on anything outside its own set. A typo therefore ran every
+  command at `INFO` with nothing anywhere to say so, and killed `serve` from inside uvicorn —
+  after the app was built and hardware detection had already logged, a long way past the point
+  where the rest of the configuration is checked. `TRACE` was the worse case, because it looked
+  like it worked: uvicorn has that level and `logging` does not, so the service came up with
+  uvicorn one step below `DEBUG` and everything this project logs left at `INFO`. The accepted
+  set is now `DEBUG`, `INFO`, `WARNING`, `ERROR` and `CRITICAL` — the five both consumers
+  understand — checked in the same place and the same way as `delete_mode` and `metadata_verify`.
+  Case stays irrelevant, as it has always been: the value is upper-cased before it is matched, so
+  `log_level: debug` keeps working. `config.schema.json` carries the five names now, so an editor
+  on the modeline completes them and marks a typo as it is typed; it lists the upper-case
+  spellings only, so it will also mark a lower-case one the service itself accepts.
+
 - **A `duplicate` upload now records the replacement's checksum, not only its id.** When
   Immich answers `duplicate` to the compressed upload, the row left behind already carries
   `source_checksum`, `owner_id` and `new_asset_id`, which is the whole of the ledger
