@@ -135,7 +135,7 @@ version.
 | Path | What |
 |---|---|
 | `src/immich_compressor/config.py` | settings model, preset validation, fail-fast startup |
-| `src/immich_compressor/hardware.py` | device detection, preset catalog, CPU budget |
+| `src/immich_compressor/hardware/` | device detection, preset catalog, CPU budget |
 | `src/immich_compressor/models.py` | webhook payload and REST DTOs |
 | `src/immich_compressor/api.py` | typed async Immich client |
 | `src/immich_compressor/store.py` | SQLite job store (WAL), plus the backfill inventory |

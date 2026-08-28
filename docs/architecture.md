@@ -129,7 +129,7 @@ encode. See [hardware.md](hardware.md).
 | File | What |
 |---|---|
 | `config.py` | settings model, preset validation, fail-fast startup |
-| `hardware.py` | device detection, the preset catalog, the CPU budget |
+| `hardware/` | device detection, the preset catalog, the CPU budget |
 | `models.py` | webhook payload and REST DTOs, all explicitly null-tolerant |
 | `api.py` | typed async Immich client, retries on transport errors and 5xx |
 | `store.py` | SQLite job store, WAL |
