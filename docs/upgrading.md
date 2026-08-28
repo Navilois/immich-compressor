@@ -142,7 +142,7 @@ keeps its row and its checksum in the mirror, so the translation correctly stays
 that is behaviour of the app's own schema, reproduced in `tests/test_app_mirror.py`, not
 something measured against a device.
 
-Two things are worth knowing before you do:
+Three things are worth knowing before you do:
 
 - The re-arm needs a client to actually sync through the shim, because that is where the
   delete is seen. Nothing is lost if none does; the translation is armed the next time one
@@ -153,7 +153,6 @@ Two things are worth knowing before you do:
   acked — no constraint violation, no retry. The shim re-armed all 69 translations inside
   1.5 seconds. `shim_gates_opened_total` did not move, as intended, and
   `shim_touches_total` rose by exactly 69.
-
 - **The cleanup itself opens a re-upload window, and this is the part to plan around.**
   The re-arm happens when the shim *sees* the delete, so the corrected replacement can only
   be re-offered on a later pass. Between the two, nothing in the device's mirror holds that
