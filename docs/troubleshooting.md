@@ -211,6 +211,33 @@ docker compose exec immich-compressor immich-compressor requeue --failed \
 Note that this does **not** remove the `compressor` marker on the server, so an
 already-replaced asset is simply skipped again — by design.
 
+## The shim does nothing
+
+Symptoms in the order they are worth checking. The whole page is
+[shim.md](shim.md); this is the part that goes wrong during setup.
+
+| Symptom | What it means |
+|---|---|
+| `shim_requests_total` is 0 while `shim.enabled: true` | Your reverse proxy is not routing to this service. Nothing downstream of this matters until it moves — everything else here assumes traffic is arriving. |
+| The proxy will not start: `host not found in upstream "immich-compressor"` | nginx resolves a literal upstream name when it **parses** the configuration, so a proxy that is not on this service's docker network fails at start, not at request time. Join it to the network named by `IMMICH_NETWORK`. |
+| You have no reverse proxy at all | A stock Immich does not come with one — it publishes `immich-server` on `2283` and serves the API itself. [shim.md](shim.md#what-has-to-be-true-first) covers what adding one changes. |
+| `shim_requests_total` climbs, but a phone still re-uploads | That client is probably not going through the proxy. A LAN address, a VPN address or a second hostname pointed straight at `:2283` bypasses the shim entirely — [coverage follows routing](shim.md#limits). |
+| Everything is routed, `shim_gates_opened_total` is 0 | On `delete_mode: trash` this is normal for up to 30 days: a gate opens when Immich *purges* an original, not when this service trashes it. |
+| Gates open, `shim_touches_total` stays 0 | Expected at rollout step 3 on `delete_mode: permanent`, and only there. Anywhere else it means the translation is armed but no client will ever be offered the rewritten line. |
+| `shim_hashes_translated_total` climbs at rollout step 3 | `rewrite_upload_check` is still at its default of `true`. Step 3 has to name both rewrite flags. |
+| `shim_passthrough_errors_total` is above 0 | Immich was unreachable from this service and clients got a `502`. With the documented `error_page` line the proxy retries those at Immich, so it is not necessarily a failure anyone saw — but the count is real. |
+| A re-upload the shim should have caught, from `immich-go` or the CLI | Its ledger lookup needs an owner, so the shim calls `GET /users/me` with the caller's own credential first. A key without `user.read` answers 403, the owner is unresolved, and the translation silently does nothing. |
+
+Whether the two paths reach this service at all is one request each, from anywhere the proxy
+serves:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://photos.example.com/api/sync/stream
+```
+
+Then read `shim_requests_total` again. If it did not move, the request did not come here,
+whatever the status code said.
+
 ## Getting help
 
 Open an issue with the output of:

@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **The shim's reverse proxy setup assumed a proxy that most readers do not have.**
+  `docs/shim.md` told you to add two `location` blocks to "your reverse proxy"; a stock
+  Immich has none — the official compose file publishes `immich-server` on `2283` and serves
+  the API itself. `Setting it up` now splits the two cases, says what adding a proxy changes
+  about the front door (Immich's published port stops being the way in, every client is
+  repointed, TLS moves), and ships a compose fragment for a deployment that has no proxy yet.
+  Four further gaps in the same section are closed: the proxy has to be **on this service's
+  docker network** or nginx refuses to start at all rather than failing per request; the
+  example now carries its `proxy_set_header` and `client_max_body_size` lines at **server**
+  level, because a configuration keeping them inside `location /` — which is common — would
+  silently drop them on exactly the two new routes; `error_page` covers **500**, so a bug in
+  this service is a passthrough rather than a sync failure with no fallback; and both routes
+  are named as **POST**, which is what the shim mounts and all that Immich offers there.
+
+- **Caddy gets a verified block instead of a sentence.** The page used to say "find their
+  equivalent before you route anything". It now carries one, along with the two things that
+  are genuinely different: `lb_try_duration` is required or the first request after this
+  service stops is answered `502` rather than failing over, and Caddy's `handle_response`
+  **cannot** fail open on a bad status code for these routes at all — both are POST, and
+  replaying a consumed body fails with `http: invalid Read on closed Body`. A Caddy
+  deployment fails open when this service is down, but not when it is up and answering 500.
+
+- **The proxy blocks were run, not written.** Both were exercised on 2026-08-28 — nginx
+  1.27.5 and Caddy 2 — against this service and a stub standing in for Immich: routing
+  (`shim_requests_total` advances by exactly the requests sent to the two paths and by
+  nothing else), fail-open with the service stopped, nginx's interception of a 500, and the
+  `host not found in upstream` start-up failure. `What of this was verified` records what
+  that rig does and does not cover.
+
+- **Rollout step 3 left half the translation live.** It named `rewrite_sync_stream: false`
+  and said "nothing is being rewritten yet", but `rewrite_upload_check` defaults to `true`,
+  so the upload-check translation was running at the step whose whole point is that a
+  mistake costs nothing. Both flags are named now, in step 3 and in step 4.
+
+- **`docs/troubleshooting.md` had nothing about the shim.** `shim_requests_total` staying at
+  zero is the canonical "your proxy is not routing here" diagnosis — asserted in the metrics
+  code, in the counter table and in `docs/operations.md`, and absent from the page anyone
+  opens when something is broken. It now has a symptom table covering that, the start-up
+  failure, the missing proxy, clients that bypass it, the two counters that are *expected* to
+  sit at zero, and the `user.read` scope that makes `bulk-upload-check` silently do nothing.
+  `docs/installation.md` gained the pointer its `Networking` section was missing.
+
+- **`docs/motivation.md` said the shim is "one route".** It mounts two.
+
 - **The project says why it exists.** `docs/motivation.md` is new: the situation the service
   was written for — the originals backed up on a separate disk outside Immich, and Immich as the
   Google Photos replacement that compression is part of — and the ten conditions that predate the

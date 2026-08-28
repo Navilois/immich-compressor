@@ -52,7 +52,7 @@ itself. Preventing it means answering one specific Immich API call differently, 
 an API call differently means standing in front of it.
 
 That is the [checksum-translation shim](shim.md), and it is deliberately the smallest thing
-that could work: **off by default**, one route, and it only ever translates a checksum whose
+that could work: **off by default**, two routes, and it only ever translates a checksum whose
 original this service has verifiably removed — [the one rule that makes it
 work](shim.md#the-one-rule-that-makes-it-work). It is a workaround with a documented cost,
 not a feature, and [what it is not](shim.md#what-it-is-not) is the part worth reading before
