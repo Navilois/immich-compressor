@@ -90,7 +90,7 @@ Base branch is `main`; branches are `<type>/<slug>`, lowercase and hyphenated.
 make check                                        # the gate — never push without it
 git push -u origin <branch>
 gh pr create --base main
-gh pr checks <number> --watch                     # ten checks, all required in practice
+gh pr checks <number> --watch                     # twelve checks, all required in practice
 gh pr merge <number> --merge --delete-branch      # merge commit, never squash or rebase
 git switch main && git pull --ff-only origin main
 ```

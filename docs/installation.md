@@ -65,6 +65,25 @@ The key is sent as `x-api-key` and is read **only** from the environment
 reads aim at an asset id that cannot exist, writes carry empty id lists — and names any that
 come back forbidden.
 
+## Steering `setup`
+
+It prompts for what it needs, so the flags are for the cases where prompting is wrong — a
+provisioning script, a second instance, a workflow created with a throwaway key. Run it
+again as often as you like; only `--force` overwrites anything.
+
+| Flag | Default | What |
+|---|---|---|
+| `--url` | `http://immich-server:2283/api` | Immich API base URL, as reachable from inside the container |
+| `--api-key` | — | the Immich API key, or set `IMMICH_API_KEY` in the environment |
+| `--session-token` | — | a browser session token, used only to create the workflow |
+| `--workflow-key` | — | a throwaway API key holding only `workflow.create`; used once and never stored — see [workflow-setup.md](workflow-setup.md) |
+| `--network` | `immich_default` | the docker network your Immich stack uses; written to `.env` as `IMMICH_NETWORK` |
+| `--webhook-url` | `http://immich-compressor:8080/webhook` | the URL Immich should call |
+| `--directory` | `.` | where to write `config.yaml` and `.env` |
+| `--non-interactive` | off | never prompt; use the flags and the defaults. `scripts/quickstart.sh` adds this by itself when there is no terminal |
+| `--force` | off | overwrite `config.yaml` and replace the stored secrets. `docker-compose.override.yaml` is left alone even then |
+| `--no-workflow` | off | do not create the Immich workflow |
+
 ## Doing it without `setup`
 
 ```bash
