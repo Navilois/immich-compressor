@@ -499,11 +499,21 @@ def _print_permissions(results: list[PermissionResult]) -> list[PermissionResult
     return missing
 
 
-def run_setup(options: SetupOptions) -> int:
-    """The whole guided setup. Returns the process exit code."""
-    directory = options.directory.resolve()
-    print(f"immich-compressor setup — writing into {directory}\n")
+@dataclass(frozen=True, slots=True)
+class _Connection:
+    """The three answers every step after the first one needs."""
 
+    base_url: str
+    api_key: str
+    network: str
+
+
+def _ask_for_connection(options: SetupOptions) -> _Connection | None:
+    """Where Immich is, the key to reach it with, and the network to join it on.
+
+    ``None`` when there is no API key, which is the one answer this command can neither
+    invent nor carry on without.
+    """
     base_url = _ask("Immich API base URL", options.base_url, non_interactive=options.non_interactive)
     api_key = options.api_key or os.environ.get("IMMICH_API_KEY", "")
     if not api_key:
@@ -518,29 +528,38 @@ def run_setup(options: SetupOptions) -> int:
             "no API key given. Pass --api-key, or set IMMICH_API_KEY in the environment.",
             file=sys.stderr,
         )
-        return 2
+        return None
     network = _ask(
         "Docker network your Immich stack uses",
         options.network,
         non_interactive=options.non_interactive,
     )
+    return _Connection(base_url=base_url, api_key=api_key, network=network)
 
-    # ---- 1. the server -----------------------------------------------------------
-    with _client(base_url, api_key) as client:
+
+def _report_on_the_server(connection: _Connection) -> list[PermissionResult] | None:
+    """Step 1: what the server says about this key, and which permissions it is missing.
+
+    ``None`` means the key itself is unusable and there is nothing further to do. An empty
+    list is the good case: usable, and nothing missing.
+    """
+    with _client(connection.base_url, connection.api_key) as client:
         ok, message = check_key(client)
         version = server_version(client)
-        print(f"\nServer      {base_url}")
+        print(f"\nServer      {connection.base_url}")
         print(f"            {message}")
         if version:
             print(f"            Immich {version}")
             if version.split(".")[0] not in {"3", "None"}:
                 print("            warning: this service supports Immich v3.0.0 and newer only")
         if not ok:
-            return 1
+            return None
         permissions = check_permissions(client, include_delete=True)
-    missing = _print_permissions(permissions)
+    return _print_permissions(permissions)
 
-    # ---- 2. the machine ----------------------------------------------------------
+
+def _report_on_the_machine(api_key: str) -> HardwareReport:
+    """Step 2: the encoder this host gets, and every candidate that was rejected."""
     # Both types, because the config this writes enables both — otherwise the report
     # below would describe a video-only deployment and no stills preset would be shown.
     settings = Settings(
@@ -552,24 +571,35 @@ def run_setup(options: SetupOptions) -> int:
     print(f"\nHardware    {report.summary_line()}")
     for candidate in report.rejected:
         print(f"            not {candidate.where()}: {candidate.reason}")
+    return report
 
-    # ---- 3. the files ------------------------------------------------------------
+
+def _write_the_files(
+    options: SetupOptions, directory: Path, connection: _Connection, report: HardwareReport
+) -> dict[str, str]:
+    """Step 3: ``config.yaml`` and ``.env``, plus the GPU overlay when there is a GPU.
+
+    Returns the environment values it wrote, because the next step needs the webhook token
+    out of them — freshly generated here, or kept from an existing file.
+    """
     config_path = directory / "config.yaml"
     if config_path.exists() and not options.force:
         print("\nconfig.yaml already exists — left untouched (pass --force to regenerate)")
     else:
         verb = "regenerated" if config_path.exists() else "wrote"
-        config_path.write_text(render_config(report, network_hint=network), encoding="utf-8")
+        config_path.write_text(render_config(report, network_hint=connection.network), encoding="utf-8")
         print(f"\n{verb} {config_path}")
 
     env_path = directory / ".env"
     existing = read_env_file(env_path)
     kept = sorted(key for key in ("IMMICH_API_KEY", "COMPRESSOR_TOKEN") if key in existing)
     values = dict(existing)
-    values["IMMICH_API_KEY"] = api_key if options.force else existing.get("IMMICH_API_KEY", api_key)
+    values["IMMICH_API_KEY"] = (
+        connection.api_key if options.force else existing.get("IMMICH_API_KEY", connection.api_key)
+    )
     values.setdefault("COMPRESSOR_TOKEN", secrets.token_hex(32))
-    values["IMMICH_BASE_URL"] = base_url
-    values["IMMICH_NETWORK"] = network
+    values["IMMICH_BASE_URL"] = connection.base_url
+    values["IMMICH_NETWORK"] = connection.network
 
     # Immich's compose file hands its container TZ and /etc/localtime; this one had
     # neither, so the two services timestamped their logs two hours apart while
@@ -603,17 +633,19 @@ def run_setup(options: SetupOptions) -> int:
             print(f"      no {COMPOSE_OVERRIDE} and no {COMPOSE_OVERRIDE_TEMPLATE} to copy —")
             print(f"      add :{COMPOSE_OVERRIDE} to that line yourself if you write one,")
             print("      because that line replaces the list compose loads by default")
+    return values
 
-    # ---- 4. the workflow ---------------------------------------------------------
-    token = values["COMPRESSOR_TOKEN"]
+
+def _create_the_workflow(options: SetupOptions, directory: Path, connection: _Connection, token: str) -> None:
+    """Step 4: create the Immich workflow, or write it out with the curl that would."""
     body = workflow_json(webhook_url=options.webhook_url, token=token)
     if options.skip_workflow:
         created, detail = False, "skipped on request"
     else:
         created, detail = create_workflow(
-            base_url,
+            connection.base_url,
             body,
-            api_key=api_key,
+            api_key=connection.api_key,
             session_token=options.session_token,
             workflow_key=options.workflow_key,
         )
@@ -628,7 +660,7 @@ def run_setup(options: SetupOptions) -> int:
         write_secret_file(workflow_path, json.dumps(body, indent=2) + "\n")
         print(f"            wrote {workflow_path} (mode 0600) — create it yourself with:")
         print(f"""
-  curl -X POST '{base_url.rstrip("/")}/workflows' \\
+  curl -X POST '{connection.base_url.rstrip("/")}/workflows' \\
     -H "Authorization: Bearer $SESSION_TOKEN" \\
     -H 'Content-Type: application/json' \\
     -d @{workflow_path.name}
@@ -644,7 +676,9 @@ def run_setup(options: SetupOptions) -> int:
         print(f"            Then delete {workflow_path.name}: it carries COMPRESSOR_TOKEN")
         print("            in clear text and has no further use.")
 
-    # ---- 5. what to do next ------------------------------------------------------
+
+def _print_next_steps(missing: list[PermissionResult]) -> None:
+    """Step 5: the three commands that follow, and the permission fix when one is due."""
     print("\nNext")
     steps = [
         "docker compose up -d",
@@ -657,4 +691,26 @@ def run_setup(options: SetupOptions) -> int:
         print(f"  {index}. {step}")
     print("\n  The service starts in dry-run mode: it will report what it *would* do and")
     print("  change nothing. docs/safety.md walks through going live in four stages.")
+
+
+def run_setup(options: SetupOptions) -> int:
+    """The whole guided setup, in the five steps it prints. Returns the process exit code.
+
+    Each step is where its own output comes from, and the order is the order a person reads
+    it in: what the server says, what the machine can do, what was written, what Immich now
+    has, and what to run next.
+    """
+    directory = options.directory.resolve()
+    print(f"immich-compressor setup — writing into {directory}\n")
+
+    connection = _ask_for_connection(options)
+    if connection is None:
+        return 2
+    missing = _report_on_the_server(connection)
+    if missing is None:
+        return 1
+    report = _report_on_the_machine(connection.api_key)
+    values = _write_the_files(options, directory, connection, report)
+    _create_the_workflow(options, directory, connection, values["COMPRESSOR_TOKEN"])
+    _print_next_steps(missing)
     return 1 if missing else 0

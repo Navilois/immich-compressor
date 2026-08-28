@@ -19,6 +19,7 @@ import respx
 
 import immich_compressor.__main__ as main
 from immich_compressor.__main__ import (
+    _LIST_CAP,
     _backfill_run,
     _backfill_status,
     _jobs,
@@ -254,6 +255,48 @@ async def test_report_json_publishes_the_pause_the_way_stats_does(
     assert set(paused) == {"since", "reason"}
     assert paused["since"] == latched.since.isoformat()
     assert "surge_threshold 200" in paused["reason"]
+
+
+async def test_report_says_how_many_failed_jobs_it_withheld(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A list cut off at the cap with nothing to say so is read as the whole list.
+
+    `report` is the first command the quickstart runs, and the surface somebody goes to
+    when they want to know what went wrong. The header counted all of them, but the rows
+    under it looked like every failure there was, and the rest were invisible.
+    """
+    withheld = 3
+    async with JobStore(settings.database_path) as store:
+        for index in range(_LIST_CAP + withheld):
+            asset_id = f"failed-{index:02d}"
+            await store.enqueue(asset_id, {}, delay_seconds=0)
+            await store.mark_failed(asset_id, "ffmpeg exited 1: Invalid data found when processing input")
+
+    assert await _report(settings, as_json=False) == 0
+
+    out = capsys.readouterr().out
+    assert f"failed jobs ({_LIST_CAP + withheld}):" in out
+    assert len([line for line in out.splitlines() if line.startswith("  failed-")]) == _LIST_CAP
+    assert f"  ... and {withheld} more" in out
+
+
+async def test_report_withholds_nothing_when_the_failures_fit(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The cap is a ceiling, not a page size: a list that fits is complete and says so by
+    saying nothing."""
+    async with JobStore(settings.database_path) as store:
+        for index in range(_LIST_CAP):
+            asset_id = f"failed-{index:02d}"
+            await store.enqueue(asset_id, {}, delay_seconds=0)
+            await store.mark_failed(asset_id, "ffmpeg exited 1")
+
+    assert await _report(settings, as_json=False) == 0
+
+    out = capsys.readouterr().out
+    assert f"failed jobs ({_LIST_CAP}):" in out
+    assert "... and" not in out
 
 
 async def test_jobs_prints_the_error_of_a_failed_job(

@@ -366,6 +366,40 @@ def test_force_regenerates_the_config_but_says_so(tmp_path: Path, capsys) -> Non
 
 
 @respx.mock
+def test_setup_stops_before_touching_anything_without_a_key(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 2, and not one file written.
+
+    The first step is the only one that can end the run without anything to show for it,
+    and the exit code is what a script reads. Writing a `.env` on the way out would leave a
+    generated webhook token behind for an installation that does not exist.
+    """
+    monkeypatch.delenv("IMMICH_API_KEY", raising=False)
+    assert run_setup(_options(tmp_path, api_key="")) == 2
+    assert "no API key given" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
+@respx.mock
+def test_setup_stops_before_touching_anything_on_a_rejected_key(tmp_path: Path, capsys) -> None:
+    """Exit 1, likewise with nothing written.
+
+    A key the server refuses cannot produce a working deployment, and going on would
+    detect hardware and write a config for one anyway.
+    """
+    respx.get(f"{BASE}/users/me").mock(return_value=httpx.Response(401, json={"message": "Invalid"}))
+    # Still reached: the version is read and printed before the key verdict is acted on, so
+    # somebody looking at a refusal can see which server refused them.
+    respx.get(f"{BASE}/server/version").mock(
+        return_value=httpx.Response(200, json={"major": 3, "minor": 1, "patch": 0})
+    )
+    assert run_setup(_options(tmp_path)) == 1
+    assert "Server" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
+
+
+@respx.mock
 def test_missing_permissions_make_setup_exit_non_zero_and_name_them(tmp_path: Path, capsys) -> None:
     _mock_server(forbidden={"asset.copy"})
     assert run_setup(_options(tmp_path)) == 1

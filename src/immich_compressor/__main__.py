@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, backfill
-from .api import ImmichClient, ImmichError
+from .api import ImmichError, client_for
 from .config import ConfigError, Settings, load_settings
 from .encoder import (
     EncodeError,
@@ -42,6 +42,11 @@ from .setup_cmd import (
 from .store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 logger = logging.getLogger("immich_compressor")
+
+# How many rows a listing prints before it stops. Every site that caps a list also says
+# how many it withheld — a truncated list that does not admit it is read as the whole
+# list, which is exactly what `report` did to its failed jobs.
+_LIST_CAP = 20
 
 
 def _configure_logging(level: str) -> None:
@@ -137,11 +142,7 @@ async def _webhook_lines(settings: Settings) -> list[str]:
 
 
 async def _check(settings: Settings) -> int:
-    async with ImmichClient(
-        settings.immich.base_url,
-        settings.immich.api_key.get_secret_value(),
-        timeout_s=settings.immich.timeout_s,
-    ) as client:
+    async with client_for(settings.immich) as client:
         version = await client.server_version()
     print(f"Immich reachable, version {version}")
     print(f"presets: {', '.join(f'{p.name}({p.match_type})' for p in settings.presets) or 'none'}")
@@ -366,8 +367,10 @@ async def _report(settings: Settings, as_json: bool) -> int:
     failed = [job for job in jobs if job.state == JobState.FAILED]
     if failed:
         print(f"failed jobs ({len(failed)}):")
-        for job in failed[:20]:
+        for job in failed[:_LIST_CAP]:
             print(f"  {job.source_asset_id}  {job.last_error}")
+        if len(failed) > _LIST_CAP:
+            print(f"  ... and {len(failed) - _LIST_CAP} more")
     return 0
 
 
@@ -448,10 +451,10 @@ def cmd_reprocess(args: argparse.Namespace) -> int:
 
 def _print_requeue_plan(asset_ids: list[str], description: str) -> None:
     """What a dry run of either requeue mode prints."""
-    for asset_id in asset_ids[:20]:
+    for asset_id in asset_ids[:_LIST_CAP]:
         print(f"[dry] would re-queue {asset_id}")
-    if len(asset_ids) > 20:
-        print(f"[dry] ... and {len(asset_ids) - 20} more")
+    if len(asset_ids) > _LIST_CAP:
+        print(f"[dry] ... and {len(asset_ids) - _LIST_CAP} more")
     print(f"{len(asset_ids)} job(s) {description} — pass --apply to re-queue")
 
 
@@ -571,14 +574,7 @@ async def _backfill_scan(settings: Settings, asset_type: str | None, rescan: boo
     if not types:
         print("no asset types are enabled — see behavior.enabled_types", file=sys.stderr)
         return 1
-    async with (
-        ImmichClient(
-            settings.immich.base_url,
-            settings.immich.api_key.get_secret_value(),
-            timeout_s=settings.immich.timeout_s,
-        ) as client,
-        JobStore(settings.database_path) as store,
-    ):
+    async with client_for(settings.immich) as client, JobStore(settings.database_path) as store:
         summaries = await backfill.scan(
             client, store, settings, asset_types=types, page_size=page_size, rescan=rescan
         )
@@ -619,14 +615,7 @@ async def _backfill_run(
     if not types:
         print("no asset types are enabled — see behavior.enabled_types", file=sys.stderr)
         return 1
-    async with (
-        ImmichClient(
-            settings.immich.base_url,
-            settings.immich.api_key.get_secret_value(),
-            timeout_s=settings.immich.timeout_s,
-        ) as client,
-        JobStore(settings.database_path) as store,
-    ):
+    async with client_for(settings.immich) as client, JobStore(settings.database_path) as store:
         stats = await store.inventory_stats()
         unscanned = [name for name in types if name not in stats["types"]]
         if unscanned:
@@ -652,11 +641,11 @@ async def _backfill_run(
         )
         remaining = await store.inventory_stats()
     left = sum(entry["candidates"] for name, entry in remaining["types"].items() if name in types)
-    for queued in summary.queued[:20]:
+    for queued in summary.queued[:_LIST_CAP]:
         prefix = "queued" if apply else "[dry] would queue"
         print(f"{prefix} {queued.asset_id}  {queued.filename}  {_human_bytes(queued.size_bytes)}")
-    if len(summary.queued) > 20:
-        print(f"  ... and {len(summary.queued) - 20} more")
+    if len(summary.queued) > _LIST_CAP:
+        print(f"  ... and {len(summary.queued) - _LIST_CAP} more")
     if not summary.queued:
         print("nothing to queue: no candidate is waiting for these types")
         print("  `immich-compressor backfill status` says what the scan found, and why")
@@ -737,11 +726,7 @@ RESTORE_INCOMPLETE = 3
 
 
 async def _restore(settings: Settings, asset_ids: list[str]) -> int:
-    async with ImmichClient(
-        settings.immich.base_url,
-        settings.immich.api_key.get_secret_value(),
-        timeout_s=settings.immich.timeout_s,
-    ) as client:
+    async with client_for(settings.immich) as client:
         try:
             outcome = await client.restore_assets_best_effort(asset_ids)
         except ImmichError as exc:
