@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 AssetType = Literal["IMAGE", "VIDEO", "AUDIO", "OTHER"]
@@ -549,7 +549,26 @@ class Settings(BaseSettings):
     database_path: Path = Path("/var/lib/immich-compressor/state.db")
     listen_host: str = "0.0.0.0"  # noqa: S104 - inside a container; publish selectively at the host
     listen_port: int = 8080
-    log_level: str = "INFO"
+    # The five names the standard library has, which are also five of the six uvicorn
+    # takes: `serve` hands this value to both. As a bare `str` it failed in two directions
+    # at once. `_configure_logging` resolves an unknown name to INFO, so `TRACE` — a level
+    # uvicorn has and `logging` does not — silently meant INFO for everything this service
+    # logs while uvicorn took it literally; and a typo degraded here and then killed
+    # `serve` from inside uvicorn, after the app was built and hardware detection had
+    # already logged. Both now fail at load, where the rest of the configuration does.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _normalise_log_level(cls, value: Any) -> Any:
+        """Keep every spelling of the case working, because both consumers already do.
+
+        ``_configure_logging`` upper-cases the value and uvicorn lower-cases it, so
+        ``log_level: debug`` has always been accepted and must not start failing here. The
+        literal is upper case because that is what ``logging`` calls its levels, and it is
+        the spelling the JSON schema offers an editor.
+        """
+        return value.upper() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _validate(self) -> Self:

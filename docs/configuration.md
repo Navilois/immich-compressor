@@ -111,7 +111,7 @@ Everything that decides whether and how an asset gets touched. The three that ma
 | `database_path` | string | `/var/lib/immich-compressor/state.db` | SQLite job store. Back up this volume if you care about the report history. |
 | `listen_host` | string | `0.0.0.0` | Inside the container. Publish selectively at the host, never on 0.0.0.0. |
 | `listen_port` | integer | `8080` | Inside the container. |
-| `log_level` | string | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`. `LOG_LEVEL` in the environment sets the same level and, unlike this key, reaches the startup lines too: `serve` configures logging before it loads any settings, because loading them is what runs hardware detection — see [Logs](operations.md#logs). |
+| `log_level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` \| `CRITICAL` | `INFO` | Case does not matter — `debug` is the same as `DEBUG` — and anything outside the five is refused at startup rather than quietly becoming `INFO`. `LOG_LEVEL` in the environment sets the same level and, unlike this key, reaches the startup lines too: `serve` configures logging before it loads any settings, because loading them is what runs hardware detection — see [Logs](operations.md#logs). |
 
 ## `presets`
 

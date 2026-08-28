@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
+from uvicorn.config import LOG_LEVELS
 
 from immich_compressor.config import (
     BehaviorSettings,
@@ -539,3 +542,80 @@ def test_shim_normalises_a_trailing_slash() -> None:
 def test_shim_rejects_unknown_keys() -> None:
     with pytest.raises(ValidationError):
         ShimSettings(rewrite_everything=True)
+
+
+# ----------------------------------------------------------------------- the log level
+
+
+def _with_log_level(value: str) -> str:
+    """A minimal config carrying one `log_level`."""
+    return f"\nbehavior:\n  enabled_types: [VIDEO]\nlog_level: {value}\n{_PRESETS}"
+
+
+def test_log_level_is_accepted_in_any_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`log_level: debug` has always worked, and the closed set must not take that away.
+
+    The two consumers disagree about case by construction: `_configure_logging` upper-cases
+    the value before it resolves it, and `serve` hands uvicorn the lower-cased one. The
+    value is normalised to the spelling `logging` uses, so both still get what they expect.
+    """
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    assert load_settings(_write(tmp_path, _with_log_level("debug"))).log_level == "DEBUG"
+    assert load_settings(_write(tmp_path, _with_log_level("Warning"))).log_level == "WARNING"
+
+
+def test_an_unknown_log_level_is_refused_at_startup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo used to degrade quietly for every command and then kill `serve` alone.
+
+    `_configure_logging` resolves a name it does not know to INFO, so the CLI commands ran
+    on regardless — while `serve` passed the same string to uvicorn, which raises. That
+    happens after the app is built and hardware detection has already logged, which is a
+    long way past the point where the rest of the configuration is checked.
+    """
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    with pytest.raises(ConfigError, match="log_level"):
+        load_settings(_write(tmp_path, _with_log_level("BOGUS")))
+
+
+def test_trace_is_refused_even_though_uvicorn_takes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one value where the two consumers silently configured different things.
+
+    uvicorn has a `trace` level and `logging` has none, so `TRACE` started the service with
+    uvicorn a step below DEBUG and everything this project logs left at INFO — the fallback,
+    not a decision anybody wrote down.
+    """
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    with pytest.raises(ConfigError, match="log_level"):
+        load_settings(_write(tmp_path, _with_log_level("TRACE")))
+
+
+def test_the_log_level_environment_override_is_validated_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`LOG_LEVEL` is the documented override, and it reaches the same field."""
+    monkeypatch.setenv("IMMICH__API_KEY", "key")
+    monkeypatch.setenv("WEBHOOK__TOKEN", "tok")
+    monkeypatch.setenv("LOG_LEVEL", "bogus")
+    with pytest.raises(ConfigError, match="log_level"):
+        load_settings(_write(tmp_path, _MINIMAL))
+
+    monkeypatch.setenv("LOG_LEVEL", "debug")
+    assert load_settings(_write(tmp_path, _MINIMAL)).log_level == "DEBUG"
+
+
+def test_every_accepted_log_level_reaches_both_consumers() -> None:
+    """The set is an intersection: `serve` hands this one value to `logging` and to uvicorn.
+
+    A level only one of them understands is exactly the defect the closed set exists to
+    prevent, so widening the set has to fail here rather than on somebody's next restart.
+    """
+    accepted = get_args(Settings.model_fields["log_level"].annotation)
+    assert accepted, "log_level is no longer a closed set"
+    for level in accepted:
+        assert isinstance(getattr(logging, level, None), int), f"{level} is not a logging level"
+        assert level.lower() in LOG_LEVELS, f"uvicorn does not accept {level}"

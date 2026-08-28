@@ -482,6 +482,13 @@
     },
     "log_level": {
       "default": "INFO",
+      "enum": [
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "CRITICAL"
+      ],
       "title": "Log Level",
       "type": "string"
     }

@@ -299,10 +299,11 @@ NOTES: dict[str, str] = {
     "listen_host": "Inside the container. Publish selectively at the host, never on 0.0.0.0.",
     "listen_port": "Inside the container.",
     "log_level": (
-        "`DEBUG`, `INFO`, `WARNING` or `ERROR`. `LOG_LEVEL` in the environment sets the same "
-        "level and, unlike this key, reaches the startup lines too: `serve` configures logging "
-        "before it loads any settings, because loading them is what runs hardware detection — "
-        "see [Logs](operations.md#logs)."
+        "Case does not matter — `debug` is the same as `DEBUG` — and anything outside the five "
+        "is refused at startup rather than quietly becoming `INFO`. `LOG_LEVEL` in the "
+        "environment sets the same level and, unlike this key, reaches the startup lines too: "
+        "`serve` configures logging before it loads any settings, because loading them is what "
+        "runs hardware detection — see [Logs](operations.md#logs)."
     ),
 }
 

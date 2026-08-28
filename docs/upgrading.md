@@ -43,6 +43,18 @@ a device while its job waits in the queue.
 gate at once and exposes all of them, which is a far larger change than the stall it would
 end.
 
+### `log_level` is now a closed set, and `TRACE` is not in it
+
+Nothing to do if yours is `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. Case is still
+irrelevant, so `log_level: debug` and `LOG_LEVEL=debug` are unchanged too.
+
+Anything else is refused when the settings load — where it used to become `INFO` for
+everything this service logs, and then take `serve` down from inside uvicorn a moment later
+anyway. The one spelling that started the service before this release and will not after is
+`TRACE`: uvicorn has that level, `logging` does not, so it ran uvicorn a step below `DEBUG`
+while the service's own output stayed at `INFO`. `DEBUG` is the nearest thing that was ever
+meant by it, and it reaches both halves.
+
 ## 1.3.1 → 1.4.0
 
 ### The surge breaker is now off by default — check whether you were relying on it
