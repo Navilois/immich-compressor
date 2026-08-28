@@ -29,8 +29,13 @@ immich-workflow.json
 # Local compose customisation — see docker-compose.override.example.yaml.
 docker-compose.override.yaml
 
-# Claude Code session material (prompts, scratch state); never part of the public repo.
-.claude/
+# Claude Code material. Session state (prompts, scratch, worktrees) is never part of the
+# public repo; `.claude/skills/` is, because a skill is project tooling like `scripts/` —
+# checked in so everyone gets it, not re-derived per session. The two-line form is
+# deliberate: git does not descend into an excluded directory, so a bare `.claude/` cannot
+# be undone by a later negation.
+.claude/*
+!.claude/skills/
 
 # Internal working notes: the prompt this repository was built from, and the handover
 # written for one specific machine. Both describe a private deployment and a moment that
