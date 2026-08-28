@@ -114,6 +114,34 @@ Nothing here is counted, because nothing happened. It is logged instead, on the 
 says how many translations are currently held back, and it changes only when the number
 changes.
 
+### The window between the upload and the job
+
+`re_uploaded` is a verdict the pipeline reaches, and it reaches it when a worker gets to
+that job — not when the copy arrives. Immich answers `POST /assets` with 201 and the asset
+is live immediately; its job sits in `queued`, carrying no checksum at all, until step 2
+reads the asset and writes one. Behind a backlog of video encodes that is minutes to hours,
+and a device syncing inside it was handed exactly the collision above. Measured on
+2026-08-28: 23 jobs of one re-upload burst were still queued when the batch failed.
+
+So the shim does not wait for the job row. **A sync line carrying a checksum the shim is
+armed to hand to a different asset is itself the answer** — the checksum is taken, by the
+asset that line is about. The translation stands down from that line onwards, and the shim
+remembers the claim for later requests: the copy's line is a delta and goes past once,
+while the replacement's line comes back every time anything touches it.
+
+Two things follow from where that evidence comes from.
+
+**It works forwards only.** The response is rewritten line by line and never held whole, so
+a claim on one line governs the lines after it. Nothing orders a run of asset lines so that
+the copy always precedes the replacement it took the checksum from; when it lands the other
+way round, that one batch still fails on the unique index. What changes is what happens
+next — Immich re-sends the batch, and the re-send is served from maps that already know, so
+the retry applies instead of the client wedging in a loop.
+
+**It lives in memory.** A restart forgets every sighting and the shim is back to asking the
+job store. That is usually the same answer by then: the window is the length of the queue,
+and a restart restarts the workers too.
+
 ### Why a no-op update is needed at all
 
 The sync stream only offers a client assets that changed since its last checkpoint. Nothing
@@ -226,6 +254,15 @@ shim is not in front of.
 There is no counter for a translation held back by a returned copy, because nothing
 happens when one is: the log line naming the current number is the place to look, and the
 script in [upgrading.md](upgrading.md) is how to check the library rather than the record.
+A second line names claims the shim learned from the stream before the pipeline had
+classified them — those assets are still `queued` in the job store, so looking for them
+there finds nothing.
+
+That first line is **not live state.** It is written when the maps are rebuilt, which
+happens on a request and no more often than `shim.ledger_refresh_seconds`; with no client
+syncing it goes stale and stays stale. On 2026-08-28 it read `29` for 28 minutes while a
+check against the library found 138 of the 8,021 ledger checksums live on another asset.
+Use the script, not the log, to answer "how many right now".
 
 ## Limits
 
@@ -242,13 +279,17 @@ script in [upgrading.md](upgrading.md) is how to check the library rather than t
 - **No retroactive fix.** Replacements made before the ledger shipped in 1.4.0 carry no
   record of what their original hashed to, and for an original that is already permanently
   deleted that value cannot be recovered. Those replacements are never translated.
-- **A returned copy suppresses a translation only if this service saw it arrive.** The
-  recognition is a `re_uploaded` job row, so a copy that came in while the service was
-  stopped — or one the ingest guards refused before any row was written, a disabled asset
-  type for instance — holds the checksum without leaving a record that says so. The
-  translation for that checksum is then made while the copy is live, which is the collision
-  above. [upgrading.md](upgrading.md) has a read-only script that lists any of these against
-  your own library.
+- **A returned copy suppresses a translation only if this service saw it, one way or the
+  other.** There are two ways: a `re_uploaded` job row, and the copy's own line going past
+  on the sync stream. A copy that arrived while the service was stopped, or one the ingest
+  guards refused before any row was written — a disabled asset type, for instance — leaves
+  no job row, so until its line is offered to some client through the shim it holds the
+  checksum without leaving a record that says so, and the translation is made while it is
+  live. That is the collision above. [upgrading.md](upgrading.md) has a read-only script
+  that lists any of these against your own library.
+- **A sighting is not durable.** Claims learned from the stream are held in memory, so a
+  restart drops them and any that the pipeline has not classified yet stop suppressing
+  until their line is seen again. The job store is the durable half and needs no help.
 - **The job store becomes load-bearing.** The translation is rebuilt from it every minute.
   Lose the database and the next update to a replaced asset sends its real checksum, the
   phone's mirror corrects itself, and the re-upload happens. Back it up.

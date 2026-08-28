@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The shim no longer hands a checksum to a replacement while a re-upload that arrived
+  minutes ago still holds it.** 1.4.0 stopped translating once the pipeline had recognised
+  a returned original, but the recognition is a job row and the job is `queued` — carrying
+  no checksum at all — from the moment Immich answers 201 until a worker reaches it. A
+  device syncing inside that window got two rows claiming one `(owner, checksum)` and its
+  batch aborted with `SqliteException(2067)` on `updateAssetsV2`, which stalls the client's
+  checkpoint and makes Immich re-send the same batch. Seen on a device on 2026-08-28 with
+  23 jobs of a re-upload burst still queued. The shim now reads the claim off the sync
+  stream itself: a line carrying a checksum it is armed to hand to a different asset means
+  the checksum is taken, and the translation stands down from that line onwards and for
+  every later request. It suppresses forwards only, so a claim arriving behind the line it
+  should have stopped still costs that one batch — but the re-send is then served from maps
+  that know, so the client recovers instead of looping. Nothing is written to the job store
+  and `_check_re_upload` is untouched.
+
 - **`report` now says how many failed jobs it did not print.** The list stopped at twenty
   and said nothing about it, so a deployment with fifty failures showed twenty lines that
   read like all of them. The count in the header was right the whole time, which is what

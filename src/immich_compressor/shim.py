@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -103,7 +103,7 @@ DELETE_TYPES = frozenset({"AssetDeleteV1", "PartnerAssetDeleteV1"})
 
 @dataclass(slots=True)
 class TranslationMaps:
-    """The four lookups a request needs, built from the store in one pass.
+    """The five lookups a request needs, built from the store in one pass.
 
     A full sync stream is thousands of lines and every one of them asks the same two
     questions, so both are dict hits. The maps are one small entry per replaced asset.
@@ -123,6 +123,11 @@ class TranslationMaps:
     # still has to stop suppressing once its asset goes, or a gate that opens later would
     # find itself blocked by an asset nobody has.
     claim_watch: dict[str, list[str]] = field(default_factory=dict)
+    # (owner_id, original checksum) -> the replacements armed to be handed that checksum.
+    # The reverse of `sync_rewrite`, and the only thing that lets a line be recognised as
+    # somebody else's claim on a hash this shim is about to give away. Armed entries only:
+    # a checksum nothing is waiting for cannot be taken from anyone.
+    armed: dict[tuple[str, str], list[str]] = field(default_factory=dict)
 
     @property
     def suppressed(self) -> int:
@@ -134,8 +139,13 @@ class TranslationMaps:
         maps = cls()
         live: dict[tuple[str, str], list[str]] = {}
         for holder in returned:
+            if holder.asset_id in maps.claim_watch:
+                # The same asset from both sources — the store's row and the shim's own
+                # sighting of it on a stream. One claim, counted once, or `suppressed`
+                # reports double and an operator reads a number that means nothing.
+                continue
             live.setdefault((holder.owner_id, holder.checksum), []).append(holder.asset_id)
-            maps.claim_watch.setdefault(holder.asset_id, [])
+            maps.claim_watch[holder.asset_id] = []
         for entry in entries:
             key = (entry.owner_id, entry.source_checksum)
             if not entry.gate_is_open:
@@ -147,6 +157,7 @@ class TranslationMaps:
                     maps.claim_watch[asset_id].append(entry.new_asset_id)
             else:
                 maps.sync_rewrite[entry.new_asset_id] = entry.source_checksum
+                maps.armed.setdefault(key, []).append(entry.new_asset_id)
             if entry.new_checksum:
                 maps.upload_check[key] = entry.new_checksum
         return maps
@@ -164,9 +175,19 @@ class LineOutcome:
     # Asset ids of returned originals this line says are gone, so whatever they were
     # holding back can be armed again. Returned rather than acted on for the same reason.
     claims_released: tuple[str, ...] = ()
+    # Assets this line says are holding a checksum the shim is armed to hand to somebody
+    # else. The store learns this minutes later, when the pipeline reaches the job; the
+    # line itself says it now. Returned rather than acted on for the same reason again.
+    claims_observed: tuple[ReturnedOriginal, ...] = ()
 
 
-def rewrite_sync_line(line: bytes, maps: TranslationMaps, *, translate: bool = True) -> LineOutcome:
+def rewrite_sync_line(
+    line: bytes,
+    maps: TranslationMaps,
+    *,
+    translate: bool = True,
+    claimed: Collection[tuple[str, str]] = (),
+) -> LineOutcome:
     """Translate one JSON Lines record of ``POST /api/sync/stream``.
 
     Pure, and total: every input produces an output, and anything unrecognised comes back
@@ -179,6 +200,12 @@ def rewrite_sync_line(line: bytes, maps: TranslationMaps, *, translate: bool = T
     ``PartnerAssetV1`` were dropped from the server's map while six V2 spellings carry the
     same payload. An id and a checksum are what actually matter, and they do not go stale
     on the next Immich release.
+
+    ``claimed`` is the set of ``(owner_id, checksum)`` pairs already known to be held by
+    some other asset, and a translation into one of them is withheld. The caller owns that
+    set and adds to it as `claims_observed` comes back, which is what makes suppression
+    take effect part-way through a response; purity is unaffected, because what this
+    returns is still a function of what it was passed.
     """
     stripped = line.strip()
     if not stripped:
@@ -209,14 +236,36 @@ def rewrite_sync_line(line: bytes, maps: TranslationMaps, *, translate: bool = T
 
     asset_id = data.get("id")
     checksum = data.get("checksum")
-    if not translate or not isinstance(asset_id, str) or not isinstance(checksum, str):
-        return LineOutcome(line)
-    original = maps.sync_rewrite.get(asset_id)
-    if original is None or original == checksum:
+    owner_id = data.get("ownerId")
+    if not isinstance(asset_id, str) or not isinstance(checksum, str):
         return LineOutcome(line)
 
+    # Somebody else's row, holding a hash this shim is armed to hand over. That is a claim
+    # whatever else the line is: a soft-deleted asset still occupies the mirror's unique
+    # index, and a hard-deleted one has no row left to send a line for, so a line carrying
+    # the checksum at all means the checksum is taken. No filter on the library either —
+    # a library asset lands in the mirror's *other* unique index and could not collide,
+    # but it suppresses the phone's upload just as well, so waiting costs nothing.
+    observed: tuple[ReturnedOriginal, ...] = ()
+    if isinstance(owner_id, str):
+        armed_for = maps.armed.get((owner_id, checksum))
+        if armed_for is not None and asset_id not in armed_for:
+            observed = (ReturnedOriginal(asset_id=asset_id, owner_id=owner_id, checksum=checksum),)
+
+    original = maps.sync_rewrite.get(asset_id)
+    if not translate or original is None or original == checksum:
+        return LineOutcome(line, claims_observed=observed)
+    if isinstance(owner_id, str) and (owner_id, original) in claimed:
+        # Seen earlier in this same response: another asset of this owner already holds the
+        # checksum, and the store will not say so until the pipeline reaches its job.
+        return LineOutcome(line, claims_observed=observed)
+
     data["checksum"] = original
-    return LineOutcome(json.dumps(record, separators=(",", ":")).encode() + b"\n", rewritten=True)
+    return LineOutcome(
+        json.dumps(record, separators=(",", ":")).encode() + b"\n",
+        rewritten=True,
+        claims_observed=observed,
+    )
 
 
 def translate_upload_check(body: bytes, owner_id: str | None, maps: TranslationMaps) -> tuple[bytes, int]:
@@ -270,6 +319,15 @@ class ChecksumLedger:
     Rebuilt wholesale rather than invalidated per row: the query is one table scan of a
     partial index and the result is small, and a cache that can be subtly stale in one
     direction is exactly the kind of thing that makes a rewrite bug unreproducible.
+
+    It has a second source the store cannot supply. ``returned_originals`` is authoritative
+    and late: an asset is live in Immich the moment ``POST /assets`` answers 201, while its
+    job sits in ``queued`` — carrying no checksum at all, because the pipeline writes that
+    in step 2 — until a worker reaches it and parks it at ``re_uploaded``. Everything the
+    shim hands out in between is decided against a store that does not yet know the
+    checksum is taken. `observe` closes that window with what the sync stream itself said,
+    and holds it in memory only: the store's own answer arrives within minutes and is the
+    durable one, so a restart costs at worst the rest of one window.
     """
 
     def __init__(self, store: JobStore, refresh_seconds: float, *, clock: Callable[[], float]) -> None:
@@ -278,13 +336,40 @@ class ChecksumLedger:
         self._clock = clock
         self._maps = TranslationMaps()
         self._loaded_at: float | None = None
+        self._observed: dict[str, ReturnedOriginal] = {}
+
+    def observe(self, claims: Iterable[ReturnedOriginal]) -> int:
+        """Remember claims a sync stream showed. Returns how many were new.
+
+        A new one forces a rebuild, because the maps the next request is served from have
+        to have stopped arming that checksum before the first line goes out.
+        """
+        new = [claim for claim in claims if claim.asset_id not in self._observed]
+        for claim in new:
+            self._observed[claim.asset_id] = claim
+        if new:
+            self.invalidate()
+        return len(new)
+
+    def release(self, asset_id: str) -> bool:
+        """Forget an observed claim whose asset the stream says is gone. Returns whether it held one."""
+        return self._observed.pop(asset_id, None) is not None
 
     async def maps(self) -> TranslationMaps:
         now = self._clock()
         if self._loaded_at is None or now - self._loaded_at >= self._refresh_seconds:
             try:
+                from_store = await self._store.returned_originals()
+                # Whatever the pipeline has since classified is held durably now, so the
+                # sighting has nothing left to add. Dropping it keeps this from growing to
+                # the size of every re-upload the process has ever watched go past.
+                for row in from_store:
+                    self._observed.pop(row.asset_id, None)
+                # The store first, so that where both still know an asset the store's row
+                # wins and `build` drops the sighting as a duplicate of it.
                 rebuilt = TranslationMaps.build(
-                    await self._store.ledger_entries(), await self._store.returned_originals()
+                    await self._store.ledger_entries(),
+                    [*from_store, *self._observed.values()],
                 )
             except Exception:
                 # Keep serving the previous maps. A stale translation is a missed
@@ -504,7 +589,11 @@ async def _release_claims(ready: _Ready, maps: TranslationMaps, asset_ids: tuple
                 len(blocked),
             )
             continue
-        if not await ready.store.mark_original_freed(asset_id):
+        # Both, and in this order: a claim the shim only ever saw on a stream has no job
+        # row for `mark_original_freed` to find, and dropping out on its `False` would
+        # leave the sighting suppressing that checksum for the life of the process.
+        forgotten = ready.ledger.release(asset_id)
+        if not await ready.store.mark_original_freed(asset_id) and not forgotten:
             continue
         ready.ledger.invalidate()
         logger.info(
@@ -534,6 +623,14 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
 
     Buffered by line, never whole: a full sync of a large library is far too big to hold,
     and the client starts applying batches long before the response ends.
+
+    That is also why suppression works forwards only. A second pass would see every claim
+    before deciding anything, and there is no held response to make a second pass over — so
+    a claim seen on line *n* governs the lines after it, and the ledger remembers it for
+    every request after this one. A claim that arrives *behind* the line it should have
+    stopped therefore still costs that one batch: the client's upsert fails, it does not
+    ack, and Immich re-sends. What the memory buys is that the re-send is served from maps
+    that already know, so the retry applies instead of wedging the client in a loop.
     """
     deps = ready.deps
     translate = deps.rewrite_sync_stream and not deps.log_only
@@ -541,6 +638,20 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
     rewritten = 0
     gate_opens: list[LedgerEntry] = []
     claims_released: list[str] = []
+    observed: dict[str, ReturnedOriginal] = {}
+    claimed: set[tuple[str, str]] = set()
+
+    def take(outcome: LineOutcome) -> bytes:
+        nonlocal rewritten
+        rewritten += outcome.rewritten
+        if deps.watch_deletes:
+            gate_opens.extend(outcome.gate_opens)
+            claims_released.extend(outcome.claims_released)
+        for claim in outcome.claims_observed:
+            observed[claim.asset_id] = claim
+            claimed.add((claim.owner_id, claim.checksum))
+        return outcome.data
+
     # Bound before the try so the dispatch after it never reads an unassigned name; the
     # real maps are the first thing loaded inside.
     maps = TranslationMaps()
@@ -550,19 +661,9 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
             pending += chunk
             while b"\n" in pending:
                 raw, pending = pending.split(b"\n", 1)
-                outcome = rewrite_sync_line(raw + b"\n", maps, translate=translate)
-                rewritten += outcome.rewritten
-                if deps.watch_deletes:
-                    gate_opens.extend(outcome.gate_opens)
-                    claims_released.extend(outcome.claims_released)
-                yield outcome.data
+                yield take(rewrite_sync_line(raw + b"\n", maps, translate=translate, claimed=claimed))
         if pending:
-            outcome = rewrite_sync_line(pending, maps, translate=translate)
-            rewritten += outcome.rewritten
-            if deps.watch_deletes:
-                gate_opens.extend(outcome.gate_opens)
-                claims_released.extend(outcome.claims_released)
-            yield outcome.data
+            yield take(rewrite_sync_line(pending, maps, translate=translate, claimed=claimed))
     except httpx.HTTPError:
         logger.warning("shim: the sync stream ended early", exc_info=True)
         await ready.store.bump_counter(SHIM_PASSTHROUGH_ERRORS)
@@ -574,6 +675,17 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
     if rewritten:
         await ready.store.bump_counter(SHIM_LINES_REWRITTEN, rewritten)
         await ready.store.bump_counter(SHIM_HASHES_TRANSLATED, rewritten)
+    if observed:
+        # Before the release, so that a claim this response both showed and withdrew ends
+        # withdrawn. Logged at all because the pipeline has not classified these yet: an
+        # operator comparing the shim against `jobs` would otherwise find nothing there.
+        new = ready.ledger.observe(observed.values())
+        if new:
+            logger.info(
+                "shim: %d asset(s) seen on the sync stream still hold a replaced original's "
+                "checksum; their translations stand down until those assets go",
+                new,
+            )
     if gate_opens:
         await _open_gates(ready, tuple(gate_opens))
     if claims_released:
