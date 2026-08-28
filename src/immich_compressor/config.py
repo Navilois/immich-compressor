@@ -379,7 +379,7 @@ class Preset(BaseModel):
     # inherits `behavior.transcode_unsupported_audio`. Needs a command that copies the
     # audio stream, because that copy is what the retry rewrites.
     transcode_unsupported_audio: bool | None = None
-    # Skip a still whose source JPEG quality is at or below this value. Re-encoding an
+    # Skip a still whose source JPEG quality is below this value. Re-encoding an
     # already heavily compressed image buys a second generation of quantisation error and
     # usually a *larger* file. ``None`` disables the check.
     min_source_quality: int | None = Field(default=None, ge=1, le=100)
