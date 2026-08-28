@@ -4,7 +4,7 @@ Everything a human still has to do, in the order it makes sense to do it. Nothin
 be automated from inside the repository, which is why it is written down.
 
 Done so far, so nobody repeats it: the **repository is public** since 2026-08-22, the
-**ghcr.io package is public**, and the newest release is **1.3.1**. **All of section 1 is
+**ghcr.io package is public**, and the newest release is **1.4.1**. **All of section 1 is
 done** — description, homepage, fourteen topics, Discussions and private vulnerability
 reporting were all confirmed set on 2026-08-24 with the probes below. The only item nobody
 can check from a terminal is the social preview, because GitHub exposes no API for it.

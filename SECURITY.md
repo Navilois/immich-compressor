@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 1.3.x | ✅ |
-| 1.2.x | security fixes only |
+| 1.4.x | ✅ |
+| 1.3.x | security fixes only |
 
 Fixes are released as a new patch version. The compose file pins the major image tag, so a
 `docker compose pull` picks them up.

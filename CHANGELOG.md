@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **A pull request is twelve check runs, not ten.** `CONTRIBUTING.md` and `CLAUDE.md` both
+  carried the older number, from before the matrix and the image build grew. Counted on the
+  merged pull requests themselves — `gh pr checks 67`, and 66, 65 and 63 alongside it, list
+  lint, the English-only guard, three interpreters, generated docs, version, commits, compose,
+  the image build, and CodeQL's two.
+
+- **`docs/faq.md` counts the API findings again.** It said this project "has already been
+  wrong in sixteen documented ways"; `docs/immich-api-notes.md` has carried a seventeenth and
+  an eighteenth since the sync work — API keys refused on every `/sync` route, and a sync pass
+  being acked per type rather than per response.
+
+- **Two pages still described the 1.3 line as the current one.** `SECURITY.md` supported
+  `1.3.x` and named `1.2.x` for security fixes only, so the released version was not on its
+  own support matrix; the window moves to `1.4.x` and `1.3.x`. `docs/maintainers/launch-checklist.md`
+  said the newest release is 1.3.1, which two releases have passed.
+
+- **Two numbers in `CONTRIBUTING.md` were assertions rather than measurements.** The encoder
+  tests are "about a quarter of the suite" — measured with `ffmpeg`, `ffprobe`, `exiftool` and
+  ImageMagick off the path, 100 of the 740 unit tests skip, so about one in seven. And the
+  project's first fifteen commit subjects are not German: eight are, the first three are
+  English, and all eight predate 1.0.0.
+
+- **`setup` has its flags written down, and the manual command joins the Immich network.**
+  `docs/installation.md` gains the table — every flag the parser declares, with its default;
+  only `--workflow-key` was documented anywhere before. The `docker run … setup` fallback in
+  `docs/quickstart.md` omitted `--network`, which `scripts/quickstart.sh` passes for a reason
+  it states in a comment: without it `immich-server` does not resolve and the failure reads as
+  a server that is down. The `--version` row of the CLI table in `docs/operations.md` had an
+  empty cell where every other row says what the command does.
+
 ## [1.4.1] - 2026-08-28
 
 ### Fixed

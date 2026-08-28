@@ -51,12 +51,15 @@ go-live flags live.
 
 ```bash
 docker run --rm -it \
+  --network immich_default \
   --device /dev/dri:/dev/dri --group-add "$(getent group render | cut -d: -f3)" \
   --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
   ghcr.io/navilois/immich-compressor:1 setup
 ```
 
-Drop the two GPU flags on a machine without `/dev/dri`.
+`--network` has to name your Immich stack's network, or `immich-server` does not resolve
+from inside the container and the failure reads as a server that is down. Drop the two GPU
+flags on a machine without `/dev/dri`.
 </details>
 
 ## 3. Create the workflow

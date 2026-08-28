@@ -23,11 +23,11 @@ make check    # everything CI runs
 ```
 
 Install `ffmpeg`, `ffprobe`, `exiftool` and ImageMagick to unlock the encoder tests — about
-a quarter of the suite skips without them, and CI runs with them installed.
+one test in seven skips without them, and CI runs with them installed.
 
 `make check` is not quite everything: CI also runs the unit suite on **Python 3.12, 3.13 and
 3.14** — every interpreter `pyproject.toml` declares — builds the `linux/amd64` image and
-runs CodeQL. A pull request is ten check runs, and a suite that only passes on your own
+runs CodeQL. A pull request is twelve check runs, and a suite that only passes on your own
 interpreter is not green.
 
 ## The live suite
@@ -96,8 +96,8 @@ default.
 
 **English only** in every tracked file — code, comments, docstrings, log messages, CLI help,
 error text, YAML comments, docs and commit messages. `scripts/check-language.sh` enforces it
-in CI. (The project's first fifteen commit *subjects* are German; those are history and stay
-as they are.)
+in CI. (Eight commit *subjects* from before 1.0.0 are German; those are history and stay as
+they are.)
 
 **Only verified claims in the docs.** This project's credibility rests on "measured against
 a live instance". Do not write a performance number, a compatibility claim or an API

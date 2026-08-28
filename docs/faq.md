@@ -17,7 +17,7 @@ safe on a photo library is the interesting part:
 | Which encoder your box can run | you read a table and edit flags | a real one-frame encode picks it, and explains the ones it rejected |
 | When it goes wrong at 3am | you find out later | job states, `/stats`, `/metrics`, a `restore` command |
 
-The honest summary: this is a script that has already been wrong in sixteen documented ways
+The honest summary: this is a script that has already been wrong in eighteen documented ways
 and been fixed each time. That is its whole value — the list is
 [immich-api-notes.md](immich-api-notes.md#where-the-original-plan-was-wrong).
 
