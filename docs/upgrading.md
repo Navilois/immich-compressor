@@ -11,7 +11,7 @@ and minor releases arrive that way and a breaking change never does. The
 
 Job state lives in a volume and survives. Schema changes are applied automatically on open.
 
-## Unreleased
+## 1.4.0 → 1.4.1
 
 ### If a device's sync stopped advancing, this is the upgrade that fixes it
 
