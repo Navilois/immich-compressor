@@ -846,6 +846,69 @@ def _test_client(settings: Settings) -> TestClient:
     return TestClient(create_app(settings))
 
 
+def test_the_service_mounts_exactly_these_routes(settings: Settings) -> None:
+    """The HTTP surface, written down.
+
+    Every endpoint here is somebody's integration — a compose healthcheck on `HEAD
+    /healthz`, a workflow configured to `PUT` instead of `POST`, a scrape of `/metrics`.
+    Three of them are exercised nowhere else in this suite, so a route that quietly stopped
+    being mounted would take a release to discover. Changing this list is the deliberate
+    act; a diff against it is not.
+    """
+    # Read from the OpenAPI document rather than `app.routes`: it is the published view of
+    # the same table, and it does not move when FastAPI changes how an included router is
+    # represented internally.
+    paths = create_app(settings).openapi()["paths"]
+    assert {path: sorted(operations) for path, operations in paths.items()} == {
+        "/webhook": ["post", "put"],
+        "/healthz": ["get", "head"],
+        "/stats": ["get"],
+        "/metrics": ["get"],
+        "/jobs": ["get"],
+        "/jobs/{asset_id}": ["get"],
+        "/reprocess/{asset_id}": ["post"],
+        "/resume": ["post"],
+    }
+
+
+def test_the_token_check_answers_before_the_application_has_started(
+    settings: Settings, video_payload_raw: dict[str, Any]
+) -> None:
+    """A 401 must not depend on the lifespan having run.
+
+    The check reads the settings off `app.state`, which `create_app` fills in when it
+    *builds* the application rather than when it starts it. Put that assignment back in the
+    lifespan only, and a request that arrives at a built-but-unstarted app — a probe during
+    a slow start, a supervisor that opened the port early — gets an `AttributeError` and a
+    500 where it has always got a 401.
+    """
+    # Deliberately not used as a context manager: `TestClient` runs the lifespan on
+    # `__enter__`, and this test is about what answers before that happens.
+    client = TestClient(create_app(settings))
+    assert client.post("/webhook", json=video_payload_raw).status_code == 401
+    assert (
+        client.post("/webhook", json=video_payload_raw, headers={"X-Compressor-Token": "wrong"}).status_code
+        == 401
+    )
+
+
+def test_the_put_and_head_routes_answer_like_their_siblings(
+    settings: Settings, fresh_video_payload_raw: dict[str, Any]
+) -> None:
+    """`PUT /webhook` and `HEAD /healthz` exist because deployments in the wild use them.
+
+    Immich's webhook action can be configured to send `PUT`, and a compose healthcheck
+    wants a body-less probe. Both are one line of routing that nothing else here touches.
+    """
+    with _test_client(settings) as client:
+        assert client.head("/healthz").status_code == 200
+        answered = client.put(
+            "/webhook", json=fresh_video_payload_raw, headers={"X-Compressor-Token": "test-token"}
+        )
+    assert answered.status_code == 202
+    assert answered.json()["accepted"] is True
+
+
 def test_webhook_requires_the_shared_secret(settings: Settings, video_payload_raw: dict[str, Any]) -> None:
     with _test_client(settings) as client:
         assert client.post("/webhook", json=video_payload_raw).status_code == 401
