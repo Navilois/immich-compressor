@@ -144,6 +144,7 @@ version.
 | `src/immich_compressor/ingest.py` | freshness gate and surge breaker, before a job exists |
 | `src/immich_compressor/pipeline.py` | the ten steps, worker loop, trash sweeper |
 | `src/immich_compressor/backfill.py` | library scan, candidate inventory, queue run |
+| `src/immich_compressor/shim.py` | the checksum-translation proxy, off by default |
 | `src/immich_compressor/routes.py` | the HTTP endpoints and the shared-secret check |
 | `src/immich_compressor/server.py` | the ASGI app: lifespan, shim mount, what it is made of |
 | `src/immich_compressor/setup_cmd.py` | the guided `setup` command |

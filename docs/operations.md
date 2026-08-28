@@ -35,7 +35,7 @@ Prometheus text exposition format, hand-rolled, no extra dependency. Every famil
 `HELP` and `TYPE`, and is emitted even when empty so a dashboard query never disappears:
 
 ```
-immich_compressor_build_info{version="1.3.1"} 1
+immich_compressor_build_info{version="1.4.0"} 1
 immich_compressor_jobs{state="done"} 2
 immich_compressor_jobs{state="failed"} 1
 immich_compressor_jobs_skipped{reason="no_gain"} 1
@@ -46,6 +46,12 @@ immich_compressor_compressed_bytes 26686614
 immich_compressor_saved_bytes 24024048
 immich_compressor_webhooks_received_total 12
 immich_compressor_webhooks_rejected_total 0
+immich_compressor_shim_requests_total 0
+immich_compressor_shim_lines_rewritten_total 0
+immich_compressor_shim_hashes_translated_total 0
+immich_compressor_shim_gates_opened_total 0
+immich_compressor_shim_touches_total 0
+immich_compressor_shim_passthrough_errors_total 0
 immich_compressor_session_processed_total 2
 immich_compressor_session_skipped_total 2
 immich_compressor_session_failed_total 1
@@ -64,6 +70,10 @@ immich_compressor_config_permanent_delete 1
 Gauges come from the job store and survive a restart. The `session_*` counters and the
 encode histogram are per process and reset when the container does, which is what
 Prometheus expects of a counter.
+
+The `shim_*` counters are emitted whether or not the shim is enabled, so they read zero on
+a deployment that never turned it on. What each one means, and which combinations of them
+indicate a misrouted reverse proxy, is on [shim.md](shim.md#reading-the-counters).
 
 The three `config_*` gauges are the ones worth alerting on. `config_dry_run 1` on a
 deployment you thought was live means nothing has been compressed for however long that has
@@ -350,3 +360,22 @@ The first lines after a restart tell you the encoder that was chosen, every cand
 was rejected, and a loud warning if `delete_mode: permanent` is on. Rejected webhooks are
 logged at WARNING (bad secret) and ERROR (unparseable payload) — which matters, because
 Immich reports both as success on its side.
+
+The level is `log_level`, `INFO` by default, or `LOG_LEVEL` in the environment — which wins
+over the file, as every setting does. Those first lines are the one place the two are not
+interchangeable: `serve` configures logging *before* it loads the settings, because loading
+them is what runs the detection. `LOG_LEVEL=WARNING` therefore silences the encoder
+explanation, while setting `log_level` to `WARNING` in `config.yaml` arrives a moment too
+late and leaves it at `INFO`. Everything logged after startup takes the level from either.
+
+```yaml
+# docker-compose.override.yaml — one `environment:` block per service, so add the line to
+# the block that is already there rather than opening a second one.
+services:
+  immich-compressor:
+    environment:
+      LOG_LEVEL: "DEBUG"
+```
+
+`.env` is not a way in. `docker-compose.yaml` lists the variables it passes through by
+name, and `LOG_LEVEL` is not one of them, so a line in `.env` never reaches the container.

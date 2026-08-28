@@ -34,7 +34,7 @@ shared secret, writes one row, and answers `202` — everything else is the work
 | 1 | Delay | `initial_delay_seconds` (300) so Immich's own thumbnail, ML and OCR jobs finish first |
 | 2 | Guards | external library, edited, live photo, locked, trashed, wrong type, no preset, unsupported format, too small, existing marker, named people |
 | 3 | Download | `GET /assets/{id}/original`, streamed to a temp file; free space checked first |
-| 3b | Still guards | stills only: an appended payload (motion photo) or a source already at or below `min_source_quality` stops the job here, before the encode — see [safety.md](safety.md#what-it-never-touches) |
+| 3b | Still guards | stills only: an appended payload (motion photo) or a source already below `min_source_quality` stops the job here, before the encode — see [safety.md](safety.md#what-it-never-touches) |
 | 4 | Encode | the preset command, without a shell; `exiftool -TagsFromFile` for stills, with orientation normalised |
 | 4b | Metadata gate | stills only: every EXIF/GPS/XMP/IPTC tag of the source has to be on the output with the same presented value — see [safety.md](safety.md#the-metadata-gate) |
 | 5 | Sanity gate | ratio, bytes saved, decodability, rotation-aware display size, bit depth, HDR transfer, duration, audio streams, capture date — see [safety.md](safety.md#the-sanity-gate) |
@@ -135,9 +135,12 @@ encode. See [hardware.md](hardware.md).
 | `store.py` | SQLite job store, WAL |
 | `metrics.py` | the Prometheus exposition `/metrics` answers with, hand-rolled |
 | `encoder.py` | preset execution, exiftool, probes, the sanity gate |
+| `ingest.py` | the freshness gate and the surge breaker, in front of the store |
 | `pipeline.py` | the ten steps, the worker loop, the trash sweeper |
 | `backfill.py` | the library scan, the candidate inventory, the queue run over it |
-| `server.py` | FastAPI endpoints |
+| `shim.py` | the checksum-translation proxy, off by default — see [shim.md](shim.md) |
+| `routes.py` | every endpoint, and the shared-secret check in front of two of them |
+| `server.py` | the ASGI application: the lifespan, and the optional shim mount |
 | `setup_cmd.py` | the guided `setup` command |
 | `__main__.py` | CLI |
 

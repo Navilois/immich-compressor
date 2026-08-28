@@ -13,7 +13,7 @@ Generated from the settings model of immich-compressor 1.4.0.
 
 Highest priority first:
 
-1. **environment variables**, with `__` as the nesting separator (`BEHAVIOR__DRY_RUN=false`, `IMMICH__BASE_URL=...`);
+1. **environment variables**, with `__` as the nesting separator (`BEHAVIOR__DRY_RUN=false`, `IMMICH__BASE_URL=...`); a top-level option has nothing to nest, so `log_level` is just `LOG_LEVEL`;
 2. **`config.yaml`**, at `$COMPRESSOR_CONFIG` or `./config.yaml`;
 3. the defaults in this document.
 
@@ -111,7 +111,7 @@ Everything that decides whether and how an asset gets touched. The three that ma
 | `database_path` | string | `/var/lib/immich-compressor/state.db` | SQLite job store. Back up this volume if you care about the report history. |
 | `listen_host` | string | `0.0.0.0` | Inside the container. Publish selectively at the host, never on 0.0.0.0. |
 | `listen_port` | integer | `8080` | Inside the container. |
-| `log_level` | string | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`. |
+| `log_level` | string | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`. `LOG_LEVEL` in the environment sets the same level and, unlike this key, reaches the startup lines too: `serve` configures logging before it loads any settings, because loading them is what runs hardware detection — see [Logs](operations.md#logs). |
 
 ## `presets`
 

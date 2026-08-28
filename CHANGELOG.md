@@ -35,7 +35,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client by hand and left the setting off, so a deployment that raised it for a slow or
   distant server still got the ten-second default from all four — with nothing to say so.
   There is one factory now, and every caller goes through it.
+
 ### Documentation
+
+- **`LOG_LEVEL` is documented.** It is the environment override for `log_level` like any
+  other setting, but `serve` also reads it *before* it loads the settings, so it is the only
+  way to raise or silence the startup lines that explain the encoder decision — a
+  `log_level` in `config.yaml` arrives after detection has already logged. `docs/operations.md`
+  says so under [Logs](docs/operations.md#logs) with a compose snippet, and notes that `.env`
+  cannot carry it because `docker-compose.yaml` passes through only the variables it names.
+  Both were checked against `docker compose config`.
+
+- **`source_quality` skips a still that is strictly *below* `min_source_quality`, not one
+  at it.** `pipeline.py` compares `quality < min_source_quality`, so a source sitting
+  exactly on the threshold is encoded. `docs/safety.md`, `docs/troubleshooting.md` and
+  `docs/architecture.md` each said "at or below", which is an off-by-one at the boundary
+  the setting exists to define. The `Preset.min_source_quality` comment said it too. The
+  pages that describe the guard against the preset's *quality target* rather than the
+  threshold were right as they stood and are unchanged.
+
+- **The `/metrics` sample in `docs/operations.md` shows the six `shim_*` counters.** They
+  are emitted unconditionally, so every scrape since 1.4.0 has carried them, and a page
+  that promises "every family is emitted even when empty" was listing a scrape that
+  predates them — its `build_info` still read 1.3.1. The sample now matches what the
+  renderer produces, and a line under it says the counters read zero with the shim off and
+  points at their table on `docs/shim.md`.
+
+- **The module table in `docs/architecture.md` follows the package again.** It still had
+  the endpoints in `server.py`, which they left in this cycle, and it had never listed
+  `ingest.py`, `routes.py` or `shim.py`.
 
 - **The first sync batch after a duplicate cleanup is now measured rather than open.**
   `docs/upgrading.md` said whether it applies cleanly "has not been established", because

@@ -23,7 +23,7 @@ the last of those is refused at startup unless the other two already agree.
 | **Anything it has already processed** | The `compressor` metadata marker on the asset is a hard, versioned loop guard. |
 | **Every still that is not a JPEG** | RAW, HEIC, PNG, GIF, TIFF and WebP are all filed under type `IMAGE` by Immich, and all of them are skipped as `unsupported_format` — see below. |
 | **Motion photos** | A JPEG with a video glued on behind it. Detected and skipped as `embedded_media` — see below. |
-| **Stills that are already heavily compressed** | At or below the preset's `min_source_quality`, a re-encode adds artefacts and usually *grows* the file. Skipped as `source_quality`. |
+| **Stills that are already heavily compressed** | Below the preset's `min_source_quality`, a re-encode adds artefacts and usually *grows* the file. Skipped as `source_quality`. |
 
 It never calls `POST /trash/empty`, ever — that endpoint drops your *entire* trash,
 including assets you deleted by hand and may still want back. Originals are removed one
