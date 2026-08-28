@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,54 @@ pytestmark = pytest.mark.skipif(
 needs_still_tools = pytest.mark.skipif(
     shutil.which("magick") is None or shutil.which("exiftool") is None,
     reason="imagemagick/exiftool not installed",
+)
+
+
+def _exiftool_writes_motion_photo() -> bool:
+    """Whether this exiftool knows `XMP-GCamera:MotionPhoto` as a writable tag.
+
+    Presence is not capability. Ubuntu 24.04 ships exiftool 12.76, whose XMP-GCamera table
+    stops at the MicroVideo tags, so the tool is there, the guard above passes, and writing
+    the marker fails with `Tag 'XMP-GCamera:MotionPhoto' is not defined` — which reads like
+    the contributor's own change breaking motion-photo detection. Measured here on
+    2026-08-27: 12.76 does not list the tag as writable, 13.59 does. Which release between
+    them first shipped it is not established, so this asks exiftool rather than comparing a
+    version number.
+    """
+    exiftool = shutil.which("exiftool")
+    if exiftool is None:
+        return False
+    try:
+        # Absolute path and a fixed argv, for the reason ruff gives: a command resolved
+        # through PATH at call time is how a test runs something other than what it probed.
+        # `-listw` reads exiftool's own tag table, not a file.
+        listed = subprocess.run(  # noqa: S603
+            [exiftool, "-listw", "-XMP-GCamera:all"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return _lists_motion_photo(listed.stdout)
+
+
+def _lists_motion_photo(listing: str) -> bool:
+    """Whether `exiftool -listw -XMP-GCamera:all` output names the MotionPhoto tag.
+
+    An exact token rather than a substring: `MotionPhotoVersion` and
+    `MotionPhotoPresentationTimestampUs` are separate tags in the same group, and a
+    substring test would read either of them as the marker itself. A failed probe prints
+    nothing on stdout, so it lands on False and the test skips.
+    """
+    return "MotionPhoto" in listing.split()
+
+
+# One subprocess call for the whole session: `skipif` evaluates this at import time.
+needs_motion_photo_tag = pytest.mark.skipif(
+    not _exiftool_writes_motion_photo(),
+    reason="exiftool predates the writable XMP-GCamera:MotionPhoto tag",
 )
 
 
@@ -724,7 +773,45 @@ async def test_padding_below_the_threshold_is_tolerated(tmp_path: Path) -> None:
     assert await embedded_media_reason(path) is None
 
 
+# The two listings are verbatim `exiftool -listw -XMP-GCamera:all` output, measured on
+# 2026-08-27: 12.76 is what Ubuntu 24.04 ships and cannot write the marker, 13.59 is the
+# current release and can.
+_GCAMERA_12_76 = """Writable XMP-GCamera tags:
+  BurstID BurstPrimary DisableAutoCreation HDRPMakerNote HdrPlusMakernote
+  MicroVideo MicroVideoOffset MicroVideoPresentationTimestampUs
+  MicroVideoVersion PortraitNote PortraitRequest PortraitVersion ShotLogData
+  SpecialTypeID
+"""
+
+_GCAMERA_13_59 = """Writable XMP-GCamera tags:
+  BurstID BurstPrimary DisableAutoCreation DisableSuggestedAction HDRPMakerNote
+  HDRPlusMakerNote MicroVideo MicroVideoOffset
+  MicroVideoPresentationTimestampUs MicroVideoVersion MotionPhoto
+  MotionPhotoPresentationTimestampUs MotionPhotoVersion PortraitNote
+  PortraitRequest PortraitVersion ShotLogData SpecialTypeID
+"""
+
+
+@pytest.mark.parametrize(
+    ("listing", "expected"),
+    [
+        (_GCAMERA_12_76, False),
+        (_GCAMERA_13_59, True),
+        # An exiftool too old to have the group at all, and a probe that failed to run:
+        # both leave stdout empty, and both mean skip.
+        ("", False),
+        # Constructed, not measured: no release is known to list the derived tags without
+        # the marker, but a substring test would call this one capable and the write would
+        # still fail.
+        ("Writable XMP-GCamera tags:\n  MotionPhotoVersion MicroVideo\n", False),
+    ],
+)
+def test_the_motion_photo_probe_reads_a_tag_listing(listing: str, expected: bool) -> None:
+    assert _lists_motion_photo(listing) is expected
+
+
 @needs_still_tools
+@needs_motion_photo_tag
 async def test_motion_photo_markers_are_flagged_without_a_trailer(tmp_path: Path) -> None:
     """The second signal, on its own: a vendor variant that carries the XMP tags only."""
     source = await _make_still(tmp_path / "in.jpg")
