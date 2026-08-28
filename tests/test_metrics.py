@@ -9,7 +9,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from immich_compressor.config import Settings
-from immich_compressor.metrics import CONTENT_TYPE, Histogram, render
+from immich_compressor.metrics import CONTENT_TYPE, PREFIX, Histogram, render
 from immich_compressor.server import create_app
 from immich_compressor.store import JobStore
 
@@ -58,6 +58,48 @@ def test_every_family_declares_its_help_and_type() -> None:
     assert families == helped
     for family in families:
         assert family.startswith("immich_compressor_")
+
+
+def test_the_published_families_are_exactly_these() -> None:
+    """The scrape surface, written down.
+
+    A family is a public interface: dropping or renaming one silently empties whatever
+    dashboard and alert was built on it, and nothing else in this suite would notice —
+    the checks around it all pass on a body that is one family short. This is the list
+    that has to be changed on purpose, in the same commit as the metric.
+    """
+    families = {line.split()[2] for line in _render().splitlines() if line.startswith("# TYPE")}
+    assert families == {
+        f"{PREFIX}_{name}"
+        for name in (
+            "build_info",
+            "jobs",
+            "jobs_skipped",
+            "jobs_total",
+            "compressed_assets",
+            "original_bytes",
+            "compressed_bytes",
+            "saved_bytes",
+            "webhooks_received_total",
+            "webhooks_rejected_total",
+            "shim_requests_total",
+            "shim_lines_rewritten_total",
+            "shim_hashes_translated_total",
+            "shim_gates_opened_total",
+            "shim_touches_total",
+            "shim_passthrough_errors_total",
+            "session_processed_total",
+            "session_skipped_total",
+            "session_failed_total",
+            "session_deleted_total",
+            "session_bytes_saved_total",
+            "encode_duration_seconds",
+            "paused",
+            "config_dry_run",
+            "config_trash_original",
+            "config_permanent_delete",
+        )
+    }
 
 
 def test_the_numbers_come_from_the_store() -> None:
@@ -165,6 +207,45 @@ def test_the_endpoint_reports_a_latched_pause(settings: Settings) -> None:
     asyncio.run(latch())
     with TestClient(create_app(settings)) as client:
         assert "immich_compressor_paused 1" in client.get("/metrics").text
+
+
+def test_stats_and_metrics_report_the_same_session_counters(settings: Settings) -> None:
+    """Two surfaces, one snapshot of the pipeline's counters.
+
+    They used to be assembled separately, field by field, from the same object. A counter
+    added to one is then invisible on the other until somebody notices — and the person
+    alerting on `session_failed_total` and the person reading `/stats` are looking at the
+    same incident.
+    """
+    app = create_app(settings)
+    with TestClient(app) as client:
+        stats = app.state.worker.pipeline.stats
+        stats.processed, stats.skipped, stats.failed = 7, 3, 2
+        stats.deleted, stats.bytes_saved = 5, 24024048
+
+        session = client.get("/stats").json()["session"]
+        exposition = client.get("/metrics").text
+
+    assert session == {"processed": 7, "skipped": 3, "failed": 2, "deleted": 5, "bytes_saved": 24024048}
+    for name, value in session.items():
+        assert f"immich_compressor_session_{name}_total {value}" in exposition
+
+
+def test_the_exposition_carries_only_the_settings_it_has_a_gauge_for(settings: Settings) -> None:
+    """`/stats` and `/metrics` share one settings snapshot, and it is the wider of the two.
+
+    `render` picks the three it can express as a number and drops the rest. Nothing may
+    fall through: `enabled_types` is a list, and a list rendered as a sample value is
+    exposition text no scraper can parse.
+    """
+    app = create_app(settings)
+    with TestClient(app) as client:
+        body = client.get("/metrics").text
+        published = client.get("/stats").json()["config"]
+
+    assert "config_dry_run" in body and "config_trash_original" in body
+    for ignored in set(published) - {"dry_run", "trash_original", "delete_mode"}:
+        assert ignored not in body
 
 
 def test_the_endpoint_needs_no_secret_and_exposes_no_asset_ids(settings: Settings) -> None:

@@ -27,7 +27,13 @@ from pydantic import BaseModel
 
 from . import __version__
 from .api import ImmichClient
-from .config import Settings, load_settings, warn_about_permanent_deletion, workflow_file_pattern
+from .config import (
+    BehaviorSettings,
+    Settings,
+    load_settings,
+    warn_about_permanent_deletion,
+    workflow_file_pattern,
+)
 from .encoder import probe_hardware_encoder
 from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from .metrics import render as render_metrics
@@ -69,6 +75,25 @@ class HealthResponse(BaseModel):
     # True while the surge breaker is latched: nothing is queued, processed or deleted.
     paused: bool = False
     paused_reason: str | None = None
+
+
+def _config_snapshot(behavior: BehaviorSettings) -> dict[str, Any]:
+    """The settings both reporting surfaces publish.
+
+    ``/stats`` shows all of it; ``render`` picks the three it has a gauge for and ignores
+    the rest. Built once so the two can never disagree about what the service is
+    configured to do — which is the question both of them exist to answer.
+    """
+    return {
+        "dry_run": behavior.dry_run,
+        "trash_original": behavior.trash_original,
+        "delete_mode": behavior.delete_mode,
+        "retention_days": behavior.retention_days,
+        "enabled_types": behavior.enabled_types,
+        "max_ratio": behavior.max_ratio,
+        "min_savings_bytes": behavior.min_savings_bytes,
+        "metadata_verify": behavior.metadata_verify,
+    }
 
 
 async def _warn_about_unusable_hardware(settings: Settings) -> None:
@@ -347,7 +372,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings: Settings = request.app.state.settings
         body = await store.stats()
         latched = await store.pause_state()
-        body["paused"] = {"since": latched.since.isoformat(), "reason": latched.reason} if latched else None
+        body["paused"] = latched.as_dict() if latched else None
         # First thing to read when nothing is happening: "0 received, 7 rejected" is a
         # different problem from "0 received, 0 rejected", and neither is visible anywhere
         # else. Persisted, so these survive a restart.
@@ -356,23 +381,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "received": counters[WEBHOOKS_RECEIVED],
             "rejected": counters[WEBHOOKS_REJECTED],
         }
-        body["session"] = {
-            "processed": worker.pipeline.stats.processed,
-            "skipped": worker.pipeline.stats.skipped,
-            "failed": worker.pipeline.stats.failed,
-            "deleted": worker.pipeline.stats.deleted,
-            "bytes_saved": worker.pipeline.stats.bytes_saved,
-        }
-        body["config"] = {
-            "dry_run": settings.behavior.dry_run,
-            "trash_original": settings.behavior.trash_original,
-            "delete_mode": settings.behavior.delete_mode,
-            "retention_days": settings.behavior.retention_days,
-            "enabled_types": settings.behavior.enabled_types,
-            "max_ratio": settings.behavior.max_ratio,
-            "min_savings_bytes": settings.behavior.min_savings_bytes,
-            "metadata_verify": settings.behavior.metadata_verify,
-        }
+        body["session"] = worker.pipeline.stats.as_dict()
+        body["config"] = _config_snapshot(settings.behavior)
         return body
 
     @app.get("/metrics", response_class=PlainTextResponse)
@@ -390,19 +400,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = render_metrics(
             store_stats=await store.stats(),
             counters=await store.counters(),
-            session={
-                "processed": stats.processed,
-                "skipped": stats.skipped,
-                "failed": stats.failed,
-                "deleted": stats.deleted,
-                "bytes_saved": stats.bytes_saved,
-            },
+            session=stats.as_dict(),
             encode_seconds=stats.encode_seconds,
-            config={
-                "dry_run": settings.behavior.dry_run,
-                "trash_original": settings.behavior.trash_original,
-                "delete_mode": settings.behavior.delete_mode,
-            },
+            config=_config_snapshot(settings.behavior),
             paused=await store.pause_state() is not None,
             version=__version__,
         )

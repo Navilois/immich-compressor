@@ -574,6 +574,20 @@ class JobStore:
         await self._conn.commit()
         return changed
 
+    async def _asset_ids(self, where: str, parameters: Sequence[Any], *, order: str) -> list[str]:
+        """The ``source_asset_id`` of every job one predicate selects, in ``order``.
+
+        The three selections below are the terminal states a CLI command offers to act on,
+        and they only differ in their ``WHERE`` and their tie-break. Sharing the query
+        keeps them returning the same shape — a list of ids, in a defined order, never a
+        row — which is what every caller passes straight on to Immich or to a requeue.
+        """
+        async with self._conn.execute(
+            f"SELECT source_asset_id FROM jobs WHERE {where} ORDER BY {order}",  # noqa: S608 - both are literals
+            parameters,
+        ) as cursor:
+            return [row["source_asset_id"] for row in await cursor.fetchall()]
+
     async def replaced_source_asset_ids(self) -> list[str]:
         """Every original this service replaced — the selection ``restore --all-pending`` uses.
 
@@ -582,29 +596,24 @@ class JobStore:
         without saying so, and any state short of ``done`` has not had its original
         removed yet, so restoring it would touch an asset this service did not take away.
         """
-        async with self._conn.execute(
-            "SELECT source_asset_id FROM jobs WHERE state = ? AND new_asset_id IS NOT NULL "
-            "ORDER BY updated_at ASC, source_asset_id ASC",
+        return await self._asset_ids(
+            "state = ? AND new_asset_id IS NOT NULL",
             (JobState.DONE.value,),
-        ) as cursor:
-            return [row["source_asset_id"] for row in await cursor.fetchall()]
+            order="updated_at ASC, source_asset_id ASC",
+        )
 
     async def skipped_asset_ids(self, reason: SkipReason) -> list[str]:
         """Every asset currently parked in ``skipped`` for one specific reason."""
-        async with self._conn.execute(
-            "SELECT source_asset_id FROM jobs WHERE state = ? AND skip_reason = ? ORDER BY updated_at ASC",
+        return await self._asset_ids(
+            "state = ? AND skip_reason = ?",
             (JobState.SKIPPED.value, reason.value),
-        ) as cursor:
-            return [row["source_asset_id"] for row in await cursor.fetchall()]
+            order="updated_at ASC",
+        )
 
     async def failed_asset_ids(self, *, error_contains: str | None = None) -> list[str]:
         """Every asset parked in ``failed``, or only those whose error contains a string."""
         predicate, parameters = _failed_predicate(error_contains)
-        async with self._conn.execute(
-            f"SELECT source_asset_id FROM jobs WHERE {predicate} ORDER BY updated_at ASC",  # noqa: S608 - predicate is a literal
-            parameters,
-        ) as cursor:
-            return [row["source_asset_id"] for row in await cursor.fetchall()]
+        return await self._asset_ids(predicate, parameters, order="updated_at ASC")
 
     async def due_deletions(self, limit: int = 50) -> list[Job]:
         async with self._conn.execute(

@@ -323,7 +323,7 @@ async def _report(settings: Settings, as_json: bool) -> int:
         counters = await store.counters()
         inventory = await store.inventory_stats()
     if as_json:
-        stats["paused"] = {"since": latched.since.isoformat(), "reason": latched.reason} if latched else None
+        stats["paused"] = latched.as_dict() if latched else None
         stats["webhooks"] = {
             "received": counters[WEBHOOKS_RECEIVED],
             "rejected": counters[WEBHOOKS_REJECTED],
