@@ -27,10 +27,11 @@ from pydantic import BaseModel
 from . import __version__
 from .api import ImmichClient
 from .config import BehaviorSettings, Settings
+from .ingest import WebhookRejected, check_ingest_guards
 from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from .metrics import render as render_metrics
 from .models import JobState, RejectReason, WebhookPayload
-from .pipeline import WebhookRejected, Worker, check_ingest_guards
+from .pipeline import Worker
 from .store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 logger = logging.getLogger(__name__)
