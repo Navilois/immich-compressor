@@ -16,6 +16,7 @@ from typing import Any, Self
 
 import httpx
 
+from .config import ImmichSettings
 from .models import (
     AssetDetail,
     AssetMediaResponse,
@@ -496,6 +497,21 @@ class ImmichClient:
             total=_as_page_number(assets.get("total")),
             paged=True,
         )
+
+
+def client_for(settings: ImmichSettings) -> ImmichClient:
+    """The client this deployment's ``immich`` block describes.
+
+    Five callers used to spell this out, and four of them — every command that talks to
+    Immich — left ``connect_timeout_s`` off, so a configured value reached the running
+    service and nothing else. There is one way to build the client now, and it is this one.
+    """
+    return ImmichClient(
+        settings.base_url,
+        settings.api_key.get_secret_value(),
+        timeout_s=settings.timeout_s,
+        connect_timeout_s=settings.connect_timeout_s,
+    )
 
 
 def _as_page_number(value: object) -> int | None:

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`immich.connect_timeout_s` now applies to the commands too, not only to the running
+  service.** `check`, `backfill scan`, `backfill run` and `restore` each built their Immich
+  client by hand and left the setting off, so a deployment that raised it for a slow or
+  distant server still got the ten-second default from all four — with nothing to say so.
+  There is one factory now, and every caller goes through it.
+
 ## [1.4.0] - 2026-08-27
 
 ### Added

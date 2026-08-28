@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
 from . import __version__
-from .api import ImmichClient
+from .api import client_for
 from .config import Settings, load_settings, warn_about_permanent_deletion, workflow_file_pattern
 from .encoder import probe_hardware_encoder
 from .pipeline import SurgeDetector, Worker
@@ -86,12 +86,7 @@ def _lifespan(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store = JobStore(resolved.database_path)
         await store.open()
-        client = ImmichClient(
-            resolved.immich.base_url,
-            resolved.immich.api_key.get_secret_value(),
-            timeout_s=resolved.immich.timeout_s,
-            connect_timeout_s=resolved.immich.connect_timeout_s,
-        )
+        client = client_for(resolved.immich)
         warn_about_permanent_deletion(resolved.behavior)
         # The marker couples three things nobody ever sees side by side: this setting, the
         # filename the encoder writes, and the workflow's `assetFileFilter` regex — which

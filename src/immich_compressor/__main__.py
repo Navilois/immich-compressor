@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, backfill
-from .api import ImmichClient, ImmichError
+from .api import ImmichError, client_for
 from .config import ConfigError, Settings, load_settings
 from .encoder import (
     EncodeError,
@@ -137,11 +137,7 @@ async def _webhook_lines(settings: Settings) -> list[str]:
 
 
 async def _check(settings: Settings) -> int:
-    async with ImmichClient(
-        settings.immich.base_url,
-        settings.immich.api_key.get_secret_value(),
-        timeout_s=settings.immich.timeout_s,
-    ) as client:
+    async with client_for(settings.immich) as client:
         version = await client.server_version()
     print(f"Immich reachable, version {version}")
     print(f"presets: {', '.join(f'{p.name}({p.match_type})' for p in settings.presets) or 'none'}")
@@ -571,14 +567,7 @@ async def _backfill_scan(settings: Settings, asset_type: str | None, rescan: boo
     if not types:
         print("no asset types are enabled — see behavior.enabled_types", file=sys.stderr)
         return 1
-    async with (
-        ImmichClient(
-            settings.immich.base_url,
-            settings.immich.api_key.get_secret_value(),
-            timeout_s=settings.immich.timeout_s,
-        ) as client,
-        JobStore(settings.database_path) as store,
-    ):
+    async with client_for(settings.immich) as client, JobStore(settings.database_path) as store:
         summaries = await backfill.scan(
             client, store, settings, asset_types=types, page_size=page_size, rescan=rescan
         )
@@ -619,14 +608,7 @@ async def _backfill_run(
     if not types:
         print("no asset types are enabled — see behavior.enabled_types", file=sys.stderr)
         return 1
-    async with (
-        ImmichClient(
-            settings.immich.base_url,
-            settings.immich.api_key.get_secret_value(),
-            timeout_s=settings.immich.timeout_s,
-        ) as client,
-        JobStore(settings.database_path) as store,
-    ):
+    async with client_for(settings.immich) as client, JobStore(settings.database_path) as store:
         stats = await store.inventory_stats()
         unscanned = [name for name in types if name not in stats["types"]]
         if unscanned:
@@ -737,11 +719,7 @@ RESTORE_INCOMPLETE = 3
 
 
 async def _restore(settings: Settings, asset_ids: list[str]) -> int:
-    async with ImmichClient(
-        settings.immich.base_url,
-        settings.immich.api_key.get_secret_value(),
-        timeout_s=settings.immich.timeout_s,
-    ) as client:
+    async with client_for(settings.immich) as client:
         try:
             outcome = await client.restore_assets_best_effort(asset_ids)
         except ImmichError as exc:

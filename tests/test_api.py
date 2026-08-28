@@ -11,7 +11,14 @@ import httpx
 import pytest
 import respx
 
-from immich_compressor.api import ImmichClient, ImmichError, format_timestamp, sanitize_rating
+from immich_compressor.api import (
+    ImmichClient,
+    ImmichError,
+    client_for,
+    format_timestamp,
+    sanitize_rating,
+)
+from immich_compressor.config import ImmichSettings
 from immich_compressor.models import MetadataItem, UpdateAssetFields
 
 BASE = "http://immich-test:2283/api"
@@ -22,6 +29,23 @@ async def client() -> ImmichClient:
     api_client = ImmichClient(BASE, "test-key", timeout_s=5, max_retries=2)
     yield api_client
     await api_client.aclose()
+
+
+async def test_the_client_factory_carries_both_timeouts_out_of_the_settings() -> None:
+    """`immich.connect_timeout_s` used to reach the running service and nothing else.
+
+    Five callers spelled out the client's construction, and the four in the command line
+    left this setting off. A deployment that raised it — a slow or distant Immich — still
+    got the ten-second default from `check`, `backfill` and `restore`, with nothing to say
+    so. There is one factory now, and the transport it configures is where both settings
+    become observable.
+    """
+    built = client_for(ImmichSettings(base_url=BASE, api_key="k", timeout_s=42.0, connect_timeout_s=7.0))
+    try:
+        assert built._client.timeout == httpx.Timeout(42.0, connect=7.0)
+        assert built._client.headers["x-api-key"] == "k"
+    finally:
+        await built.aclose()
 
 
 def test_format_timestamp_matches_the_openapi_pattern() -> None:
