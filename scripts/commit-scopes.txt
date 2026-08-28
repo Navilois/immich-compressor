@@ -31,5 +31,6 @@ release
 safety
 setup
 shim
+skills
 startup
 tests

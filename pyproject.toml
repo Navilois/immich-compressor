@@ -114,6 +114,8 @@ docstring-code-format = true
 "src/immich_compressor/__main__.py" = ["T20"]
 "src/immich_compressor/setup_cmd.py" = ["T20"]
 "scripts/*.py" = ["T20"]
+# Same reason: the run skill's driver is a command-line tool whose output is the point.
+".claude/skills/*/driver.py" = ["T20"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
