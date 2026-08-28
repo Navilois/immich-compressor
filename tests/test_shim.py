@@ -290,6 +290,98 @@ def test_upload_check_is_not_suppressed_by_a_returned_original() -> None:
     assert json.loads(forwarded)["assets"][0]["checksum"] == REPLACEMENT_HASH
 
 
+# ------------------------------------------------- the copy the store has not seen yet
+
+
+def test_the_armed_map_is_the_reverse_of_the_rewrite() -> None:
+    """What lets a line be recognised as somebody else's claim on a hash we are giving away."""
+    maps = TranslationMaps.build([entry(freed=True)])
+    assert maps.armed == {(OWNER, ORIGINAL_HASH): [REPLACEMENT_ID]}
+
+    # Suppressed or still gated, nothing is being handed over, so nothing can be taken.
+    assert TranslationMaps.build([entry(freed=True)], [returned()]).armed == {}
+    assert TranslationMaps.build([entry(freed=False)]).armed == {}
+
+
+def test_a_foreign_line_holding_an_armed_checksum_is_reported_as_a_claim() -> None:
+    """The copy's own line, arriving before any job row says anything about it."""
+    maps = TranslationMaps.build([entry(freed=True)])
+    line = asset_line(COPY_ID, ORIGINAL_HASH)
+    outcome = rewrite_sync_line(line, maps)
+
+    assert outcome.data == line, "the copy's line is not ours to change"
+    assert outcome.rewritten is False
+    assert [(c.asset_id, c.owner_id, c.checksum) for c in outcome.claims_observed] == [
+        (COPY_ID, OWNER, ORIGINAL_HASH)
+    ]
+
+
+def test_the_replacements_own_line_is_never_its_own_claim() -> None:
+    """A translated line comes back on the next pass carrying the hash we gave it.
+
+    Reading that as a claim would make every translation suppress itself one pass later.
+    """
+    maps = TranslationMaps.build([entry(freed=True)])
+    assert rewrite_sync_line(asset_line(REPLACEMENT_ID, ORIGINAL_HASH), maps).claims_observed == ()
+
+
+@pytest.mark.parametrize(
+    ("asset_id", "checksum", "owner"),
+    [
+        (COPY_ID, "some-other-hash=", OWNER),
+        (COPY_ID, ORIGINAL_HASH, "99999999-9999-4999-8999-999999999999"),
+    ],
+    ids=["another checksum", "another owner"],
+)
+def test_a_line_that_takes_nothing_from_us_is_not_a_claim(asset_id: str, checksum: str, owner: str) -> None:
+    """The key is ``(owner_id, checksum)``, exactly as the mirror's unique index is."""
+    maps = TranslationMaps.build([entry(freed=True)])
+    line = json.dumps(
+        {"type": "AssetV2", "data": {"id": asset_id, "ownerId": owner, "checksum": checksum}}
+    ).encode()
+    assert rewrite_sync_line(line, maps).claims_observed == ()
+
+
+def test_a_claim_seen_earlier_in_the_response_withholds_the_translation() -> None:
+    """The window itself: an open gate, no returned original in the store, and no rewrite.
+
+    Byte-identical, not merely equivalent — a line the shim declines to touch must reach the
+    client exactly as Immich wrote it.
+    """
+    maps = TranslationMaps.build([entry(freed=True)])
+    line = asset_line()
+
+    assert rewrite_sync_line(line, maps).rewritten is True, "control: armed without the claim"
+
+    outcome = rewrite_sync_line(line, maps, claimed={(OWNER, ORIGINAL_HASH)})
+    assert outcome.rewritten is False
+    assert outcome.data == line
+
+
+def test_a_claim_on_another_owners_copy_of_the_hash_does_not_withhold_it() -> None:
+    maps = TranslationMaps.build([entry(freed=True)])
+    claimed = {("99999999-9999-4999-8999-999999999999", ORIGINAL_HASH)}
+    assert rewrite_sync_line(asset_line(), maps, claimed=claimed).rewritten is True
+
+
+def test_a_line_without_an_owner_claims_nothing_and_is_still_translated() -> None:
+    """Fail-open, as everywhere else here: an unrecognised shape is not a reason to stop."""
+    maps = TranslationMaps.build([entry(freed=True)])
+    line = json.dumps(
+        {"type": "AssetV2", "data": {"id": REPLACEMENT_ID, "checksum": REPLACEMENT_HASH}}
+    ).encode()
+    outcome = rewrite_sync_line(line, maps, claimed={(OWNER, ORIGINAL_HASH)})
+    assert outcome.claims_observed == ()
+    assert outcome.rewritten is True
+
+
+def test_a_claim_is_observed_even_when_translation_is_off() -> None:
+    """`log_only` and a disabled rewrite still learn, so switching on does not start blind."""
+    maps = TranslationMaps.build([entry(freed=True)])
+    outcome = rewrite_sync_line(asset_line(COPY_ID, ORIGINAL_HASH), maps, translate=False)
+    assert len(outcome.claims_observed) == 1
+
+
 # ------------------------------------------------------------------- the upload check
 
 
@@ -412,6 +504,89 @@ async def test_ledger_keeps_serving_when_the_store_fails(tmp_path: Path) -> None
         assert (await ledger.maps()).sync_rewrite == {REPLACEMENT_ID: ORIGINAL_HASH}
     finally:
         pass
+
+
+async def test_ledger_remembers_a_claim_the_store_cannot_see_yet(tmp_path: Path) -> None:
+    """The lag, at the layer that closes it: an open gate, no `re_uploaded` row, no rewrite."""
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    try:
+        ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
+        assert (await ledger.maps()).sync_rewrite == {REPLACEMENT_ID: ORIGINAL_HASH}
+
+        assert ledger.observe([returned()]) == 1
+        # A frozen clock: only the forced reload inside `observe` can be what refreshed it.
+        maps = await ledger.maps()
+        assert maps.sync_rewrite == {}
+        assert maps.claim_watch == {COPY_ID: [REPLACEMENT_ID]}
+        assert maps.suppressed == 1
+    finally:
+        await store.close()
+
+
+async def test_ledger_counts_a_claim_it_already_holds_as_nothing_new(tmp_path: Path) -> None:
+    """Every response re-delivers nothing, but a client replaying one must not re-log."""
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    try:
+        ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
+        assert ledger.observe([returned()]) == 1
+        assert ledger.observe([returned()]) == 0
+    finally:
+        await store.close()
+
+
+async def test_ledger_does_not_count_a_claim_twice_when_the_store_catches_up(tmp_path: Path) -> None:
+    """The overlap is the normal end state: the pipeline classifies what the shim saw."""
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    try:
+        ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
+        ledger.observe([returned()])
+        maps = await ledger.maps()
+        assert maps.claim_watch == {COPY_ID: [REPLACEMENT_ID]}
+        assert maps.suppressed == 1
+    finally:
+        await store.close()
+
+
+async def test_ledger_drops_a_sighting_the_store_has_caught_up_on(tmp_path: Path) -> None:
+    """The pipeline classifying the copy is the sighting's end, not a second copy of it.
+
+    Once `re_uploaded` is on the row the store answers durably and on its own, so keeping
+    the sighting would only grow a dict for the life of the process.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    try:
+        ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
+        ledger.observe([returned()])
+        assert (await ledger.maps()).suppressed == 1
+
+        # The pipeline gets to the copy's job and reaches the same verdict.
+        await store.enqueue(COPY_ID, PAYLOAD, delay_seconds=0)
+        await store.update(COPY_ID, source_checksum=ORIGINAL_HASH, owner_id=OWNER)
+        await store.mark_skipped(COPY_ID, SkipReason.RE_UPLOADED)
+        ledger.invalidate()
+        assert (await ledger.maps()).suppressed == 1, "still suppressed, now from the store"
+
+        assert ledger.release(COPY_ID) is False, "the sighting was dropped, not duplicated"
+        ledger.invalidate()
+        assert (await ledger.maps()).suppressed == 1, "and the store's row is untouched by that"
+    finally:
+        await store.close()
+
+
+async def test_ledger_releases_an_observed_claim(tmp_path: Path) -> None:
+    """A sighting has to be droppable, or the copy's delete would never re-arm anything."""
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    try:
+        ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
+        ledger.observe([returned()])
+        assert (await ledger.maps()).sync_rewrite == {}
+
+        assert ledger.release(COPY_ID) is True
+        assert ledger.release(COPY_ID) is False, "second time it holds nothing"
+        ledger.invalidate()
+        assert (await ledger.maps()).sync_rewrite == {REPLACEMENT_ID: ORIGINAL_HASH}
+    finally:
+        await store.close()
 
 
 # -------------------------------------------------------------------------- the routes
@@ -894,6 +1069,140 @@ def test_describe_names_the_live_routes() -> None:
     assert "log_only" in line
     assert "/api/sync/stream" in line
     assert "http://immich-server:2283" in line
+
+
+async def test_sync_route_withholds_the_translation_when_the_copys_line_is_in_the_response(
+    tmp_path: Path,
+) -> None:
+    """The reported failure, through the route that produced it.
+
+    The store knows nothing about the copy — its job is still `queued`, which is what the
+    device hit. The only thing saying the checksum is taken is the copy's own line, four
+    lines earlier in the same response.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    upstream = Upstream()
+    upstream.lines = [asset_line(COPY_ID, ORIGINAL_HASH), asset_line()]
+    app, _, _ = build(store, upstream)
+    try:
+        with TestClient(app) as http:
+            response = http.post("/api/sync/stream", json={})
+        assert response.status_code == 200
+        copy, replacement = [json.loads(line) for line in response.content.splitlines()]
+        assert copy["data"]["checksum"] == ORIGINAL_HASH, "the copy's line is untouched"
+        assert replacement["data"]["checksum"] == REPLACEMENT_HASH, "and so is the replacement's"
+
+        counters = await store.counters()
+        assert counters[SHIM_LINES_REWRITTEN] == 0
+        assert counters[SHIM_HASHES_TRANSLATED] == 0
+        assert await store.returned_originals() == [], "nothing was written to the job store"
+    finally:
+        await store.close()
+
+
+async def test_sync_route_translates_the_same_response_without_the_copy(tmp_path: Path) -> None:
+    """The control for the test above: same store, same line, the copy's line removed."""
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    upstream = Upstream()
+    upstream.lines = [asset_line()]
+    app, _, _ = build(store, upstream)
+    try:
+        with TestClient(app) as http:
+            response = http.post("/api/sync/stream", json={})
+        assert json.loads(response.content)["data"]["checksum"] == ORIGINAL_HASH
+    finally:
+        await store.close()
+
+
+async def test_sync_route_remembers_the_claim_for_the_next_request(tmp_path: Path) -> None:
+    """The copy's line is a delta and is sent once; the replacement's comes back every touch."""
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    upstream = Upstream()
+    app, _, _ = build(store, upstream)
+    try:
+        with TestClient(app) as http:
+            upstream.lines = [asset_line(COPY_ID, ORIGINAL_HASH)]
+            assert http.post("/api/sync/stream", json={}).status_code == 200
+
+            upstream.lines = [asset_line()]
+            later = http.post("/api/sync/stream", json={})
+        assert json.loads(later.content)["data"]["checksum"] == REPLACEMENT_HASH
+        assert (await store.counters())[SHIM_LINES_REWRITTEN] == 0
+    finally:
+        await store.close()
+
+
+async def test_the_delete_of_an_observed_copy_re_arms_the_translation(tmp_path: Path) -> None:
+    """The re-arm, for a claim that never had a job row for `mark_original_freed` to find.
+
+    Without the ledger being told directly, that write returns `False`, the loop skips, and
+    a sighting would go on suppressing for the life of the process.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    upstream = Upstream()
+    app, _, touched = build(store, upstream)
+    try:
+        with TestClient(app) as http:
+            upstream.lines = [asset_line(COPY_ID, ORIGINAL_HASH)]
+            http.post("/api/sync/stream", json={})
+
+            upstream.lines = [delete_line(COPY_ID)]
+            http.post("/api/sync/stream", json={})
+
+            upstream.lines = [asset_line()]
+            armed_again = http.post("/api/sync/stream", json={})
+        assert json.loads(armed_again.content)["data"]["checksum"] == ORIGINAL_HASH
+
+        assert touched == [REPLACEMENT_ID], "the replacement is re-offered, or the client never sees it"
+        counters = await store.counters()
+        assert counters[SHIM_TOUCHES] == 1
+        assert counters[SHIM_GATES_OPENED] == 0, "no gate opens for a claim being released"
+    finally:
+        await store.close()
+
+
+async def test_a_claim_behind_the_line_it_should_stop_costs_one_batch_and_no_more(
+    tmp_path: Path,
+) -> None:
+    """The limit of a forward-only scan, and the reason the sighting is remembered.
+
+    Nothing orders a run of asset lines so that the copy always precedes the replacement it
+    took the checksum from — both were touched within seconds of each other in the reported
+    failure. When it lands the wrong way round the client's batch still fails on the unique
+    index and Immich re-sends it. The retry is what must not fail again.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    upstream = Upstream()
+    app, _, _ = build(store, upstream)
+    try:
+        with TestClient(app) as http:
+            upstream.lines = [asset_line(), asset_line(COPY_ID, ORIGINAL_HASH)]
+            first = http.post("/api/sync/stream", json={})
+            # The client aborts this batch and never acks it, so Immich sends it again.
+            retry = http.post("/api/sync/stream", json={})
+
+        replacement, _copy = [json.loads(line) for line in first.content.splitlines()]
+        assert replacement["data"]["checksum"] == ORIGINAL_HASH, "the claim came too late for this one"
+
+        replacement, _copy = [json.loads(line) for line in retry.content.splitlines()]
+        assert replacement["data"]["checksum"] == REPLACEMENT_HASH, "the re-send is what has to apply"
+        assert (await store.counters())[SHIM_LINES_REWRITTEN] == 1, "translated once, on the pass that failed"
+    finally:
+        await store.close()
+
+
+async def test_sync_route_never_translates_into_a_claim_in_log_only(tmp_path: Path) -> None:
+    """`log_only` changes nothing on the wire, claim or no claim."""
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    upstream = Upstream()
+    upstream.lines = [asset_line(COPY_ID, ORIGINAL_HASH), asset_line()]
+    app, _, _ = build(store, upstream, log_only=True)
+    try:
+        with TestClient(app) as http:
+            response = http.post("/api/sync/stream", json={})
+        assert response.content == b"".join(upstream.lines)
+    finally:
+        await store.close()
 
 
 # --------------------------------------------------------- mounting, through create_app

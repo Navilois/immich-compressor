@@ -13,6 +13,12 @@ this file is about the other one: a copy the device uploaded again after the gat
 The pipeline recognises it and leaves it alone, so it sits there holding the hash under a
 new id, and a translation that only consults the gate walks straight into the same index.
 
+The third part is about *when* the pipeline knows that. It is not the moment the copy
+arrives: the asset is live as soon as Immich answers 201, and its job is `queued` — with no
+checksum written to it yet — until a worker gets there. The store the shim asks cannot
+answer during that window, and the last section drives a real one to show what a device
+syncing inside it is handed.
+
 It needs no live Immich and no phone. The mirror is a SQLite database built from Immich's
 own schema, driven by the same three operations the app performs, so the damage a premature
 translation would do happens here instead of on someone's device.
@@ -46,12 +52,14 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from immich_compressor.models import LedgerEntry, ReturnedOriginal
+from immich_compressor.models import JobState, LedgerEntry, ReturnedOriginal, SkipReason
 from immich_compressor.shim import TranslationMaps, rewrite_sync_line
+from immich_compressor.store import JobStore
 
 OWNER = "11111111-1111-4111-8111-111111111111"
 OTHER_OWNER = "22222222-2222-4222-8222-222222222222"
@@ -558,3 +566,197 @@ def test_deleting_the_copy_re_arms_the_translation() -> None:
 
     assert m.holders_of(ORIGINAL_HASH) == [REPLACEMENT_ID]
     assert m.is_backup_candidate(ORIGINAL_HASH) is False
+
+
+# --------------------------------------------------------------------------------------
+# The window between the upload and the pipeline.
+#
+# Everything above reads the copy out of `jobs`, where `_check_re_upload` put it. That row
+# does not exist yet at the moment the copy lands: Immich answers `POST /assets` with 201
+# and the asset is live, while its job sits in `queued` carrying no checksum and no owner
+# at all — the pipeline writes those in step 2, and parks the job at `re_uploaded` on the
+# line after. Between the 201 and that step the store cannot answer the only question the
+# shim asks it, and a device syncing in between is handed the collision.
+#
+# Measured on a device on 2026-08-28: 23 jobs of one re-upload burst were still `queued`
+# when the sync batch aborted.
+# --------------------------------------------------------------------------------------
+
+QUEUED_PAYLOAD = {"type": "AssetV1", "trigger": "AssetMetadataExtraction", "data": {"asset": {"id": "a"}}}
+
+
+async def replaced_and_returned(path: Path, *, classified: bool) -> JobStore:
+    """The ledger row with its gate open, and the copy back — as a job, in one of two states.
+
+    ``classified`` is the whole difference between the two halves of this section: the
+    pipeline has reached the copy's job and recognised it, or it has not reached it yet.
+    Nothing else about the store, the stream or the mirror differs.
+    """
+    store = JobStore(path)
+    await store.open()
+    await store.enqueue(ORIGINAL_ID, QUEUED_PAYLOAD, delay_seconds=0)
+    await store.update(
+        ORIGINAL_ID,
+        new_asset_id=REPLACEMENT_ID,
+        new_checksum=REPLACEMENT_HASH,
+        source_checksum=ORIGINAL_HASH,
+        owner_id=OWNER,
+        state=JobState.DONE,
+    )
+    await store.mark_original_freed(ORIGINAL_ID)
+
+    # The device put the original back. All that has happened is the webhook.
+    await store.enqueue(COPY_ID, QUEUED_PAYLOAD, delay_seconds=0)
+    if classified:
+        await store.update(COPY_ID, source_checksum=ORIGINAL_HASH, owner_id=OWNER)
+        await store.mark_skipped(COPY_ID, SkipReason.RE_UPLOADED)
+    return store
+
+
+async def maps_from(store: JobStore) -> TranslationMaps:
+    return TranslationMaps.build(await store.ledger_entries(), await store.returned_originals())
+
+
+async def test_a_queued_re_upload_carries_no_checksum_for_the_store_to_match(tmp_path: Path) -> None:
+    """The input, at its source. Not "the reason is not set yet" — there is nothing to read.
+
+    ``returned_originals`` selects on ``source_checksum``, and the pipeline writes that in
+    step 2 (`pipeline.py`, right before `_check_re_upload`). A queued job has neither it nor
+    an owner, so no widening of that query could have seen this row.
+    """
+    store = await replaced_and_returned(tmp_path / "s.db", classified=False)
+    try:
+        job = await store.get(COPY_ID)
+        assert job is not None
+        assert job.state is JobState.QUEUED
+        assert job.source_checksum is None
+        assert job.owner_id is None
+        assert job.skip_reason is None
+
+        assert await store.returned_originals() == []
+    finally:
+        await store.close()
+
+
+async def test_the_window_arms_the_translation_and_the_batch_aborts(tmp_path: Path) -> None:
+    """The defect, reproduced: the store alone still hands the checksum over.
+
+    This is the reported failure — ``SqliteException(2067)`` out of ``updateAssetsV2``,
+    taking the healthy line in the same batch with it.
+    """
+    store = await replaced_and_returned(tmp_path / "s.db", classified=False)
+    try:
+        maps = await maps_from(store)
+        assert maps.sync_rewrite == {REPLACEMENT_ID: ORIGINAL_HASH}, "armed, with the copy live"
+        assert maps.suppressed == 0
+
+        m = mirrored_both()
+        translated = rewrite_sync_line(asset_line(), maps).data
+        assert json.loads(translated)["data"]["checksum"] == ORIGINAL_HASH
+
+        with pytest.raises(sqlite3.IntegrityError, match="owner_id"):
+            m.apply(asset_line(UNRELATED_ID, UNRELATED_HASH), translated)
+        assert m.checksum_of(UNRELATED_ID) is None, "the whole batch rolled back"
+    finally:
+        await store.close()
+
+
+async def test_the_copys_own_line_is_what_stands_the_translation_down(tmp_path: Path) -> None:
+    """The fix, on the same store the test above fails on. Only the stream is added.
+
+    The copy's ``AssetV2`` line says the checksum is taken — that is the same fact the job
+    row will carry minutes later, arriving on the channel that writes the mirror rather
+    than the one the pipeline writes.
+    """
+    store = await replaced_and_returned(tmp_path / "s.db", classified=False)
+    try:
+        maps = await maps_from(store)
+        claimed: set[tuple[str, str]] = set()
+
+        copys_line = asset_line(COPY_ID, ORIGINAL_HASH)
+        seen = rewrite_sync_line(copys_line, maps, claimed=claimed)
+        assert seen.data == copys_line, "the copy's own line is never rewritten"
+        assert [(c.asset_id, c.owner_id, c.checksum) for c in seen.claims_observed] == [
+            (COPY_ID, OWNER, ORIGINAL_HASH)
+        ]
+        claimed.update((c.owner_id, c.checksum) for c in seen.claims_observed)
+
+        held_back = rewrite_sync_line(asset_line(), maps, claimed=claimed)
+        assert held_back.data == asset_line(), "byte-identical while the copy holds the hash"
+
+        m = mirrored_both()
+        m.apply(asset_line(UNRELATED_ID, UNRELATED_HASH), held_back.data)
+        assert m.checksum_of(UNRELATED_ID) == UNRELATED_HASH, "the batch applied"
+        assert m.holders_of(ORIGINAL_HASH) == [COPY_ID]
+        assert m.is_backup_candidate(ORIGINAL_HASH) is False, "and the file still does not upload"
+    finally:
+        await store.close()
+
+
+async def test_classification_closes_the_same_window_from_the_store(tmp_path: Path) -> None:
+    """The negative control. The same store, one state changed, and the result flips.
+
+    If marking the copy's job does not flip this, the test above is not testing the lag.
+    """
+    store = await replaced_and_returned(tmp_path / "s.db", classified=True)
+    try:
+        assert [row.asset_id for row in await store.returned_originals()] == [COPY_ID]
+
+        maps = await maps_from(store)
+        assert maps.sync_rewrite == {}, "no stream needed once the pipeline has been there"
+        assert maps.claim_watch == {COPY_ID: [REPLACEMENT_ID]}
+        assert maps.suppressed == 1
+
+        m = mirrored_both()
+        held_back = rewrite_sync_line(asset_line(), maps).data
+        assert held_back == asset_line()
+        m.apply(asset_line(UNRELATED_ID, UNRELATED_HASH), held_back)
+        assert m.checksum_of(UNRELATED_ID) == UNRELATED_HASH
+    finally:
+        await store.close()
+
+
+async def test_a_claim_seen_once_governs_the_next_response_too(tmp_path: Path) -> None:
+    """What the shim remembers a sighting *for*: the copy's line is sent once.
+
+    The stream is a delta. The copy's line goes past on the pass that first delivers it and
+    never again, while the replacement's line comes back every time anything touches it —
+    so a sighting that lasted only as long as one response would protect one batch and then
+    step aside. Feeding it back into the maps is `ChecksumLedger.observe`, tested there.
+    """
+    store = await replaced_and_returned(tmp_path / "s.db", classified=False)
+    try:
+        maps = await maps_from(store)
+        observed = rewrite_sync_line(asset_line(COPY_ID, ORIGINAL_HASH), maps).claims_observed
+        assert observed
+
+        # The next request, built the way the ledger builds it: the store still knows
+        # nothing, and the sighting is the only thing suppressing.
+        later = TranslationMaps.build(await store.ledger_entries(), [*observed])
+        assert later.sync_rewrite == {}
+        assert later.claim_watch == {COPY_ID: [REPLACEMENT_ID]}
+
+        m = mirrored_both()
+        m.apply(rewrite_sync_line(asset_line(), later).data)
+        assert m.holders_of(ORIGINAL_HASH) == [COPY_ID]
+        assert m.checksum_of(REPLACEMENT_ID) == REPLACEMENT_HASH
+    finally:
+        await store.close()
+
+
+async def test_a_sighting_and_a_job_row_for_one_asset_are_counted_once(tmp_path: Path) -> None:
+    """The two sources overlap the moment the pipeline catches up, and must not double.
+
+    ``suppressed`` is what an operator reads to see the shim deliberately doing nothing.
+    Counting one asset twice would make that number a fiction on every classified copy.
+    """
+    store = await replaced_and_returned(tmp_path / "s.db", classified=True)
+    try:
+        entries = await store.ledger_entries()
+        from_store = await store.returned_originals()
+        both = TranslationMaps.build(entries, [*from_store, came_back()])
+
+        assert both.claim_watch == {COPY_ID: [REPLACEMENT_ID]}
+        assert both.suppressed == 1
+    finally:
+        await store.close()

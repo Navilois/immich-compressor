@@ -11,6 +11,38 @@ and minor releases arrive that way and a breaking change never does. The
 
 Job state lives in a volume and survives. Schema changes are applied automatically on open.
 
+## Unreleased
+
+### If a device's sync stopped advancing, this is the upgrade that fixes it
+
+Nothing to configure and no schema change — but read this if you run the shim, because the
+symptom is specific and easy to misread as an Immich fault.
+
+A device whose sync batch hit
+`SqliteException(2067): UNIQUE constraint failed: remote_asset_entity.owner_id,
+remote_asset_entity.checksum` on `updateAssetsV2` stopped making progress: the batch dies
+before its ack, so Immich re-sends the same batch and the client never advances its
+checkpoint. 1.4.0 already held a translation back once this service had recognised a
+returned original — but that recognition is a `re_uploaded` job row, and the job is `queued`
+from the moment Immich accepts the upload until a worker reaches it. Behind a backlog that
+is minutes to hours, and every sync in between was decided against a job store that did not
+yet know the checksum was taken.
+
+The shim now takes the claim off the sync stream instead of waiting for the job. Nothing is
+written to your library and nothing is written to the job store; a claim learned this way
+is held in memory, and the job row remains the durable half.
+
+**This makes duplicate cleanups safer, and does not make them safe.** The re-upload window a
+cleanup opens is unchanged — see the 1.3.1 → 1.4.0 notes below — and the advice there still
+stands: run one with device backup switched off, and turn it back on after a sync has
+carried the translations. What changes is that a copy which does come back no longer wedges
+a device while its job waits in the queue.
+
+**If a device is wedged right now,** upgrade and let it sync. Do not set
+`shim.rewrite_sync_stream: false` to clear it: that strips the translation from every open
+gate at once and exposes all of them, which is a far larger change than the stall it would
+end.
+
 ## 1.3.1 → 1.4.0
 
 ### The surge breaker is now off by default — check whether you were relying on it
