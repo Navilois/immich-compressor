@@ -158,7 +158,50 @@ This is the one write the shim's machinery makes against your library. It is cou
 
 ## Setting it up
 
-Two paths must reach this service. Everything else goes straight to Immich.
+### What has to be true first
+
+The shim only ever sees traffic a reverse proxy hands it, and **a stock Immich has no
+reverse proxy.** The official compose file publishes `immich-server` on `2283` and serves
+the web app and the API from that container directly — `docker-compose.test.yaml` in this
+repository is derived from it and has no proxy either. If that is your deployment, the shim
+is not two `location` blocks away: there is nothing yet to put them in. That is the
+condition [motivation.md](motivation.md#r10-and-the-one-thing-that-is-not-solved) records
+as the one this project does not meet.
+
+So there are two situations, and only the first is a small change.
+
+**You already run a proxy in front of Immich** — nginx, Caddy, Traefik, Nginx Proxy
+Manager. Add the two routes to it. Nothing else about your deployment moves.
+
+**You do not.** Then adding one *is* the change, and it moves your front door:
+
+- The proxy becomes the address every client uses. Immich's published port stops being the
+  way in — bind it to `127.0.0.1` or drop it. A client still pointed at `:2283` never passes
+  through the shim, which is the coverage limit [below](#limits) and looks exactly like a
+  broken install: everything configured, `shim_requests_total` at zero.
+- Every client is repointed at the new address, the mobile app included.
+- TLS, if Immich was terminating it, terminates at the proxy now.
+
+That is real work, and it is worth doing and testing *before* `shim.enabled: true` — a proxy
+that already carries your traffic correctly is one variable, and the shim is then the only
+new one.
+
+### The proxy has to be able to reach this service
+
+`proxy_pass http://immich-compressor:8080` resolves only from inside the docker network the
+service is on. nginx resolves a literal name like that **when it parses the configuration**,
+not per request, so a proxy that cannot see this service does not fail at request time — it
+refuses to start at all:
+
+```
+nginx: [emerg] host not found in upstream "immich-compressor"
+```
+
+A proxy living in its own stack — Nginx Proxy Manager, a standalone Caddy — has to join the
+network named by `IMMICH_NETWORK`, the same one this service and Immich already share
+([installation.md](installation.md#networking)).
+
+### The service side
 
 ```yaml
 shim:
@@ -172,25 +215,71 @@ because the shim forwards the client's whole path and that path already begins w
 A value ending in `/api` is refused at startup rather than producing 404s from a server that
 is obviously running.
 
-nginx:
+### The proxy side
+
+Two paths must reach this service, and on both of them the only method the shim answers is
+**POST** — which is also the only method Immich offers there. Everything else, every other
+path and every other method, goes straight to Immich.
 
 ```nginx
-location = /api/sync/stream {
-    proxy_pass http://immich-compressor:8080;
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name photos.example.com;
+
+    # Server level on purpose: these are inherited by all four locations below. Put them
+    # inside `location /` instead — which is where a lot of existing configurations keep
+    # them — and the two shim routes silently lose them.
+    client_max_body_size 50000M;
     proxy_http_version 1.1;
-    proxy_buffering off;                 # required: this is a stream
-    proxy_read_timeout 1h;
-    proxy_intercept_errors on;
-    error_page 502 503 504 = @immich;    # fail open
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade           $http_upgrade;
+    proxy_set_header Connection        $connection_upgrade;
+
+    location = /api/sync/stream {
+        proxy_pass http://immich-compressor:8080;
+        proxy_buffering off;                     # this one is a stream
+        proxy_read_timeout 1h;
+        proxy_intercept_errors on;
+        error_page 500 502 503 504 = @immich;    # fail open
+    }
+
+    location = /api/assets/bulk-upload-check {
+        proxy_pass http://immich-compressor:8080;
+        proxy_intercept_errors on;
+        error_page 500 502 503 504 = @immich;
+    }
+
+    location @immich { proxy_pass http://immich-server:2283; }
+
+    location / { proxy_pass http://immich-server:2283; }
 }
-location = /api/assets/bulk-upload-check {
-    proxy_pass http://immich-compressor:8080;
-    proxy_intercept_errors on;
-    error_page 502 503 504 = @immich;
-}
-location @immich { proxy_pass http://immich-server:2283; }
-location / { proxy_pass http://immich-server:2283; }
 ```
+
+Three things in there are easy to get wrong.
+
+**No trailing slash on `proxy_pass`.** `http://immich-compressor:8080` forwards the client's
+URI unchanged, which is what the shim expects — it mounts the two paths at the root of its
+own app and reads `request.url.path` to build the upstream call. A trailing `/` would make
+nginx rewrite the URI instead, and the shim would forward `/` to Immich.
+
+**The header block is at server level.** Whatever your existing configuration sets for
+Immich, the two new locations need the same, and inheriting it is less fragile than copying
+it twice. The `Upgrade`/`Connection` pair is there for Immich's own real-time updates rather
+than for the shim; it is not something this repository has measured.
+
+**`error_page` covers `500`, not just the gateway codes.** The shim catches a network error
+to Immich and answers `502` itself, which is the intended fail-open path — but a bug in this
+service would be a `500`, and a `500` that is not intercepted is a sync failure with no
+fallback. Intercepting it costs nothing: a genuine `500` from Immich is simply fetched from
+Immich again.
 
 `proxy_buffering off` is the setting this was tested with, and the one to use. The reason is
 narrower than this page used to claim.
@@ -209,7 +298,102 @@ response larger than `proxy_buffers` to a temporary file — documented nginx be
 size a first sync of a large library reaches has not been tested. Treat the large-library
 case as unverified in both directions.
 
-If you use Caddy or Traefik, find their equivalent before you route anything.
+### If you have no proxy yet
+
+The smallest one that does the job, as a compose service on the network Immich and this
+service already share. It can live in this project's `docker-compose.override.yaml`, in
+Immich's compose file, or in one of its own — the only requirement is the network.
+
+```yaml
+services:
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./immich-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - '80:80'
+    networks:
+      - immich
+
+networks:
+  immich:
+    external: true
+    name: ${IMMICH_NETWORK:-immich_default}
+```
+
+`immich-proxy.conf` is the block above. This is HTTP on port 80 and terminates no TLS: it is
+the shape of the thing, not a deployment. Put your certificates on it, or put it behind
+whatever already holds them, before it carries anything but LAN traffic.
+
+### Caddy
+
+The same two routes, ordered the way Caddy orders handlers rather than the way nginx matches
+locations:
+
+```caddyfile
+photos.example.com {
+    @shim path /api/sync/stream /api/assets/bulk-upload-check
+    handle @shim {
+        reverse_proxy immich-compressor:8080 immich-server:2283 {
+            lb_policy first          # this service while it is up
+            lb_try_duration 5s       # Immich when it is not
+            fail_duration 10s
+            flush_interval -1        # Caddy's `proxy_buffering off`
+        }
+    }
+    handle {
+        reverse_proxy immich-server:2283
+    }
+}
+```
+
+Caddy fails open by listing Immich as a second upstream rather than by catching a status
+code, and the three load-balancer settings are what make that work rather than decoration.
+`lb_policy first` sends everything to this service while it is reachable; `fail_duration`
+marks it down when it is not. **`lb_try_duration` is the one to keep**: without it the first
+request after this service stops is answered `502` and only the ones after that fail over —
+measured here, `502` then `200` then `200`. With it, the first request fails over too.
+
+What Caddy will *not* do for these two routes is fall back on a bad status code the way the
+nginx `error_page` line does. The obvious spelling — `handle_response` matching `status 500`
+with a nested `reverse_proxy` — cannot replay a request that has a body, and both of these
+routes are POST:
+
+```
+readfrom ...: http: invalid Read on closed Body
+```
+
+so the client gets `502` instead of the fallback. A GET through the same block falls back
+fine, which is what makes this easy to miss in a quick test. The consequence is narrow: a
+Caddy deployment fails open when this service is **down**, but not if it is up and answering
+`500`. Weigh that before routing production traffic through it — swapping the `handle` block
+back to plain `reverse_proxy immich-server:2283` is a one-line, seconds-long mitigation.
+
+Traefik has the routers and the priority rules to express the routing; the fail-open half
+would need the same kind of check the Caddy block needed, and neither has been run here.
+
+### What of this was verified
+
+Both proxy blocks above were run on **2026-08-28** — nginx 1.27.5 and Caddy 2 — against this
+service and a stub standing in for Immich:
+
+- **Routing.** Both documented paths reach the shim and nothing else does:
+  `shim_requests_total` advances by exactly the number of requests sent to those two paths,
+  while other paths are served by the upstream without moving it.
+- **Fail open, nginx.** With this service stopped, both routes still answer `200` from
+  Immich with body and path intact — nginx generates the `502` itself and `error_page`
+  catches it regardless.
+- **`error_page 500`, nginx.** A `500` from the proxied service is intercepted and re-served
+  from Immich as `200`. That is what puts `500` in the list.
+- **Fail open, Caddy.** Verified only in the upstream-down case, and only with
+  `lb_try_duration` set; the status-code case is the limitation described above.
+- **Name resolution.** A proxy that cannot resolve `immich-compressor` fails to start, with
+  the message quoted earlier.
+
+What that rig does **not** cover is the translation itself against a real library, or a
+first sync of a large one. Those are verified separately — [the counters](#reading-the-counters)
+and the field test in the [CHANGELOG](../CHANGELOG.md).
 
 ## Rolling it out
 
@@ -220,9 +404,13 @@ Do these in order. Each step is readable in `immich-compressor report` and at `/
 2. **`log_only: true`.** Route the two paths here. `shim_requests_total` should start
    climbing. If it stays at zero, your reverse proxy is not sending anything here — fix that
    before changing bytes.
-3. **`log_only: false`, `rewrite_sync_stream: false`.** Gates start opening. Watch
-   `shim_gates_opened_total`. Nothing is being rewritten yet, so a mistake at this point
-   costs nothing.
+3. **`log_only: false`, `rewrite_sync_stream: false`, `rewrite_upload_check: false`.**
+   Gates start opening. Watch `shim_gates_opened_total`. Nothing is being rewritten yet, so
+   a mistake at this point costs nothing.
+
+   Both rewrite flags default to `true`, so both have to be named here. Leaving
+   `rewrite_upload_check` at its default would put the upload-check translation live at
+   this step — `shim_hashes_translated_total` climbing is how you would find out.
 
    Whether `shim_touches_total` moves with it depends on `delete_mode`, and both answers
    are correct. On `trash` the no-op updates fire alongside the gates, because the shim
@@ -232,7 +420,8 @@ Do these in order. Each step is readable in `immich-compressor report` and at `/
    On `trash`, expect this step to be quiet for a while regardless. A gate opens when
    Immich purges an original, which is up to 30 days after this service trashed it.
 
-4. **`rewrite_sync_stream: true`.** The translation goes live. Watch your phone's backup
+4. **`rewrite_sync_stream: true`**, and `rewrite_upload_check: true` with it unless you
+   have a reason not to. The translation goes live. Watch your phone's backup
    counter after a permanent delete: it must not grow. The `re_uploaded` count must stop
    rising.
 

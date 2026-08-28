@@ -300,8 +300,10 @@ it substitutes the **original's** checksum into that one field. The phone finds 
 the file it is holding and never queues it. Nothing in Immich is altered — the database, the
 web app and every other client see the real checksum.
 
-It is off by default, it needs two paths routed to this service through your reverse proxy,
-and it is plainly a deliberate untruth told to one client. Upstream has declined to keep a
+It is off by default, it needs two paths routed to this service through a reverse proxy in
+front of Immich — which a stock Immich does not have, so
+[read what that changes](docs/shim.md#what-has-to-be-true-first) before planning on it — and
+it is plainly a deliberate untruth told to one client. Upstream has declined to keep a
 registry of deleted hashes server-side, so there is no honest version of this available
 today; [docs/shim.md](docs/shim.md) sets out the trade, the staged rollout and the
 [limits](docs/shim.md#limits) in full.

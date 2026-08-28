@@ -41,6 +41,13 @@ If Immich runs on a different host, publish the service's port deliberately and 
 workflow's webhook URL at it. `/stats` and `/metrics` are unauthenticated, so put it behind
 your reverse proxy or bind it to a private interface — never `0.0.0.0`.
 
+Nothing above needs a reverse proxy: Immich reaches this service by name, and this service
+reaches Immich the same way. The one feature that does is the optional
+[checksum-translation shim](shim.md), which only sees traffic a proxy hands it — and a stock
+Immich has no proxy to add it to. If you plan to use it, read
+[what has to be true first](shim.md#what-has-to-be-true-first) before deciding where this
+service and your proxy live, because the proxy has to be on this same network to reach it.
+
 ## API key permissions
 
 Create the key under **Account Settings → API Keys**. Immich v3 has granular permissions;
