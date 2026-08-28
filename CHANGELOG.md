@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **`LOG_LEVEL` is documented.** It is the environment override for `log_level` like any
+  other setting, but `serve` also reads it *before* it loads the settings, so it is the only
+  way to raise or silence the startup lines that explain the encoder decision — a
+  `log_level` in `config.yaml` arrives after detection has already logged. `docs/operations.md`
+  says so under [Logs](docs/operations.md#logs) with a compose snippet, and notes that `.env`
+  cannot carry it because `docker-compose.yaml` passes through only the variables it names.
+  Both were checked against `docker compose config`.
+
 - **`source_quality` skips a still that is strictly *below* `min_source_quality`, not one
   at it.** `pipeline.py` compares `quality < min_source_quality`, so a source sitting
   exactly on the threshold is encoded. `docs/safety.md`, `docs/troubleshooting.md` and

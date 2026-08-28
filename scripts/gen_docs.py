@@ -298,7 +298,12 @@ NOTES: dict[str, str] = {
     "database_path": "SQLite job store. Back up this volume if you care about the report history.",
     "listen_host": "Inside the container. Publish selectively at the host, never on 0.0.0.0.",
     "listen_port": "Inside the container.",
-    "log_level": "`DEBUG`, `INFO`, `WARNING` or `ERROR`.",
+    "log_level": (
+        "`DEBUG`, `INFO`, `WARNING` or `ERROR`. `LOG_LEVEL` in the environment sets the same "
+        "level and, unlike this key, reaches the startup lines too: `serve` configures logging "
+        "before it loads any settings, because loading them is what runs hardware detection — "
+        "see [Logs](operations.md#logs)."
+    ),
 }
 
 ROOT_FIELDS = ("database_path", "listen_host", "listen_port", "log_level")
@@ -395,7 +400,8 @@ def render_markdown() -> str:
         "Highest priority first:",
         "",
         "1. **environment variables**, with `__` as the nesting separator "
-        "(`BEHAVIOR__DRY_RUN=false`, `IMMICH__BASE_URL=...`);",
+        "(`BEHAVIOR__DRY_RUN=false`, `IMMICH__BASE_URL=...`); a top-level option has nothing "
+        "to nest, so `log_level` is just `LOG_LEVEL`;",
         "2. **`config.yaml`**, at `$COMPRESSOR_CONFIG` or `./config.yaml`;",
         "3. the defaults in this document.",
         "",

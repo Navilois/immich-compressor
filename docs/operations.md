@@ -360,3 +360,22 @@ The first lines after a restart tell you the encoder that was chosen, every cand
 was rejected, and a loud warning if `delete_mode: permanent` is on. Rejected webhooks are
 logged at WARNING (bad secret) and ERROR (unparseable payload) — which matters, because
 Immich reports both as success on its side.
+
+The level is `log_level`, `INFO` by default, or `LOG_LEVEL` in the environment — which wins
+over the file, as every setting does. Those first lines are the one place the two are not
+interchangeable: `serve` configures logging *before* it loads the settings, because loading
+them is what runs the detection. `LOG_LEVEL=WARNING` therefore silences the encoder
+explanation, while setting `log_level` to `WARNING` in `config.yaml` arrives a moment too
+late and leaves it at `INFO`. Everything logged after startup takes the level from either.
+
+```yaml
+# docker-compose.override.yaml — one `environment:` block per service, so add the line to
+# the block that is already there rather than opening a second one.
+services:
+  immich-compressor:
+    environment:
+      LOG_LEVEL: "DEBUG"
+```
+
+`.env` is not a way in. `docker-compose.yaml` lists the variables it passes through by
+name, and `LOG_LEVEL` is not one of them, so a line in `.env` never reaches the container.
