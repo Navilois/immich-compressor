@@ -147,10 +147,24 @@ Two things are worth knowing before you do:
 - The re-arm needs a client to actually sync through the shim, because that is where the
   delete is seen. Nothing is lost if none does; the translation is armed the next time one
   does.
-- Whether the first batch after a cleanup applies cleanly has not been established — the
-  delete for the duplicate and the upsert for the replacement can land in one batch, and
-  their order within it was not checked. A batch that fails once and succeeds on the retry
-  is harmless.
+- The first batch after a cleanup applies cleanly. Measured on 2026-08-28 against a live
+  Immich v3.1.0 and the Android app: 69 duplicates removed permanently in one go, and the
+  next sync pass carried all 69 deletes in a single 10,955-byte response that the device
+  acked — no constraint violation, no retry. The shim re-armed all 69 translations inside
+  1.5 seconds. `shim_gates_opened_total` did not move, as intended, and
+  `shim_touches_total` rose by exactly 69.
+
+- **The cleanup itself opens a re-upload window, and this is the part to plan around.**
+  The re-arm happens when the shim *sees* the delete, so the corrected replacement can only
+  be re-offered on a later pass. Between the two, nothing in the device's mirror holds that
+  checksum and the local file is a backup candidate again. Measured in the same run: the
+  deletes landed at 10:28:34 and the translations at 10:29:31, and the device's backup scan
+  fell in that 57-second gap and began uploading the very files just removed. It is bounded
+  — each returning copy is recognised as `re_uploaded`, is never compressed or deleted, and
+  correctly holds its translation back again — but it undoes the cleanup. **Do the removal
+  with the device's backup switched off, and switch it on again only after a sync has
+  carried the translations.** Deleting in small batches does not help; the window is
+  structural, not a function of batch size.
 
 ### If you already ran the unreleased permanent-delete build
 

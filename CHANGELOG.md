@@ -20,6 +20,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client by hand and left the setting off, so a deployment that raised it for a slow or
   distant server still got the ten-second default from all four — with nothing to say so.
   There is one factory now, and every caller goes through it.
+### Documentation
+
+- **The first sync batch after a duplicate cleanup is now measured rather than open.**
+  `docs/upgrading.md` said whether it applies cleanly "has not been established", because
+  the delete for the duplicate and the upsert for the replacement can land together and
+  their order within a batch had not been checked. Measured on 2026-08-28 against a live
+  v3.1.0 instance and the Android app: 69 returned originals removed permanently, the next
+  pass delivered all 69 deletes in one 10,955-byte response, the device acked it, and the
+  shim re-armed all 69 translations in under two seconds — no `updateAssetsV2` failure and
+  no retry. `shim_gates_opened_total` stayed put and `shim_touches_total` rose by exactly
+  69, both as the fix intends.
+
+  The same run turned up the thing that actually bites, which the page now says outright:
+  the cleanup opens a re-upload window. The re-arm happens when the shim sees the delete, so
+  the corrected replacement is only re-offered on a later pass — here 57 seconds later — and
+  a backup scan landing in that gap uploads the files just removed. It is bounded and
+  self-correcting, but the page now says to run the removal with device backup off and turn
+  it back on after a sync has carried the translations.
 
 ## [1.4.0] - 2026-08-27
 
