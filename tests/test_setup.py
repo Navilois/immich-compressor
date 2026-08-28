@@ -38,7 +38,7 @@ REPO = Path(__file__).resolve().parents[1]
 @pytest.fixture(autouse=True)
 def _no_real_hardware(monkeypatch: pytest.MonkeyPatch) -> None:
     """Setup must be testable on a machine with no ffmpeg, no GPU and no network."""
-    import immich_compressor.hardware as hardware
+    from immich_compressor.hardware import report as hardware_report
 
     async def facts() -> HostFacts:
         return HostFacts(
@@ -47,7 +47,7 @@ def _no_real_hardware(monkeypatch: pytest.MonkeyPatch) -> None:
             cpu=CpuBudget(cores=2.0, source="cgroup v2 cpu.max", host_cores=8),
         )
 
-    monkeypatch.setattr(hardware, "collect_host_facts", facts)
+    monkeypatch.setattr(hardware_report, "collect_host_facts", facts)
 
 
 # ------------------------------------------------------------------------- workflow
@@ -507,7 +507,10 @@ def _select_gpu(monkeypatch: pytest.MonkeyPatch, encoder: str) -> None:
         facts = replace(report.facts, render_nodes=() if nvidia else (node,))
         return replace(report, facts=facts, candidates=[chosen])
 
-    monkeypatch.setattr(hardware, "detect_sync", detect)
+    # Patched where the name is bound, not where it is re-exported: `apply_to_settings`
+    # looks `detect_sync` up in its own module, and rebinding the package attribute would
+    # leave that lookup pointing at the real one.
+    monkeypatch.setattr(hardware.report, "detect_sync", detect)
 
 
 def test_the_local_override_is_listed_last_so_it_still_wins(tmp_path: Path) -> None:

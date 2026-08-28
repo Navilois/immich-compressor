@@ -28,7 +28,8 @@ from . import __version__
 from .api import client_for
 from .config import Settings, load_settings, warn_about_permanent_deletion, workflow_file_pattern
 from .encoder import probe_hardware_encoder
-from .pipeline import SurgeDetector, Worker
+from .ingest import SurgeDetector
+from .pipeline import Worker
 from .routes import log_validation_errors, router
 from .shim import ChecksumLedger, OwnerResolver, ShimDeps, build_router, describe
 from .store import JobStore

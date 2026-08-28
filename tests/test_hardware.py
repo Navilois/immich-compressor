@@ -1,6 +1,6 @@
 """Hardware detection: the ranking must be right for machines nobody here owns.
 
-Collection (I/O) and decision (pure) are separate in ``hardware.py`` precisely so this
+Collection (I/O) and decision (pure) are separate modules in ``hardware/`` precisely so this
 suite can build a :class:`HostFacts` for an Intel Gen9, an Intel Gen12, an AMD card, an
 NVIDIA card and a headless CPU-only box and assert what each of them gets. **No test here
 touches a GPU.**
@@ -501,10 +501,10 @@ def test_explicit_presets_beat_autodetection(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_autodetection_fills_in_presets_and_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
-    import immich_compressor.hardware as hardware
+    from immich_compressor.hardware import ranking, report
 
-    monkeypatch.setattr(hardware, "collect_host_facts", _async_facts(INTEL_GEN12))
-    monkeypatch.setattr(hardware, "probe_hardware_encoder", _probe_stub())
+    monkeypatch.setattr(report, "collect_host_facts", _async_facts(INTEL_GEN12))
+    monkeypatch.setattr(ranking, "probe_hardware_encoder", _probe_stub())
     resolved, report = apply_to_settings(_settings())
     assert [p.name for p in resolved.presets] == ["auto-video-hevc-qsv"]
     assert resolved.behavior.concurrency == 1
@@ -512,14 +512,14 @@ def test_autodetection_fills_in_presets_and_concurrency(monkeypatch: pytest.Monk
 
 
 def test_an_explicit_concurrency_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    import immich_compressor.hardware as hardware
+    from immich_compressor.hardware import ranking, report
 
     monkeypatch.setattr(
-        hardware,
+        report,
         "collect_host_facts",
         _async_facts(_facts(cpu=CpuBudget(cores=32.0, source="t", host_cores=32))),
     )
-    monkeypatch.setattr(hardware, "probe_hardware_encoder", _probe_stub())
+    monkeypatch.setattr(ranking, "probe_hardware_encoder", _probe_stub())
     resolved, report = apply_to_settings(_settings(behavior={"concurrency": 1}))
     assert resolved.behavior.concurrency == 1
     assert report.concurrency == 1

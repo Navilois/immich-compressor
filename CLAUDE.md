@@ -135,15 +135,17 @@ version.
 | Path | What |
 |---|---|
 | `src/immich_compressor/config.py` | settings model, preset validation, fail-fast startup |
-| `src/immich_compressor/hardware.py` | device detection, preset catalog, CPU budget |
+| `src/immich_compressor/hardware/` | device detection, preset catalog, CPU budget |
 | `src/immich_compressor/models.py` | webhook payload and REST DTOs |
 | `src/immich_compressor/api.py` | typed async Immich client |
 | `src/immich_compressor/store.py` | SQLite job store (WAL), plus the backfill inventory |
 | `src/immich_compressor/metrics.py` | the Prometheus exposition behind `/metrics` |
 | `src/immich_compressor/encoder.py` | preset execution, exiftool, sanity gate |
+| `src/immich_compressor/ingest.py` | freshness gate and surge breaker, before a job exists |
 | `src/immich_compressor/pipeline.py` | the ten steps, worker loop, trash sweeper |
 | `src/immich_compressor/backfill.py` | library scan, candidate inventory, queue run |
-| `src/immich_compressor/server.py` | FastAPI endpoints |
+| `src/immich_compressor/routes.py` | the HTTP endpoints and the shared-secret check |
+| `src/immich_compressor/server.py` | the ASGI app: lifespan, shim mount, what it is made of |
 | `src/immich_compressor/setup_cmd.py` | the guided `setup` command |
 | `docs/` | everything the README links to; `configuration.md` is generated |
 | `scripts/gen_docs.py` | regenerates `docs/configuration.md` and `docs/config.schema.json` |

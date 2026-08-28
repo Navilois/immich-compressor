@@ -328,7 +328,7 @@ class HardwareSettings(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    # "auto"  detect the best encoder this machine can actually run (see hardware.py)
+    # "auto"  detect the best encoder this machine can actually run (see hardware/)
     # "cpu"   never consider a GPU
     # "qsv" / "vaapi" / "nvenc"  pin one hardware encoder; if it fails its one-frame
     #         test encode the service still falls back to the CPU preset rather than
