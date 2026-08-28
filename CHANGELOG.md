@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`report` now says how many failed jobs it did not print.** The list stopped at twenty
+  and said nothing about it, so a deployment with fifty failures showed twenty lines that
+  read like all of them. The count in the header was right the whole time, which is what
+  made the silence convincing. There is a `... and 30 more` under the list now, the same
+  line `requeue` and `backfill run` have always printed.
+
 - **`immich.connect_timeout_s` now applies to the commands too, not only to the running
   service.** `check`, `backfill scan`, `backfill run` and `restore` each built their Immich
   client by hand and left the setting off, so a deployment that raised it for a slow or

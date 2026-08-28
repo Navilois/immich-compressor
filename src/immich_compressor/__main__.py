@@ -43,6 +43,11 @@ from .store import WEBHOOKS_RECEIVED, WEBHOOKS_REJECTED, JobStore
 
 logger = logging.getLogger("immich_compressor")
 
+# How many rows a listing prints before it stops. Every site that caps a list also says
+# how many it withheld — a truncated list that does not admit it is read as the whole
+# list, which is exactly what `report` did to its failed jobs.
+_LIST_CAP = 20
+
 
 def _configure_logging(level: str) -> None:
     resolved = getattr(logging, level.upper(), logging.INFO)
@@ -362,8 +367,10 @@ async def _report(settings: Settings, as_json: bool) -> int:
     failed = [job for job in jobs if job.state == JobState.FAILED]
     if failed:
         print(f"failed jobs ({len(failed)}):")
-        for job in failed[:20]:
+        for job in failed[:_LIST_CAP]:
             print(f"  {job.source_asset_id}  {job.last_error}")
+        if len(failed) > _LIST_CAP:
+            print(f"  ... and {len(failed) - _LIST_CAP} more")
     return 0
 
 
@@ -444,10 +451,10 @@ def cmd_reprocess(args: argparse.Namespace) -> int:
 
 def _print_requeue_plan(asset_ids: list[str], description: str) -> None:
     """What a dry run of either requeue mode prints."""
-    for asset_id in asset_ids[:20]:
+    for asset_id in asset_ids[:_LIST_CAP]:
         print(f"[dry] would re-queue {asset_id}")
-    if len(asset_ids) > 20:
-        print(f"[dry] ... and {len(asset_ids) - 20} more")
+    if len(asset_ids) > _LIST_CAP:
+        print(f"[dry] ... and {len(asset_ids) - _LIST_CAP} more")
     print(f"{len(asset_ids)} job(s) {description} — pass --apply to re-queue")
 
 
@@ -634,11 +641,11 @@ async def _backfill_run(
         )
         remaining = await store.inventory_stats()
     left = sum(entry["candidates"] for name, entry in remaining["types"].items() if name in types)
-    for queued in summary.queued[:20]:
+    for queued in summary.queued[:_LIST_CAP]:
         prefix = "queued" if apply else "[dry] would queue"
         print(f"{prefix} {queued.asset_id}  {queued.filename}  {_human_bytes(queued.size_bytes)}")
-    if len(summary.queued) > 20:
-        print(f"  ... and {len(summary.queued) - 20} more")
+    if len(summary.queued) > _LIST_CAP:
+        print(f"  ... and {len(summary.queued) - _LIST_CAP} more")
     if not summary.queued:
         print("nothing to queue: no candidate is waiting for these types")
         print("  `immich-compressor backfill status` says what the scan found, and why")
