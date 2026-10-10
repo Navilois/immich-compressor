@@ -99,6 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a server that is down. The `--version` row of the CLI table in `docs/operations.md` had an
   empty cell where every other row says what the command does.
 
+- **The restore count was described wrongly.** `docs/safety.md` said that restoring an asset
+  which is not in the trash does not count as a restoration, and `docs/immich-api-notes.md`
+  that the server's `count` spares a caller from reporting the number it sent. Immich's
+  `count` *is* the number of ids in the request, on v3.1.0 as on v3.3.1, so the number
+  `restore` prints can include originals that were never in the trash.
+
 ## [1.4.1] - 2026-08-28
 
 ### Fixed

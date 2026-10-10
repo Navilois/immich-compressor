@@ -291,9 +291,11 @@ Immich's database. `POST /trash/restore/assets` refuses its whole request over a
 it cannot find (measured on v3.1.0 — see
 [immich-api-notes.md](immich-api-notes.md#behaviour-table)) and never says which id it
 was, so the command sends the selection in batches and halves a refused batch until each
-unknown id stands on its own. The number it prints is the server's own `count`, not the
-number of ids it sent — restoring an asset that is not in the trash is a harmless no-op and
-does not count as a restoration.
+unknown id stands on its own. The number it prints adds up the server's `count` over the
+requests that succeeded, so an id Immich no longer has is never counted. An asset that was
+not in the trash is: restoring it is a harmless no-op, but Immich's `count` is the number of
+ids in the request, so the no-op counts like a real restoration (measured on v3.3.1 — see
+the same table).
 
 > **Before this fix it was broken in the worst direction.** The whole selection went out as
 > one request, so one force-deleted original meant *nothing* was restored. Measured on
