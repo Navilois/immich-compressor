@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -53,6 +53,7 @@ import anyio
 import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
+from starlette.types import Send
 
 from .models import LedgerEntry, ReturnedOriginal
 from .store import (
@@ -694,7 +695,7 @@ async def _reoffer_held_back(ready: _Ready) -> None:
             await ready.store.bump_counter(SHIM_TOUCHES)
 
 
-async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator[bytes]:
+async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncGenerator[bytes, None]:
     """Rewrite the JSON Lines response as it arrives, one line at a time.
 
     Buffered by line, never whole: a full sync of a large library is far too big to hold,
@@ -714,7 +715,9 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
     generator wherever it is waiting — usually on Immich's next chunk. The lines it already
     has are applied and acked and will not be sent again, so a purge or a returned copy's
     delete among them would otherwise be lost for good. The ``finally`` therefore settles
-    them shielded from that cancellation, within `_SETTLE_BUDGET_S`.
+    them shielded from that cancellation, within `_SETTLE_BUDGET_S`. Where the cancellation
+    lands outside this generator instead, `_SettlingStreamingResponse` closes it, which
+    reaches the same ``finally``.
 
     Settled after the stream rather than line by line, for two reasons. Each line's work is
     a store write followed by a touch, which no cancellation may split, so per line it would
@@ -798,6 +801,38 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
             )
 
 
+class _SettlingStreamingResponse(StreamingResponse):
+    """A `StreamingResponse` that closes its generator however the response ends.
+
+    Starlette iterates the body and never closes it. A cancellation, or a ``send`` that
+    raises, which lands while the generator is parked at a ``yield`` — the ASGI server
+    waiting for a client that stopped reading, say — therefore leaves it suspended, and its
+    ``finally`` runs only when the garbage collector gets to it: late, or not at all. Behind
+    today's uvicorn a disconnect does not land there, because its ``send`` returns at once
+    on a closed connection and anyio holds the cancellation until the generator next waits
+    on Immich; a shutdown cancelling the task, or a server that raises from ``send``, does.
+    Closing it here makes the settling a property of this code rather than of those two.
+    """
+
+    def __init__(
+        self,
+        content: AsyncGenerator[bytes, None],
+        *,
+        status_code: int,
+        headers: dict[str, str],
+        media_type: str,
+    ) -> None:
+        super().__init__(content, status_code=status_code, headers=headers, media_type=media_type)
+        self._generator = content
+
+    async def stream_response(self, send: Send) -> None:
+        try:
+            await super().stream_response(send)
+        finally:
+            # A no-op for a generator that already finished, which is the ordinary case.
+            await self._generator.aclose()
+
+
 def build_router(deps: ShimDeps) -> APIRouter:
     """The two proxied routes. Mounted only when ``shim.enabled``."""
     router = APIRouter()
@@ -829,7 +864,7 @@ def build_router(deps: ShimDeps) -> APIRouter:
             await ready.store.bump_counter(SHIM_PASSTHROUGH_ERRORS)
             return Response(status_code=502, content=b"upstream unreachable")
 
-        return StreamingResponse(
+        return _SettlingStreamingResponse(
             _stream_sync(ready, upstream),
             status_code=upstream.status_code,
             headers=_response_headers(upstream),

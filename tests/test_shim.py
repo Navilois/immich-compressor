@@ -1304,7 +1304,9 @@ async def test_a_failing_re_offer_does_not_fail_the_sync(tmp_path: Path) -> None
         await store.close()
 
 
-async def hang_up_after_the_first_line(app: FastAPI, deps: ShimDeps, first: bytes) -> None:
+async def hang_up_after_the_first_line(
+    app: FastAPI, deps: ShimDeps, first: bytes, *, stop_reading: bool = False
+) -> None:
     """One sync request, driven the way uvicorn drives it, from a client that leaves early.
 
     Immich sends `first` and then holds the response open, as it does while it walks a large
@@ -1312,11 +1314,16 @@ async def hang_up_after_the_first_line(app: FastAPI, deps: ShimDeps, first: byte
     batch fails. Driven at the ASGI level with the ``spec_version`` uvicorn declares, which is
     the path on which Starlette listens for the disconnect and cancels the stream on it.
     Returns once the app has, so whatever the shim still does on the way out has been done.
+
+    With `stop_reading`, Immich has more to send at once and the client stops reading
+    before it hangs up, so the server's ``send`` of the second line never returns. The
+    cancellation then lands there, outside the shim's generator, which is parked at a
+    ``yield`` — the case Starlette leaves to the garbage collector.
     """
     never = asyncio.Event()
 
     async def long_backfill() -> AsyncIterator[bytes]:
-        yield first
+        yield first + (asset_line(COPY_ID, "unrelated=") if stop_reading else b"")
         await never.wait()  # the rest of the response, which this client never reads
         yield first
 
@@ -1339,6 +1346,8 @@ async def hang_up_after_the_first_line(app: FastAPI, deps: ShimDeps, first: byte
 
     async def send(message: Message) -> None:
         if message["type"] == "http.response.body" and message.get("body"):
+            if first_line_out.is_set() and stop_reading:
+                await never.wait()  # the server's write buffer is full and stays full
             first_line_out.set()
 
     scope = {
@@ -1413,6 +1422,24 @@ async def test_a_copy_deleted_before_the_client_hung_up_still_releases_its_claim
         assert (await store.returned_originals()) == []
         assert touched == [REPLACEMENT_ID]
         assert (await store.counters())[SHIM_TOUCHES] == 1
+    finally:
+        await store.close()
+
+
+async def test_a_client_that_stopped_reading_before_it_hung_up_still_settles(tmp_path: Path) -> None:
+    """Settled when the response ends, not whenever the garbage collector gets to it.
+
+    Starlette never closes the body it iterates, so a cancellation that lands in the
+    server's ``send`` leaves the generator parked with its ``finally`` not yet run. The
+    route's response closes it instead; without that, nothing here has happened yet.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=False)
+    app, deps, touched = build(store, Upstream())
+    try:
+        await hang_up_after_the_first_line(app, deps, delete_line(), stop_reading=True)
+        job = await store.get(ORIGINAL_ID)
+        assert job is not None and job.original_freed_at is not None
+        assert touched == [REPLACEMENT_ID]
     finally:
         await store.close()
 
