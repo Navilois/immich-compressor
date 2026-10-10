@@ -6,11 +6,12 @@ that every guard belongs in one file, which put the code that runs *before* a jo
 the same module as the ten steps that run after one does — and made the pipeline the import
 every request path had to reach through.
 
-The freshness gate refuses a bulk metadata-extraction re-trigger. The surge breaker counts
-what actually got queued and trips when far more arrives than anybody asked for. Neither
-knows anything about jobs, encoding or the store: :func:`check_ingest_guards` is a pure
-function of one asset and the behaviour settings, and :class:`SurgeDetector` is a rolling
-count in memory. That is what makes them testable without a pipeline at all.
+The type gate refuses an asset type no worker lane exists for, and the freshness gate a
+bulk metadata-extraction re-trigger; both sit in :func:`check_ingest_guards`. The surge
+breaker counts what actually got queued and trips when far more arrives than anybody asked
+for. Neither knows anything about jobs, encoding or the store: :func:`check_ingest_guards` is
+a pure function of one asset and the behaviour settings, and :class:`SurgeDetector` is a
+rolling count in memory. That is what makes them testable without a pipeline at all.
 
 The other guard, :func:`~immich_compressor.pipeline.check_guards`, deliberately stays with
 the pipeline: it runs once a job exists and raises
@@ -46,7 +47,8 @@ def check_ingest_guards(
     *,
     now: datetime | None = None,
 ) -> None:
-    """Step 1a: decide whether this webhook is a new upload or a bulk re-trigger.
+    """Step 1a: decide whether this webhook is for a type this service handles, and whether
+    it is a new upload or a bulk re-trigger.
 
     Immich's workflow trigger is ``AssetMetadataExtraction``, and metadata extraction is a
     maintenance operation: one click on **Administration -> Jobs -> Extract Metadata**
@@ -66,8 +68,23 @@ def check_ingest_guards(
     the same ``ON CONFLICT DO NOTHING``, so a library recorded here as skipped would be a
     library ``backfill`` could never reach again.
 
+    The type is checked first. The worker runs one lane per entry in ``enabled_types`` and
+    a lane only claims jobs of its own type, so a job of any other type would be queued and
+    never claimed — the :attr:`~immich_compressor.models.SkipReason.WRONG_TYPE` skip in
+    ``check_guards`` runs inside a lane and cannot reach it. Refused here rather than
+    recorded as skipped for the same reason as the freshness gate: enabling the type later
+    must leave the asset reachable by ``backfill``.
+
     Raises :class:`WebhookRejected`; returns ``None`` when the asset may be queued.
     """
+    if asset.type not in behavior.enabled_types:
+        raise WebhookRejected(
+            RejectReason.WRONG_TYPE,
+            f"type {asset.type} is not in behavior.enabled_types {behavior.enabled_types}, so no "
+            "worker lane would ever claim it — narrow the workflow's type filter to match, or "
+            "enable the type",
+        )
+
     limit_hours = behavior.max_asset_age_hours
     if limit_hours is None:
         return

@@ -87,6 +87,10 @@ The lane is recorded in the job store's `asset_type` column, derived from the we
 payload at enqueue time. Rows written before that column existed carry `NULL` and stay
 claimable from *every* lane, so an upgrade never strands a job the previous version queued.
 
+A webhook for a type that has no lane is refused at ingest as `wrong_type` and never becomes
+a job: queued, it would wait for a lane that does not exist, and the `wrong_type` skip in
+`check_guards` runs inside a lane, so it could never reach it.
+
 ## The backfill
 
 The webhook reaches new uploads only, so everything that was in the library before this

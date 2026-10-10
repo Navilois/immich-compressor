@@ -121,6 +121,20 @@ library. Full explanation in [operations.md](operations.md#the-metadata-extracti
 If a *genuine* upload is being refused, its metadata extraction sat in Immich's queue for
 longer than the window — raise `max_asset_age_hours`.
 
+## Webhooks are refused as `wrong_type`
+
+```
+WARNING refused AssetMetadataExtraction asset=… type=IMAGE (wrong_type): type IMAGE is not
+        in behavior.enabled_types ['VIDEO'], so no worker lane would ever claim it
+```
+
+The workflow's type filter lets through a type that `behavior.enabled_types` does not
+contain. There is one worker lane per enabled type, so a job of any other type would never be
+claimed; it is refused instead, and nothing is written. Make the two agree — narrow the
+filter, or add the type to `enabled_types` — as described in
+[workflow-setup.md](workflow-setup.md#video-only). Assets refused while they disagreed are
+still reachable by `backfill`.
+
 ## The service has stopped doing anything
 
 ```

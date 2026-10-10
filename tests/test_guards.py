@@ -224,6 +224,30 @@ def test_the_gate_can_be_turned_off(
     _ingest(video_payload_raw, settings, createdAt=created_at)  # must not raise
 
 
+@pytest.mark.parametrize("asset_type", ["IMAGE", "AUDIO", "OTHER"])
+def test_a_type_without_a_lane_is_refused_at_ingest(
+    video_payload_raw: dict[str, Any], settings: Settings, asset_type: str
+) -> None:
+    """Queued, it would wait forever: no worker lane exists to claim it.
+
+    Fresh on purpose — the type decides on its own, before the freshness gate is asked.
+    """
+    just_now = (NOW - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    with pytest.raises(WebhookRejected) as caught:
+        _ingest(video_payload_raw, settings, type=asset_type, createdAt=just_now)
+    assert caught.value.reason is RejectReason.WRONG_TYPE
+    # The fix lives in the configuration, so the detail has to name it.
+    assert "enabled_types" in caught.value.detail
+
+
+def test_a_type_with_a_lane_passes_the_ingest_gate(
+    video_payload_raw: dict[str, Any], settings: Settings
+) -> None:
+    settings.behavior.enabled_types = ["VIDEO", "IMAGE"]
+    just_now = (NOW - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    _ingest(video_payload_raw, settings, type="IMAGE", createdAt=just_now)  # must not raise
+
+
 # ----------------------------------------------------------------- the surge detector
 
 

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A webhook for an asset type that is not in `behavior.enabled_types` is refused at ingest
+  instead of being queued forever.** There is one worker lane per enabled type and a lane only
+  claims jobs of its own type, so with the default `enabled_types: [VIDEO]` and a workflow
+  that also let stills through, every IMAGE webhook was answered `"accepted": true`, queued,
+  and then sat in `queued` with `attempts: 0` until a restart that enabled the type — counted
+  in `/stats`, `report` and the surge breaker all the while. Reproduced against Immich v3.3.1.
+  It is now answered `202` with `"accepted": false, "reason": "wrong_type"` and a WARNING line,
+  like the other ingest refusals, and writes no row, so the asset stays reachable by
+  `backfill` if the type is enabled later. Jobs already stranded by an earlier version are
+  left as they are; see `docs/upgrading.md`.
+
 - **`setup --directory` refuses a directory that does not exist, before it asks the server
   anything.** It used to run the key and permission checks and detect the hardware, then die
   in a raw `FileNotFoundError` traceback while writing `config.yaml`. It now exits `2` at once

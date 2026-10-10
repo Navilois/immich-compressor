@@ -139,8 +139,9 @@ behavior:
 ```
 
 Narrowing only one of the two is not harmful, just wasteful in one direction and useless in
-the other: the workflow would keep sending webhooks that the service skips as `wrong_type`,
-or the service would be ready for stills that never arrive.
+the other: the workflow would keep sending webhooks that the service refuses at ingest as
+`wrong_type` — a `202` with `"accepted": false` and a WARNING line, but no job — or the
+service would be ready for stills that never arrive.
 
 The stills preset re-encodes to JPEG with ImageMagick and carries metadata across with
 exiftool, which is verified tag by tag on every job. It only touches JPEG — RAW, HEIC, PNG,
