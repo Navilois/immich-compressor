@@ -71,6 +71,13 @@ nothing reported back here. The shim watches for it instead: the purge produces 
 event on the sync stream, and the shim is in that stream. When it sees a delete for an
 original it replaced, it opens that gate and asks for the same no-op update.
 
+It acts on what a sync response showed once that response is over, and it does so even
+when the device hung up part-way through, as the app does whenever a batch fails. The
+lines the device did receive are applied and acked, and Immich never sends them again, so
+a delete among them that the shim dropped would be lost for good. Once the device has gone,
+that work has 30 seconds to finish; if a hung Immich makes it overrun, the log says the
+settling `was cut short`, and a gate it had not reached yet stays closed.
+
 Both paths count the same two things — `shim_gates_opened_total` when the gate opens,
 `shim_touches_total` when the no-op update lands. Which of the two saw it is not in the
 counters and does not need to be. A deployment that switched `delete_mode` can have both
@@ -126,11 +133,12 @@ holds. Because a restart forgets which replacements were already re-offered, the
 request after a start re-offers every one that is held back — which is also what repairs a
 device that lost the row before the service could do this.
 
-The re-offer is made **before the request is forwarded** to Immich, not after the response.
-A device stuck on that foreign key never reads its sync response to the end: the batch
-fails, the app drops the connection, and whatever the shim would have done after the last
-line never happens. Made first, the touch also lands inside the response Immich is about to
-build, so the replacement arrives in the same sync, ahead of the OCR boxes that need it.
+The re-offer is made **before the request is forwarded** to Immich, not only after the
+response. A device stuck on that foreign key never reads its sync response to the end: the
+batch fails and the app drops the connection, so a touch made after that response could
+only reach it in the next one. Made first, the touch lands inside
+the response Immich is about to build, so the replacement arrives in the same sync, ahead of
+the OCR boxes that need it.
 
 When the copy is deleted in turn, its delete goes past on the same sync stream. The shim
 records it against that copy's own job row, makes the same no-op update on the replacement,

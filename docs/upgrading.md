@@ -25,6 +25,18 @@ The re-offer now happens before each sync request is forwarded, so the device's 
 sync makes it, and the replacement comes back in that same sync. Nothing to configure; the
 diagnosis in the section below still applies.
 
+### Deletes in a sync the device hung up on are no longer dropped
+
+The same cut-off took the rest of the shim's bookkeeping with it. A purge, or the delete of
+a returned copy, that went past only in a response the device abandoned was never acted on,
+and Immich does not send a line the device has already acked a second time. On
+`delete_mode: trash` that gate stayed closed; for a returned copy, the translation it had
+held back stayed held back after the copy was gone. Both are now settled when the response
+ends, however it ends.
+
+This does not recover one an earlier version already dropped. That replacement is simply not
+translated, which is how it would behave without the shim.
+
 ## 1.4.1 → 1.4.2
 
 ### Webhooks for a type that is not enabled are refused, not queued
