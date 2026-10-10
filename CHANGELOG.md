@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The shim re-offers a replacement that a returned copy displaced from a device, so that
+  device's sync no longer stops on a foreign key.** When a copy of an already-replaced
+  original came back, the shim held the translation back but did nothing for a device that
+  had already mirrored it: the copy's line made the app's `INSERT OR REPLACE` delete the
+  replacement's row, with its OCR boxes and faces, and no error anywhere. The replacement
+  was never sent again, so the first later line naming it failed. On a live deployment that
+  line came from Immich v3.3.x re-sending every OCR box, and the device stopped syncing on
+  `updateAssetOcrV1 … FOREIGN KEY constraint failed (code 787)`. The failing asset id was
+  a replacement held back by a `re_uploaded` copy. Every replacement a claim newly holds back
+  is now touched once, so it comes back untranslated, and the first sync request after a
+  start does it for all of them. `tests/test_app_mirror.py` replays the chain through the
+  app's schema, OCR table and foreign key included. Not yet verified on a device; see
+  `docs/upgrading.md`.
+
 - **A webhook for an asset type that is not in `behavior.enabled_types` is refused at ingest
   instead of being queued forever.** There is one worker lane per enabled type and a lane only
   claims jobs of its own type, so with the default `enabled_types: [VIDEO]` and a workflow

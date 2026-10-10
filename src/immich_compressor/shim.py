@@ -27,6 +27,12 @@ Two things can hold the checksum, so the shim waits on both:
   then live again under a new id, and the translation has to stand down until *that* asset
   is deleted in turn. That is :class:`~immich_compressor.models.ReturnedOriginal`.
 
+Standing down is not the whole of it. A phone that already mirrored the translation loses
+the replacement's row the moment the copy's line arrives — the app's ``INSERT OR REPLACE``
+resolves the index by deleting it — and nothing about the replacement changes afterwards,
+so it is never sent again. Every replacement a claim newly holds back is therefore
+re-offered once, untranslated, with the same no-op update a gate opening uses.
+
 An open gate is not a licence to translate for ever. It records that one asset died once;
 the rule is about the checksum, and any asset can hold that.
 
@@ -328,6 +334,11 @@ class ChecksumLedger:
     checksum is taken. `observe` closes that window with what the sync stream itself said,
     and holds it in memory only: the store's own answer arrives within minutes and is the
     durable one, so a restart costs at worst the rest of one window.
+
+    Each rebuild also notes which replacements a claim has *newly* started holding back,
+    whichever source the claim came from, for `take_reoffers` to hand out. The first
+    rebuild after a start finds every one of them new, which is deliberate: it is what
+    re-offers a replacement a device lost before this process was running.
     """
 
     def __init__(self, store: JobStore, refresh_seconds: float, *, clock: Callable[[], float]) -> None:
@@ -337,6 +348,11 @@ class ChecksumLedger:
         self._maps = TranslationMaps()
         self._loaded_at: float | None = None
         self._observed: dict[str, ReturnedOriginal] = {}
+        # Replacements held back as of the last rebuild, and those among them still owed a
+        # re-offer. Kept as sets of ids rather than read off `_maps`, because the owed set
+        # has to survive rebuilds until a sync request drains it.
+        self._held: frozenset[str] = frozenset()
+        self._reoffer: set[str] = set()
 
     def observe(self, claims: Iterable[ReturnedOriginal]) -> int:
         """Remember claims a sync stream showed. Returns how many were new.
@@ -385,9 +401,20 @@ class ChecksumLedger:
                         rebuilt.suppressed,
                         self._maps.suppressed,
                     )
+                held = frozenset(new_id for blocked in rebuilt.claim_watch.values() for new_id in blocked)
+                # Owed: newly held, and still held. One that was released again before a
+                # request drained it is re-offered by the release, translated, instead.
+                self._reoffer = (self._reoffer | (held - self._held)) & held
+                self._held = held
                 self._maps = rebuilt
             self._loaded_at = now
         return self._maps
+
+    def take_reoffers(self) -> tuple[str, ...]:
+        """The replacements owed a re-offer since the last call, each handed out once."""
+        owed = tuple(sorted(self._reoffer))
+        self._reoffer.clear()
+        return owed
 
     def invalidate(self) -> None:
         """Force the next `maps()` to reload — used after a gate opens."""
@@ -618,6 +645,48 @@ async def _release_claims(ready: _Ready, maps: TranslationMaps, asset_ids: tuple
                 await ready.store.bump_counter(SHIM_TOUCHES)
 
 
+async def _reoffer_held_back(ready: _Ready) -> None:
+    """Re-send every replacement a claim has newly held back, so it arrives untranslated.
+
+    The repair for what a claim does to a device that already mirrored the translation.
+    The copy's line carries the checksum under a new id, the app's ``INSERT OR REPLACE``
+    resolves the unique index by deleting the replacement's row, and the batch applies and
+    is acked — no error anywhere. The replacement is still on the server, nothing about it
+    changes, so without a touch the device never hears of it again; and every later line
+    that names it, an OCR box or a face, fails the mirror's foreign key and stops the sync.
+
+    The touch is harmless where nothing was lost: a device that never had the translation
+    receives a row it already holds, with the checksum it already has.
+    """
+    deps = ready.deps
+    # A rebuild, if anything this response did invalidated the maps, so that a claim seen on
+    # this very stream is re-offered now rather than on the next request.
+    await ready.ledger.maps()
+    for new_asset_id in ready.ledger.take_reoffers():
+        if deps.log_only:
+            logger.info("shim (log_only): would re-offer %s untranslated", new_asset_id)
+            continue
+        logger.info(
+            "shim: re-offering %s untranslated; a returned copy holds its original's checksum, "
+            "and a device that mirrored the translation has lost the row to it",
+            new_asset_id,
+        )
+        try:
+            assert deps.touch is not None
+            await deps.touch(new_asset_id)
+        except Exception:
+            # Not retried per request: a replacement deleted since would fail here on every
+            # sync. The next start re-offers everything still held back.
+            logger.warning(
+                "shim: could not touch %s to have it re-sent; a device that lost the row will "
+                "not get it back until that asset changes or this service restarts",
+                new_asset_id,
+                exc_info=True,
+            )
+        else:
+            await ready.store.bump_counter(SHIM_TOUCHES)
+
+
 async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator[bytes]:
     """Rewrite the JSON Lines response as it arrives, one line at a time.
 
@@ -628,9 +697,10 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
     before deciding anything, and there is no held response to make a second pass over — so
     a claim seen on line *n* governs the lines after it, and the ledger remembers it for
     every request after this one. A claim that arrives *behind* the line it should have
-    stopped therefore still costs that one batch: the client's upsert fails, it does not
-    ack, and Immich re-sends. What the memory buys is that the re-send is served from maps
-    that already know, so the retry applies instead of wedging the client in a loop.
+    stopped therefore still lands on a translated row. An app from before Immich PR #28445
+    fails the batch, does not ack, and Immich re-sends it from maps that already know; a
+    current one applies it, deleting the replacement's row, and acks. The re-offer at the
+    end of this function is what brings that row back.
     """
     deps = ready.deps
     translate = deps.rewrite_sync_stream and not deps.log_only
@@ -690,6 +760,7 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
         await _open_gates(ready, tuple(gate_opens))
     if claims_released:
         await _release_claims(ready, maps, tuple(claims_released))
+    await _reoffer_held_back(ready)
 
 
 def build_router(deps: ShimDeps) -> APIRouter:

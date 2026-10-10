@@ -589,6 +589,57 @@ async def test_ledger_releases_an_observed_claim(tmp_path: Path) -> None:
         await store.close()
 
 
+async def test_ledger_owes_a_re_offer_for_a_replacement_a_claim_newly_holds(tmp_path: Path) -> None:
+    """Once per hold, not once per rebuild — a re-offer per request would be a touch storm."""
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    try:
+        ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
+        await ledger.maps()
+        assert ledger.take_reoffers() == (), "nothing held, nothing owed"
+
+        ledger.observe([returned()])
+        await ledger.maps()
+        assert ledger.take_reoffers() == (REPLACEMENT_ID,)
+
+        ledger.invalidate()
+        await ledger.maps()
+        assert ledger.take_reoffers() == (), "still held, already re-offered"
+    finally:
+        await store.close()
+
+
+async def test_ledger_owes_a_re_offer_for_a_claim_it_finds_on_start(tmp_path: Path) -> None:
+    """A device may have lost the row before this process existed; only a start can tell it."""
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    try:
+        ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
+        await ledger.maps()
+        assert ledger.take_reoffers() == (REPLACEMENT_ID,)
+    finally:
+        await store.close()
+
+
+async def test_ledger_forgets_a_re_offer_the_release_overtook(tmp_path: Path) -> None:
+    """Released before anything drained it: the release's own touch re-offers it, translated."""
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    try:
+        ledger = ChecksumLedger(store, 60.0, clock=lambda: 0.0)
+        ledger.observe([returned()])
+        await ledger.maps()
+
+        ledger.release(COPY_ID)
+        ledger.invalidate()
+        await ledger.maps()
+        assert ledger.take_reoffers() == ()
+
+        # Held again by a later copy, and owed again.
+        ledger.observe([returned()])
+        await ledger.maps()
+        assert ledger.take_reoffers() == (REPLACEMENT_ID,)
+    finally:
+        await store.close()
+
+
 # -------------------------------------------------------------------------- the routes
 
 
@@ -878,6 +929,9 @@ async def test_a_claim_already_released_is_not_touched_twice(tmp_path: Path) -> 
         # A ledger that has read the suppression and will not look again for an hour.
         deps.ledger = ChecksumLedger(store, 3600.0, clock=lambda: 0.0)
         assert (await deps.ledger.maps()).claim_watch == {COPY_ID: [REPLACEMENT_ID]}
+        # The re-offer a fresh ledger owes for every claim it starts out holding. Drained
+        # here because it is not what this test is about: the release must add nothing.
+        assert deps.ledger.take_reoffers() == (REPLACEMENT_ID,)
         await store.mark_original_freed(COPY_ID)  # what the other stream just did
 
         with TestClient(app) as http:
@@ -1153,9 +1207,11 @@ async def test_the_delete_of_an_observed_copy_re_arms_the_translation(tmp_path: 
             armed_again = http.post("/api/sync/stream", json={})
         assert json.loads(armed_again.content)["data"]["checksum"] == ORIGINAL_HASH
 
-        assert touched == [REPLACEMENT_ID], "the replacement is re-offered, or the client never sees it"
+        # Twice, for two different reasons: untranslated when the copy took the checksum, so
+        # a device that lost the row gets it back; translated again once the copy is gone.
+        assert touched == [REPLACEMENT_ID, REPLACEMENT_ID], "each re-offer, or the client never sees it"
         counters = await store.counters()
-        assert counters[SHIM_TOUCHES] == 1
+        assert counters[SHIM_TOUCHES] == 2
         assert counters[SHIM_GATES_OPENED] == 0, "no gate opens for a claim being released"
     finally:
         await store.close()
@@ -1168,17 +1224,19 @@ async def test_a_claim_behind_the_line_it_should_stop_costs_one_batch_and_no_mor
 
     Nothing orders a run of asset lines so that the copy always precedes the replacement it
     took the checksum from — both were touched within seconds of each other in the reported
-    failure. When it lands the wrong way round the client's batch still fails on the unique
-    index and Immich re-sends it. The retry is what must not fail again.
+    failure. When it lands the wrong way round, an app from before Immich PR #28445 fails
+    the batch and Immich re-sends it; the retry is what must not fail again. A current app
+    applies the batch instead and loses the replacement's row to the copy, which is why the
+    replacement is also touched: it has to be sent again, untranslated.
     """
     store = await seeded_store(tmp_path / "s.db", freed=True)
     upstream = Upstream()
-    app, _, _ = build(store, upstream)
+    app, _, touched = build(store, upstream)
     try:
         with TestClient(app) as http:
             upstream.lines = [asset_line(), asset_line(COPY_ID, ORIGINAL_HASH)]
             first = http.post("/api/sync/stream", json={})
-            # The client aborts this batch and never acks it, so Immich sends it again.
+            # An older client aborts this batch and never acks it, so Immich sends it again.
             retry = http.post("/api/sync/stream", json={})
 
         replacement, _copy = [json.loads(line) for line in first.content.splitlines()]
@@ -1187,6 +1245,66 @@ async def test_a_claim_behind_the_line_it_should_stop_costs_one_batch_and_no_mor
         replacement, _copy = [json.loads(line) for line in retry.content.splitlines()]
         assert replacement["data"]["checksum"] == REPLACEMENT_HASH, "the re-send is what has to apply"
         assert (await store.counters())[SHIM_LINES_REWRITTEN] == 1, "translated once, on the pass that failed"
+        assert touched == [REPLACEMENT_ID], "re-offered once, after the first response, not per request"
+    finally:
+        await store.close()
+
+
+async def test_the_route_re_offers_the_replacement_a_copy_displaced(tmp_path: Path) -> None:
+    """The copy's line costs a current app the replacement's row; the touch sends it back.
+
+    Without it the replacement is gone from that device for good, and the first line that
+    names it again — an OCR box from v3.3.x's checkpoint reset, in the reported case —
+    stops the client's sync on the mirror's foreign key.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True)
+    upstream = Upstream()
+    app, _, touched = build(store, upstream)
+    try:
+        with TestClient(app) as http:
+            upstream.lines = [asset_line(COPY_ID, ORIGINAL_HASH)]
+            response = http.post("/api/sync/stream", json={})
+            assert response.content == asset_line(COPY_ID, ORIGINAL_HASH)
+            assert touched == [REPLACEMENT_ID]
+
+            # The touch's own result: the replacement's line, now passed through as itself.
+            upstream.lines = [asset_line()]
+            assert http.post("/api/sync/stream", json={}).content == asset_line()
+        assert touched == [REPLACEMENT_ID], "once, not on every request after it"
+        assert (await store.counters())[SHIM_TOUCHES] == 1
+    finally:
+        await store.close()
+
+
+async def test_a_failing_re_offer_does_not_fail_the_sync(tmp_path: Path) -> None:
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    upstream = Upstream()
+    upstream.lines = [asset_line()]
+    app, deps, _ = build(store, upstream)
+
+    async def explode(asset_id: str) -> None:
+        raise RuntimeError("immich said no")
+
+    deps.touch = explode
+    try:
+        with TestClient(app) as http:
+            response = http.post("/api/sync/stream", json={})
+        assert response.status_code == 200
+        assert response.content == asset_line()
+        assert (await store.counters())[SHIM_TOUCHES] == 0
+    finally:
+        await store.close()
+
+
+async def test_log_only_does_not_re_offer(tmp_path: Path) -> None:
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    upstream = Upstream()
+    upstream.lines = [asset_line()]
+    app, _, touched = build(store, upstream, log_only=True)
+    try:
+        with TestClient(app) as http:
+            assert http.post("/api/sync/stream", json={}).status_code == 200
+        assert touched == []
     finally:
         await store.close()
 

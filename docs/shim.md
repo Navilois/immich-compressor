@@ -105,6 +105,27 @@ costs the user nothing**: while the copy is there it is itself the match the pho
 looking for, so the local file is not a backup candidate anyway. The prevention the shim
 provides is already being provided by the duplicate.
 
+Holding back is not enough for a device that **already has the translation**. When the
+copy's line reaches it, the app's upsert — `INSERT OR REPLACE` since Immich PR #28445 —
+resolves the unique index by deleting the row that held the checksum, which is the
+replacement's, and its OCR boxes and faces go with it by cascade. The batch applies and is
+acked; nothing fails. But the replacement is still on the server, nothing about it changes,
+so it is never sent again, and the first later line that names it fails the mirror's foreign
+key and stops that device's sync. Seen on a real device after Immich v3.3.x reset every
+client's OCR checkpoint and re-sent every box:
+
+```
+Error: updateAssetOcrV1
+SqliteException(787): while executing statement, FOREIGN KEY constraint failed
+```
+
+So every replacement a copy newly holds back is **re-offered once**, with the same no-op
+update described below: its line comes back, untranslated now, and the device puts the row
+back next to the copy. A device that never had the translation receives a row it already
+holds. Because a restart forgets which replacements were already re-offered, the first sync
+request after a start re-offers every one that is held back — which is also what repairs a
+device that lost the row before the service could do this.
+
 When the copy is deleted in turn, its delete goes past on the same sync stream. The shim
 records it against that copy's own job row, makes the same no-op update on the replacement,
 and the translation is armed again — otherwise removing the duplicate would simply start
@@ -134,9 +155,10 @@ Two things follow from where that evidence comes from.
 **It works forwards only.** The response is rewritten line by line and never held whole, so
 a claim on one line governs the lines after it. Nothing orders a run of asset lines so that
 the copy always precedes the replacement it took the checksum from; when it lands the other
-way round, that one batch still fails on the unique index. What changes is what happens
-next — Immich re-sends the batch, and the re-send is served from maps that already know, so
-the retry applies instead of the client wedging in a loop.
+way round, the device is still handed the collision. An app from before Immich PR #28445
+fails that batch, Immich re-sends it, and the re-send is served from maps that already know,
+so the retry applies instead of the client wedging in a loop. A current app applies the
+batch and loses the replacement's row, and the re-offer above brings it back.
 
 **It lives in memory.** A restart forgets every sighting and the shim is back to asking the
 job store. That is usually the same answer by then: the window is the length of the queue,
@@ -433,7 +455,7 @@ Do these in order. Each step is readable in `immich-compressor report` and at `/
 | `shim_lines_rewritten_total` | Sync lines whose checksum was translated. |
 | `shim_hashes_translated_total` | Checksums translated in either direction. |
 | `shim_gates_opened_total` | Originals observed to be gone for good, counted in both delete modes: the `permanent` delete this service performs, and the purge the shim sees go past. It follows the record, not the shim, so on `permanent` it climbs even with the shim off. |
-| `shim_touches_total` | No-op updates made so a replacement is re-sent. Zero while gates are opening means the translation is armed but may never reach a device — except at step 3 above on `delete_mode: permanent`, where it is held back on purpose. |
+| `shim_touches_total` | No-op updates made so a replacement is re-sent — translated when a gate opens or a copy goes, untranslated when a copy arrives. Zero while gates are opening means the translation is armed but may never reach a device — except at step 3 above on `delete_mode: permanent`, where it is held back on purpose. |
 | `shim_passthrough_errors_total` | Times Immich was unreachable and clients got a 502. Anything above zero means somebody saw a sync failure. |
 
 `re_uploaded` is the one to watch overall. It counts re-uploads that already happened, so
