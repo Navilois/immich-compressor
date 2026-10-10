@@ -701,6 +701,17 @@ def run_setup(options: SetupOptions) -> int:
     has, and what to run next.
     """
     directory = options.directory.resolve()
+    # Refused rather than created: the directory is the compose project, the one holding
+    # docker-compose.yaml, and a fresh one would get a config nothing can start. Inside the
+    # container a mistyped path is also not the mounted one, so the files would vanish.
+    if not directory.is_dir():
+        problem = "is not a directory" if directory.exists() else "does not exist"
+        print(
+            f"--directory {directory} {problem}. Point it at the immich-compressor checkout "
+            "that holds docker-compose.yaml; setup does not create it.",
+            file=sys.stderr,
+        )
+        return 2
     print(f"immich-compressor setup — writing into {directory}\n")
 
     connection = _ask_for_connection(options)

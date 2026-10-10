@@ -86,7 +86,7 @@ again as often as you like; only `--force` overwrites anything.
 | `--workflow-key` | — | a throwaway API key holding only `workflow.create`; used once and never stored — see [workflow-setup.md](workflow-setup.md) |
 | `--network` | `immich_default` | the docker network your Immich stack uses; written to `.env` as `IMMICH_NETWORK` |
 | `--webhook-url` | `http://immich-compressor:8080/webhook` | the URL Immich should call |
-| `--directory` | `.` | where to write `config.yaml` and `.env` |
+| `--directory` | `.` | where to write `config.yaml` and `.env` — an existing directory, the one holding `docker-compose.yaml`; setup does not create it |
 | `--non-interactive` | off | never prompt; use the flags and the defaults. `scripts/quickstart.sh` adds this by itself when there is no terminal |
 | `--force` | off | overwrite `config.yaml` and replace the stored secrets. `docker-compose.override.yaml` is left alone even then |
 | `--no-workflow` | off | do not create the Immich workflow |
