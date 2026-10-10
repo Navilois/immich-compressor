@@ -1,0 +1,99 @@
+{
+  "type": "AssetV1",
+  "trigger": "AssetMetadataExtraction",
+  "data": {
+    "asset": {
+      "id": "3350f8e7-dd58-43d1-a9e4-b604bb75ba20",
+      "ownerId": "2e5a1ad6-28ac-4d95-83f9-0539afb528e7",
+      "stackId": null,
+      "livePhotoVideoId": null,
+      "libraryId": null,
+      "duplicateId": null,
+      "createdAt": "2026-10-10T16:27:14.674Z",
+      "updatedAt": "2026-10-10T16:27:14.908Z",
+      "deletedAt": null,
+      "fileCreatedAt": "2024-06-15T10:35:00.000Z",
+      "fileModifiedAt": "2024-06-15T12:30:00.000Z",
+      "localDateTime": "2024-06-15T12:35:00.000Z",
+      "type": "IMAGE",
+      "status": "active",
+      "visibility": "timeline",
+      "duration": null,
+      "checksum": {
+        "type": "Buffer",
+        "data": [
+          129,
+          23,
+          49,
+          111,
+          22,
+          207,
+          230,
+          40,
+          57,
+          136,
+          218,
+          185,
+          142,
+          25,
+          15,
+          53,
+          184,
+          148,
+          208,
+          148
+        ]
+      },
+      "originalPath": "/data/upload/2e5a1ad6-28ac-4d95-83f9-0539afb528e7/3c/f6/3cf6531c-a450-4c38-9262-2d9376ca91d9.jpg",
+      "originalFileName": "test-image.jpg",
+      "isOffline": false,
+      "isFavorite": false,
+      "isExternal": false,
+      "isEdited": false,
+      "tags": [
+        {
+          "id": "080f01bf-deee-4a33-9cff-e804ca5402b7",
+          "value": "urlaub",
+          "createdAt": "2026-10-10T16:27:14.897492+00:00",
+          "updatedAt": "2026-10-10T16:27:14.911145+00:00",
+          "color": null,
+          "parentId": null
+        }
+      ],
+      "exifInfo": {
+        "make": "TestCam",
+        "model": "TC-1000",
+        "orientation": null,
+        "dateTimeOriginal": "2024-06-15T10:35:00+00:00",
+        "modifyDate": "2024-06-15T12:30:00+00:00",
+        "exifImageWidth": 3000,
+        "exifImageHeight": 2000,
+        "fileSizeInByte": 1655451,
+        "lensModel": null,
+        "fNumber": null,
+        "focalLength": null,
+        "iso": null,
+        "latitude": 48.2082,
+        "longitude": 16.3738,
+        "city": "Vienna",
+        "state": "Vienna",
+        "country": "Austria",
+        "description": "Compressor test photo Vienna",
+        "fps": null,
+        "exposureTime": null,
+        "livePhotoCID": null,
+        "timeZone": "UTC+2",
+        "projectionType": null,
+        "profileDescription": null,
+        "colorspace": "Uncalibrated",
+        "bitsPerSample": 8,
+        "autoStackId": null,
+        "rating": 3,
+        "tags": [
+          "urlaub"
+        ],
+        "updatedAt": "2026-10-10T16:27:14.907297+00:00"
+      }
+    }
+  }
+}
