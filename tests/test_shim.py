@@ -9,7 +9,9 @@ regression nobody could see.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.types import Message
 
 from immich_compressor.models import LedgerEntry, ReturnedOriginal, SkipReason
 from immich_compressor.shim import (
@@ -893,8 +896,12 @@ async def test_the_route_releases_a_claim_and_touches_what_it_unblocked(tmp_path
     store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
     upstream = Upstream()
     upstream.lines = [delete_line(COPY_ID)]
-    app, _, touched = build(store, upstream)
+    app, deps, touched = build(store, upstream)
     try:
+        # A ledger that has already made its start-up re-offer, which is not what this test
+        # is about: the release has to make its own touch, translated this time.
+        await deps.ledger.maps()
+        assert deps.ledger.take_reoffers() == (REPLACEMENT_ID,)
         with TestClient(app) as http:
             response = http.post("/api/sync/stream", json={})
         assert response.content == delete_line(COPY_ID)
@@ -1292,6 +1299,95 @@ async def test_a_failing_re_offer_does_not_fail_the_sync(tmp_path: Path) -> None
         assert response.status_code == 200
         assert response.content == asset_line()
         assert (await store.counters())[SHIM_TOUCHES] == 0
+    finally:
+        await store.close()
+
+
+async def test_a_client_that_drops_the_stream_still_gets_the_re_offer(tmp_path: Path) -> None:
+    """The client that lost the row is the one that cannot finish reading its sync.
+
+    Its OCR batch fails, the app drops the connection, and Starlette cancels the response
+    part-way — so nothing after the loop in `_stream_sync` runs. Driven at the ASGI level
+    with the ``spec_version`` uvicorn declares, which is the path that listens for the
+    disconnect and cancels the stream on it.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    app, deps, touched = build(store, Upstream())
+    never = asyncio.Event()
+
+    async def long_backfill() -> AsyncIterator[bytes]:
+        yield asset_line()
+        await never.wait()  # the rest of the response, which this client never reads
+        yield asset_line()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=long_backfill(), headers={"content-type": "application/jsonlines+json"}
+        )
+
+    deps.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    first_line_out = asyncio.Event()
+    asked = False
+
+    async def receive() -> Message:
+        nonlocal asked
+        if not asked:
+            asked = True
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+        await first_line_out.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_line_out.set()
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/sync/stream",
+        "raw_path": b"/api/sync/stream",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"content-type", b"application/json"), (b"content-length", b"2")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+    try:
+        await asyncio.wait_for(app(scope, receive, send), timeout=5)
+        assert first_line_out.is_set(), "the response really was cut off after its first line"
+        assert touched == [REPLACEMENT_ID]
+        assert (await store.counters())[SHIM_TOUCHES] == 1
+    finally:
+        await store.close()
+
+
+async def test_the_re_offer_is_made_before_immich_is_asked(tmp_path: Path) -> None:
+    """Touched first, so the replacement is inside the window of the very response it heals.
+
+    Immich bounds a sync response by a cursor it takes when the request arrives. A touch
+    made after that lands in the next response, which a client wedged on this one may never
+    get to; a touch made before it lands in this one, ahead of the OCR boxes that need it.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    upstream = Upstream()
+    upstream.lines = [asset_line()]
+    app, deps, touched = build(store, upstream)
+    touched_when_asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        touched_when_asked.extend(touched)
+        return upstream.handler(request)
+
+    deps.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with TestClient(app) as http:
+            response = http.post("/api/sync/stream", json={})
+        assert response.content == asset_line(), "and it arrives as itself"
+        assert touched_when_asked == [REPLACEMENT_ID]
+        assert touched == [REPLACEMENT_ID], "once, not again at the end of the stream"
     finally:
         await store.close()
 
