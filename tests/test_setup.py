@@ -382,6 +382,41 @@ def test_setup_stops_before_touching_anything_without_a_key(
 
 
 @respx.mock
+def test_setup_refuses_a_directory_that_does_not_exist_before_asking_the_server(
+    tmp_path: Path, capsys
+) -> None:
+    """Exit 2, an actionable message, and not one request sent.
+
+    The directory is the compose project: `setup` fills in `config.yaml` and `.env` next
+    to the `docker-compose.yaml` that starts the service. Creating a missing one would hand
+    back a directory `docker compose up -d` cannot start anything from — and inside the
+    container a mistyped path is not the mounted one, so the files would vanish with it.
+    """
+    missing = tmp_path / "not-there"
+    users_me = respx.get(f"{BASE}/users/me").mock(
+        return_value=httpx.Response(200, json={"email": "someone@example.com"})
+    )
+
+    assert run_setup(_options(tmp_path, directory=missing)) == 2
+
+    err = capsys.readouterr().err
+    assert str(missing) in err
+    assert "does not exist" in err
+    assert not users_me.called
+    assert not missing.exists()
+
+
+@respx.mock
+def test_setup_refuses_a_directory_that_is_a_file(tmp_path: Path, capsys) -> None:
+    not_a_directory = tmp_path / "config.yaml"
+    not_a_directory.write_text("# a file\n", encoding="utf-8")
+
+    assert run_setup(_options(tmp_path, directory=not_a_directory)) == 2
+    assert "is not a directory" in capsys.readouterr().err
+    assert not_a_directory.read_text() == "# a file\n"
+
+
+@respx.mock
 def test_setup_stops_before_touching_anything_on_a_rejected_key(tmp_path: Path, capsys) -> None:
     """Exit 1, likewise with nothing written.
 

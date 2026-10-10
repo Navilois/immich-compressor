@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`setup --directory` refuses a directory that does not exist, before it asks the server
+  anything.** It used to run the key and permission checks and detect the hardware, then die
+  in a raw `FileNotFoundError` traceback while writing `config.yaml`. It now exits `2` at once
+  with a message naming the path, the same exit code as a missing API key. The directory is
+  refused rather than created on purpose: it is the compose project, the one that holds
+  `docker-compose.yaml`, and a fresh one would get a configuration nothing can start —
+  inside the container a mistyped path is not even the mounted one. A path that names a
+  file is refused the same way.
+
 ### Documentation
 
 - **The shim's reverse proxy setup assumed a proxy that most readers do not have.**

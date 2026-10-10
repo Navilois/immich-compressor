@@ -819,7 +819,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--network", default=DEFAULT_NETWORK, help="docker network your Immich stack uses"
     )
     setup_parser.add_argument("--webhook-url", default=DEFAULT_WEBHOOK_URL, help="URL Immich should call")
-    setup_parser.add_argument("--directory", default=".", help="where to write config.yaml and .env")
+    setup_parser.add_argument(
+        "--directory", default=".", help="existing directory to write config.yaml and .env into"
+    )
     setup_parser.add_argument(
         "--non-interactive", action="store_true", help="never prompt; use flags and defaults"
     )
