@@ -5,7 +5,7 @@ Five minutes, and nothing is deleted at the end of them.
 ## Before you start
 
 - Immich **v3.0.0 or newer** (workflows were introduced there; developed and verified
-  against v3.1.0).
+  against v3.1.0, re-verified against v3.3.1).
 - Docker, and shell access to the host running Immich.
 - The name of the docker network your Immich stack uses — `docker network ls`, usually
   `immich_default`.

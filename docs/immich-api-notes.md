@@ -1,8 +1,11 @@
 # Verified Immich API behaviour
 
-**Everything on this page was checked against a running Immich v3.1.0 instance, not against
-documentation.** The captured webhook payloads are committed as test fixtures in
-`tests/fixtures/`. Last verified: **2026-08-23**, against **Immich v3.1.0**.
+**Everything on this page was checked against a running Immich instance, not against
+documentation.** It was written against **Immich v3.1.0** (last verified **2026-08-23**) and
+re-checked against **Immich v3.3.1** on **2026-10-10** — [Re-checked on
+v3.3.1](#re-checked-on-v331) says which items that covers; everything else still stands on
+v3.1.0 alone. The captured webhook payloads from both versions are committed as test
+fixtures in `tests/fixtures/`.
 
 If you are writing another Immich integration, this is the page worth reading. Several of
 these cost a full debugging round to find.
@@ -15,7 +18,20 @@ release in v3.0.0, UI under **Utilities → Workflows**.
 - **Triggers:** `AssetCreate` and `AssetMetadataExtraction` only.
 - **Filters:** `assetFileFilter` (name or path; contains / startsWith / exact / **regex**,
   with `usePath`), `assetTypeFilter`, `assetExifFilter`, `assetDateFilter`,
-  `assetLocationFilter`, `assetMissingTimeZoneFilter`.
+  `assetLocationFilter`, `assetMissingTimeZoneFilter`. `usePath` only takes effect from
+  v3.2.0: v3.1.0 matched `originalFileName` whatever it said
+  ([immich-app/immich#30394](https://github.com/immich-app/immich/pull/30394) — read in the
+  source, not measured). `setup` sends `usePath: false`, which behaves the same on both.
+- **Steps run in their stored order only from v3.3.1**
+  ([immich-app/immich#32240](https://github.com/immich-app/immich/pull/32240)). The query
+  that loads a run had no `ORDER BY` before, and upstream reported action steps running
+  after a filter had halted the run on v3.2.x
+  ([immich-app/immich#32083](https://github.com/immich-app/immich/issues/32083)). On v3.3.1
+  the steps `setup` creates are stored as `order` 0, 1, 2 and the filters gate as they
+  should: eight uploads named `*.cmp.*` fired no webhook, and neither did the five such
+  assets when "Extract Metadata → All" re-ran the workflow over the library. On an older
+  release, what slips past the filters is refused by the service itself — the `.cmp.`
+  filename check, the metadata marker and `enabled_types`.
 - **Actions:** `assetArchive`, `assetLock`, `assetVisibility`, `assetFavorite`,
   `assetAddToAlbums`, **`webhook`**.
 - Plugins run as WASM (Extism) with five host functions — `searchAlbums`, `createAlbum`,
@@ -37,6 +53,14 @@ The action posts exactly this, with no `config` and no `workflow` object:
 fileModifiedAt, localDateTime, isFavorite, isOffline, isExternal, isEdited, libraryId,
 livePhotoVideoId, stackId, duplicateId, deletedAt, visibility, status, duration, checksum`
 and an `exifInfo` object.
+
+**From v3.2.0 it also carries `tags`**, added with the tag trigger
+([immich-app/immich#29043](https://github.com/immich-app/immich/pull/29043)): whole tag rows,
+`{id, value, color, parentId, createdAt, updatedAt}`, and `[]` for an untagged asset. The
+names stay in `exifInfo.tags`, which is still `null` rather than `[]` when there are none
+([1](#1-exifinfotags-arrives-as-null-not-)). Captured from v3.3.1; the ingest ignores the new
+field. Nothing else in the payload changed — every field of the v3.1.0 captures is in the
+v3.3.1 ones, with the same type.
 
 ## Behaviour table
 
@@ -73,7 +97,7 @@ and an `exifInfo` object.
 | Delete | `DELETE /assets` `{ids, force}` | `force: false` → trash |
 | Restore | `POST /trash/restore/assets` `{ids}` | |
 | Detail | `GET /assets/{id}` | For the people check, the checksum and the live field values |
-| Backfill | `POST /search/metadata` `{type, size, page, withExif}` | Optional, CLI only. A paged walk of the library. All three parameters *are* applied, `size` caps at 1000, and `nextPage` arrives as a string — see [16](#16-post-searchmetadata-applies-type-size-and-page). The client re-checks type and repeated pages anyway, because [15](#15-post-searchlarge-assets-ignores-type-and-size) does not |
+| Backfill | `POST /search/metadata` `{type, size, page, withExif}` | Optional, CLI only. A paged walk of the library. All three parameters *are* applied, `size` caps at 1000, and `nextPage` arrives as a string — see [16](#16-post-searchmetadata-applies-type-size-and-page). The client re-checks type and repeated pages anyway, because [15](#15-post-searchlarge-assets-ignores-type-and-size) does not. `type`, `page` and `nextPage` are deprecated since v3.2.0 and still work on v3.3.1 |
 
 ## API key permissions
 
@@ -233,9 +257,15 @@ Never diagnose from the Immich side alone. Related: if a workflow stops firing, 
 `NoResultError`, triggered by an asset being hard-deleted while its workflow was executing.
 A restart cleared it.
 
+v3.2.0 added a per-workflow log (`logging: true`,
+[immich-app/immich#29878](https://github.com/immich-app/immich/pull/29878)). It does not
+change this: in the v3.3.1 source the webhook step still discards the answer, so a run this
+service refused is logged as completed there too. Read in the source, not measured.
+
 ### 15. `POST /search/large-assets` ignores `type` and `size`
 
-Measured on v3.1.0, on a library of 48 958 photos and 4 717 videos:
+Measured on v3.1.0, on a library of 48 958 photos and 4 717 videos — and not re-measured
+since, because nothing here calls this endpoint any more:
 
 | Request | Answer |
 |---|---|
@@ -313,6 +343,18 @@ without complaint and neither selects trashed assets; a request carrying them re
 same live assets as one without. **`trashedAfter`** is the field that works — that is how
 the trash view was confirmed to hold a specific asset id.
 
+**On v3.3.1 the fields still work, but they are on notice.** Re-measured on 2026-10-10 on a
+throwaway library of six assets: `type` is applied, `page` pages without overlap, `nextPage`
+is `"2"`, `"3"` and then `null`, and `size: 1001` is the same `400 too_big`. What changed is
+their status. v3.2.0 deprecated `type`, `page` and `order` on the request and `nextPage` on
+the response, in favour of `filter`, `orderBy`, `cursor` and `nextCursor`
+([immich-app/immich#30179](https://github.com/immich-app/immich/pull/30179)), and the
+v3.3.1 source marks the old shape `TODO(v4): remove`. The two shapes do not mix:
+`{type, page, size, cursor}` answers `400` with `Deprecated field type cannot be combined
+with cursor`. So `backfill scan` runs unchanged on v3.3.1 and has to move to `cursor`
+before Immich v4. Ordering and `total` were not re-measured — every asset in that library
+carried the same `fileCreatedAt`, and one page held all of them.
+
 ### 17. Sync endpoints reject API keys outright, whatever their permissions
 
 Measured on v3.1.0 on 2026-08-26, against a throwaway instance, with a key holding `all`:
@@ -367,3 +409,55 @@ what `_offered_ids` in the live suite checks.
 This is what a real client does, and the reason is visible in the ack format itself:
 `AssetV2|01a03ecd-6ec1-75f6-906c-9127d50198cc` is `<type>|<checkpoint>`, one cursor per
 type rather than one per connection.
+
+### 19. `GET /assets/{id}/original` without `edited` is the original
+
+Between v3.1.0 and v3.3.1 the OpenAPI spec dropped the `default: false` of the `edited`
+query parameter, which reads like a change of default. It is not one. Measured on v3.3.1
+on 2026-10-10, on a photo given a 90° rotate edit:
+
+| Request | Answer |
+|---|---|
+| no `edited` parameter | the uploaded bytes, exactly |
+| `edited=false` | the uploaded bytes, exactly |
+| `edited=true` | the edited rendition — different bytes, about half the size |
+
+The asset's `checksum` stays the SHA-1 of the upload, and `isEdited` turns `true`. The
+service downloads without the parameter and skips edited assets at the guard anyway, so it
+would not have been affected either way.
+
+## Re-checked on v3.3.1
+
+On 2026-10-10, against a throwaway v3.3.1 instance — `docker-compose.test.yaml` with
+`IMMICH_VERSION=v3.3.1`, and a library of a few test assets rather than a real one:
+
+- **The live suite** passed, 5 of 5 with none skipped, the two `/sync/stream` tests included.
+- **A real webhook, end to end.** The workflow `immich-compressor setup` creates was fired
+  by Immich itself for a video and a photo and both went through the pipeline. Those bodies
+  are `tests/fixtures/webhook_video_v3.3.1.json` and `webhook_image_v3.3.1.json`, sent with
+  `User-Agent: immich-server/3.3.1`. The payload tests run against both versions'
+  captures.
+- **`immich-compressor setup`**, with a key holding exactly the nine permissions
+  [above](#api-key-permissions): every probe passed.
+- **Re-measured, and unchanged:** in the [behaviour table](#behaviour-table), the webhook
+  body, the Buffer `checksum` and `base64(sha1(file)) == checksum`, millisecond
+  `duration`, tag names, the metadata KV, the negative-lookahead regex, soft delete,
+  `force: true` (the asset is gone and cannot be restored), and both restore rows.
+  `PUT /assets/copy` carried albums, favourite and the stack. `GET /assets/{id}` still names
+  the person on a face, which is what `skip_if_named_people` reads — checked with a face
+  added by hand, and the job was skipped. Items [1](#1-exifinfotags-arrives-as-null-not-),
+  [12](#12-assetmetadataextraction-fires-in-bulk-not-once-per-upload) — "Extract Metadata →
+  All" still fired the workflow for every asset that passes the filters —
+  [13](#13-a-scoped-api-key-gets-403-on-usersme-and-that-is-not-an-error) and
+  [17](#17-sync-endpoints-reject-api-keys-outright-whatever-their-permissions), and
+  [16](#16-post-searchmetadata-applies-type-size-and-page) as far as its last paragraph
+  says.
+- **New or corrected on this page:** the `tags` field in [the payload](#the-payload), the
+  step order and `usePath` in [the workflow system](#the-workflow-system), the restore
+  `count` in the behaviour table, the deprecation in 16, the workflow log in
+  [14](#14-immich-ignores-the-webhooks-response-status), and
+  [19](#19-get-assetsidoriginal-without-edited-is-the-original).
+- **Not re-measured:** everything else — in particular 2 to 8, 14 and 15, 18 except
+  through the live suite's sync tests, the duplicate-upload response, shared links and the
+  sidecar on copy, and anything that needs a second user, machine learning or a real
+  library's size.

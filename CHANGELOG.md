@@ -99,11 +99,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a server that is down. The `--version` row of the CLI table in `docs/operations.md` had an
   empty cell where every other row says what the command does.
 
+- **Verified against Immich v3.3.1, the current release on 2026-10-10.** The live suite
+  passes against it (5 of 5, none skipped), the workflow `setup` creates was fired by v3.3.1
+  itself and its webhooks went through the pipeline, and `docs/immich-api-notes.md` gains a
+  *Re-checked on v3.3.1* section that names what was re-measured and what still stands on
+  v3.1.0 alone. Nothing here needs changing: the payload gained one field the ingest ignores
+  (`data.asset.tags`), workflow steps run in their configured order only from v3.3.1, and
+  the flat `type` and `page` fields `backfill scan` sends to `POST /search/metadata` still
+  work, although Immich deprecated them in v3.2.0 and marks them for removal in v4. The two
+  v3.3.1 captures join `tests/fixtures/`, and the payload tests run against both versions.
+
 - **The restore count was described wrongly.** `docs/safety.md` said that restoring an asset
   which is not in the trash does not count as a restoration, and `docs/immich-api-notes.md`
   that the server's `count` spares a caller from reporting the number it sent. Immich's
   `count` *is* the number of ids in the request, on v3.1.0 as on v3.3.1, so the number
   `restore` prints can include originals that were never in the trash.
+
+- **The test instance could run an old Immich under the new tag.** `docker-compose.test.yaml`
+  and `CONTRIBUTING.md` said the floating `v3` tag tracks the current 3.x. Compose never
+  re-pulls a tag it already has, and on 2026-10-10 a local `v3` was still v3.1.0. Both now
+  say to pull first, and `CONTRIBUTING.md` how to pin a version for a single run.
 
 ## [1.4.1] - 2026-08-28
 

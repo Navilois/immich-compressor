@@ -9,7 +9,7 @@ for when they do not, and for understanding what the steps are doing.
 ## The JSON
 
 This is the exact body that was created and fired successfully against a live v3.1.0
-instance:
+instance, and again against v3.3.1 on 2026-10-10:
 
 ```json
 {
@@ -89,6 +89,8 @@ carried over to the replacement.
 option. Immich's regex engine supports lookaheads — verified. Without this filter the
 compressed upload re-triggers the workflow, which was confirmed to happen. It is only the
 first line of defence; the hard loop guard is the `compressor` metadata marker on the asset.
+Before v3.3.1 Immich did not even guarantee that the filters run before the webhook — see
+[immich-api-notes.md](immich-api-notes.md#the-workflow-system).
 
 If you change `behavior.compressed_marker`, change this pattern to match.
 
@@ -103,8 +105,10 @@ Immich reports as success — see below.
 
 > **Immich ignores the webhook's response status.** A 401 (wrong `headerValue`), a 422
 > (payload the service could not parse) or a 500 is still logged as *"Workflow … executed
-> successfully"*. Never diagnose from the Immich side alone. Ask the compressor instead —
-> the first line of `report` counts what arrived:
+> successfully"*. Never diagnose from the Immich side alone — the workflow log v3.2.0 added
+> (`logging: true`) does not change that, since per the v3.3.1 source the webhook step
+> still discards the answer.
+> Ask the compressor instead — the first line of `report` counts what arrived:
 >
 > ```
 > webhooks: 0 received, 7 rejected (bad or missing token)
