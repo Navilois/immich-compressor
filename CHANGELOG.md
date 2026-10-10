@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The re-offer now runs before each sync request is forwarded, which also puts the
   replacement inside the window of that same response, so the device gets it back in one
   sync instead of two. Not yet verified on a device.
+- **A delete in a sync response the device hung up on is no longer lost.** The same
+  cancellation took the rest of the shim's bookkeeping with it: a purge seen only in such a
+  response never opened its gate on `delete_mode: trash`, and a returned copy's delete never
+  re-armed the translation it was holding back, while Immich, its lines already acked, does
+  not send either again. That work now runs when the response ends however it ends, shielded
+  from the cancellation and bounded to 30 seconds. Reproduced against a real uvicorn with a
+  client that hangs up after the first line: neither happened before, both do now. Not yet
+  verified on a device.
 
 ## [1.4.2] - 2026-10-10
 

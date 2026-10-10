@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.types import Message
 
+from immich_compressor import shim
 from immich_compressor.models import LedgerEntry, ReturnedOriginal, SkipReason
 from immich_compressor.shim import (
     ChecksumLedger,
@@ -1303,22 +1304,21 @@ async def test_a_failing_re_offer_does_not_fail_the_sync(tmp_path: Path) -> None
         await store.close()
 
 
-async def test_a_client_that_drops_the_stream_still_gets_the_re_offer(tmp_path: Path) -> None:
-    """The client that lost the row is the one that cannot finish reading its sync.
+async def hang_up_after_the_first_line(app: FastAPI, deps: ShimDeps, first: bytes) -> None:
+    """One sync request, driven the way uvicorn drives it, from a client that leaves early.
 
-    Its OCR batch fails, the app drops the connection, and Starlette cancels the response
-    part-way — so nothing after the loop in `_stream_sync` runs. Driven at the ASGI level
-    with the ``spec_version`` uvicorn declares, which is the path that listens for the
-    disconnect and cancels the stream on it.
+    Immich sends `first` and then holds the response open, as it does while it walks a large
+    library; the client reads that one line and drops the connection, as the app does when a
+    batch fails. Driven at the ASGI level with the ``spec_version`` uvicorn declares, which is
+    the path on which Starlette listens for the disconnect and cancels the stream on it.
+    Returns once the app has, so whatever the shim still does on the way out has been done.
     """
-    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
-    app, deps, touched = build(store, Upstream())
     never = asyncio.Event()
 
     async def long_backfill() -> AsyncIterator[bytes]:
-        yield asset_line()
+        yield first
         await never.wait()  # the rest of the response, which this client never reads
-        yield asset_line()
+        yield first
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -1355,11 +1355,90 @@ async def test_a_client_that_drops_the_stream_still_gets_the_re_offer(tmp_path: 
         "client": ("testclient", 50000),
         "server": ("testserver", 80),
     }
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    assert first_line_out.is_set(), "the response really was cut off after its first line"
+
+
+async def test_a_client_that_drops_the_stream_still_gets_the_re_offer(tmp_path: Path) -> None:
+    """The client that lost the row is the one that cannot finish reading its sync.
+
+    Its OCR batch fails, the app drops the connection, and Starlette cancels the response
+    part-way, before the end of the stream where the re-offer used to be made.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    app, deps, touched = build(store, Upstream())
     try:
-        await asyncio.wait_for(app(scope, receive, send), timeout=5)
-        assert first_line_out.is_set(), "the response really was cut off after its first line"
+        await hang_up_after_the_first_line(app, deps, asset_line())
         assert touched == [REPLACEMENT_ID]
         assert (await store.counters())[SHIM_TOUCHES] == 1
+    finally:
+        await store.close()
+
+
+async def test_a_purge_the_client_saw_before_hanging_up_still_opens_its_gate(tmp_path: Path) -> None:
+    """The delete line went out, so the client has applied it and will never be sent it again.
+
+    On ``delete_mode: trash`` this line is the only way the shim learns the original is gone,
+    so if the cancellation took the gate with it, that replacement would never be translated.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=False)
+    app, deps, touched = build(store, Upstream())
+    try:
+        await hang_up_after_the_first_line(app, deps, delete_line())
+        job = await store.get(ORIGINAL_ID)
+        assert job is not None and job.original_freed_at is not None
+        assert touched == [REPLACEMENT_ID]
+        counters = await store.counters()
+        assert counters[SHIM_GATES_OPENED] == 1
+        assert counters[SHIM_TOUCHES] == 1
+    finally:
+        await store.close()
+
+
+async def test_a_copy_deleted_before_the_client_hung_up_still_releases_its_claim(tmp_path: Path) -> None:
+    """The returned copy's delete went out, and with it the only word that it is gone.
+
+    Lost, the claim would hold the translation back for good, and the phone, matching its
+    file against nothing, could upload the original once more.
+    """
+    store = await seeded_store(tmp_path / "s.db", freed=True, came_back=True)
+    app, deps, touched = build(store, Upstream())
+    try:
+        # As in the uncancelled test: the start-up re-offer is not what this is about.
+        await deps.ledger.maps()
+        assert deps.ledger.take_reoffers() == (REPLACEMENT_ID,)
+        await hang_up_after_the_first_line(app, deps, delete_line(COPY_ID))
+        copy = await store.get(COPY_ID)
+        assert copy is not None and copy.original_freed_at is not None
+        assert (await store.returned_originals()) == []
+        assert touched == [REPLACEMENT_ID]
+        assert (await store.counters())[SHIM_TOUCHES] == 1
+    finally:
+        await store.close()
+
+
+async def test_settling_after_a_hang_up_gives_up_on_a_touch_that_never_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Shielded from the cancellation, but not unbounded: a hung Immich must not pin the task.
+
+    The gate is recorded before the touch is tried, so what the budget costs is the re-offer
+    alone — the same loss as a touch that fails, and said so in the log.
+    """
+    monkeypatch.setattr(shim, "_SETTLE_BUDGET_S", 0.1)
+    store = await seeded_store(tmp_path / "s.db", freed=False)
+    app, deps, _ = build(store, Upstream())
+
+    async def hang(asset_id: str) -> None:
+        await asyncio.Event().wait()
+
+    deps.touch = hang
+    try:
+        await hang_up_after_the_first_line(app, deps, delete_line())
+        job = await store.get(ORIGINAL_ID)
+        assert job is not None and job.original_freed_at is not None
+        assert (await store.counters())[SHIM_TOUCHES] == 0
+        assert "was cut short" in caplog.text
     finally:
         await store.close()
 

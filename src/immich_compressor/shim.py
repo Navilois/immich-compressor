@@ -49,6 +49,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iter
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
 import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
@@ -105,6 +106,12 @@ _DROP_FROM_REQUEST = _HOP_BY_HOP | {"host", "accept-encoding", "content-length"}
 # exact type match because `AssetDeleteV1` is the one event that means "the original is
 # gone for good".
 DELETE_TYPES = frozenset({"AssetDeleteV1", "PartnerAssetDeleteV1"})
+
+# How long the bookkeeping at the end of a sync response may keep running once the client
+# has gone. It is shielded from that cancellation, so without a bound a hung Immich would
+# pin the request's task through a touch for as long as the client's own timeout allows.
+# The work is a few SQLite writes and one touch per gate or claim; seconds, not minutes.
+_SETTLE_BUDGET_S = 30.0
 
 
 @dataclass(slots=True)
@@ -702,9 +709,20 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
     current one applies it, deleting the replacement's row, and acks. The re-offer is what
     brings that row back.
 
-    Everything after the loop runs only if the client read the response to its end. One
-    that drops the connection part-way cancels this generator at its next ``yield``, which
-    is why the re-offer also runs in the route, before the upstream request is made.
+    What the lines said is acted on once the response is over, however it ends. A client
+    whose batch fails drops the connection, and behind uvicorn Starlette then cancels this
+    generator wherever it is waiting — usually on Immich's next chunk. The lines it already
+    has are applied and acked and will not be sent again, so a purge or a returned copy's
+    delete among them would otherwise be lost for good. The ``finally`` therefore settles
+    them shielded from that cancellation, within `_SETTLE_BUDGET_S`.
+
+    Settled after the stream rather than line by line, for two reasons. Each line's work is
+    a store write followed by a touch, which no cancellation may split, so per line it would
+    need the same shield anyway. And a touch made while Immich is still producing this
+    response can bring the replacement back inside it, served from maps loaded before its
+    gate opened — untranslated, spending the one re-offer that was meant to deliver the
+    translation. The re-offer of held-back replacements is different on both counts, which
+    is why it also runs in the route, before the upstream request is made.
     """
     deps = ready.deps
     translate = deps.rewrite_sync_stream and not deps.log_only
@@ -744,27 +762,40 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
         if pending:
             yield pending
     finally:
-        await upstream.aclose()
-
-    if rewritten:
-        await ready.store.bump_counter(SHIM_LINES_REWRITTEN, rewritten)
-        await ready.store.bump_counter(SHIM_HASHES_TRANSLATED, rewritten)
-    if observed:
-        # Before the release, so that a claim this response both showed and withdrew ends
-        # withdrawn. Logged at all because the pipeline has not classified these yet: an
-        # operator comparing the shim against `jobs` would otherwise find nothing there.
-        new = ready.ledger.observe(observed.values())
-        if new:
-            logger.info(
-                "shim: %d asset(s) seen on the sync stream still hold a replaced original's "
-                "checksum; their translations stand down until those assets go",
-                new,
+        # Shielded, because a disconnected client cancels this generator and every await in
+        # here would otherwise be cancelled with it; bounded, because a shielded await that
+        # never returns would hold the request's task forever.
+        with anyio.move_on_after(_SETTLE_BUDGET_S, shield=True) as settle:
+            await upstream.aclose()
+            if rewritten:
+                await ready.store.bump_counter(SHIM_LINES_REWRITTEN, rewritten)
+                await ready.store.bump_counter(SHIM_HASHES_TRANSLATED, rewritten)
+            if observed:
+                # Before the release, so that a claim this response both showed and withdrew
+                # ends withdrawn. Logged at all because the pipeline has not classified these
+                # yet: an operator comparing the shim against `jobs` would otherwise find
+                # nothing there.
+                new = ready.ledger.observe(observed.values())
+                if new:
+                    logger.info(
+                        "shim: %d asset(s) seen on the sync stream still hold a replaced "
+                        "original's checksum; their translations stand down until those assets go",
+                        new,
+                    )
+            if gate_opens:
+                await _open_gates(ready, tuple(gate_opens))
+            if claims_released:
+                await _release_claims(ready, maps, tuple(claims_released))
+            await _reoffer_held_back(ready)
+        if settle.cancelled_caught:
+            logger.warning(
+                "shim: settling a sync response took longer than %.0fs and was cut short; "
+                "of %d gate(s) to open and %d claim(s) to release, some may not have been "
+                "recorded or re-offered",
+                _SETTLE_BUDGET_S,
+                len(gate_opens),
+                len(claims_released),
             )
-    if gate_opens:
-        await _open_gates(ready, tuple(gate_opens))
-    if claims_released:
-        await _release_claims(ready, maps, tuple(claims_released))
-    await _reoffer_held_back(ready)
 
 
 def build_router(deps: ShimDeps) -> APIRouter:
