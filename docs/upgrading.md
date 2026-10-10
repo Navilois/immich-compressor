@@ -32,6 +32,44 @@ Nothing to configure. Two things are worth checking once:
   work through them, and the freshness gate does not run again for a job that already
   exists — so an old stranded row is processed whatever its age.
 
+### If a device's sync fails on a FOREIGN KEY constraint, the restart is the fix
+
+Only with the shim enabled. After an upgrade to Immich v3.3.x a device can stop syncing with
+
+```
+Error: updateAssetOcrV1
+SqliteException(787): while executing statement, FOREIGN KEY constraint failed
+```
+
+v3.3.x re-sends every OCR box once, and a box for a replacement the device no longer has
+fails. The device lost that replacement earlier and without an error, when a returned copy
+of its original took the checksum — [shim.md](shim.md#when-the-checksum-comes-back) has
+the mechanism. To confirm it is this, take the asset id from the failing statement's
+parameters (the second value) and ask the job store, read-only:
+
+```bash
+docker exec -i immich-compressor python3 - <<'EOF'
+import sqlite3
+c = sqlite3.connect('file:/var/lib/immich-compressor/state.db?mode=ro', uri=True)
+c.row_factory = sqlite3.Row
+for r in c.execute("""SELECT rep.new_asset_id, cp.source_asset_id AS copy_id FROM jobs rep JOIN jobs cp
+    ON cp.owner_id = rep.owner_id AND cp.source_checksum = rep.source_checksum AND cp.rowid != rep.rowid
+    WHERE cp.skip_reason = 're_uploaded' AND cp.original_freed_at IS NULL
+    AND rep.new_asset_id IS NOT NULL AND rep.original_freed_at IS NOT NULL"""):
+    print(dict(r))
+EOF
+```
+
+If the failing id is one of the `new_asset_id`s, the upgrade itself is the repair. The
+first sync request after the container starts re-offers every replacement in that list with
+a no-op update, logged as `shim: re-offering … untranslated`, and the device puts each one
+back on its next sync. Nothing is deleted, and the copies stay where they are.
+
+Unverified: this was reproduced against the app's own schema in the test suite, not yet on
+a device. If the error persists after a restart and a sync, the `re-offering` lines say
+whether the touch was made; a `could not touch` warning instead names the asset it failed
+for.
+
 ## 1.4.0 → 1.4.1
 
 ### If a device's sync stopped advancing, this is the upgrade that fixes it

@@ -110,7 +110,36 @@ WHERE (library_id IS NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS UQ_remote_assets_owner_library_checksum
 ON remote_asset_entity (owner_id, library_id, checksum)
 WHERE (library_id IS NOT NULL);
+
+CREATE TABLE asset_ocr_entity (
+    id TEXT NOT NULL,
+    asset_id TEXT NOT NULL REFERENCES remote_asset_entity (id) ON DELETE CASCADE,
+    x1 REAL NOT NULL,
+    y1 REAL NOT NULL,
+    x2 REAL NOT NULL,
+    y2 REAL NOT NULL,
+    x3 REAL NOT NULL,
+    y3 REAL NOT NULL,
+    x4 REAL NOT NULL,
+    y4 REAL NOT NULL,
+    box_score REAL NOT NULL,
+    text_score REAL NOT NULL,
+    recognized_text TEXT NOT NULL,
+    is_visible INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (id)
+) STRICT, WITHOUT ROWID;
 """
+
+# Transcribed from ``updateAssetOcrV1`` at Immich v3.3.1 (``db6e11ec``): a plain insert with
+# ``DoUpdate`` on the primary key, no ``OR REPLACE``. The foreign key is the point — the
+# app's ``beforeOpen`` turns ``foreign_keys`` on, and a box naming an asset the mirror does
+# not hold is ``SqliteException(787)``.
+_OCR_UPSERT_SQL = (
+    "INSERT INTO asset_ocr_entity (id, asset_id, x1, y1, x2, y2, x3, y3, x4, y4, box_score, text_score, "
+    "recognized_text, is_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT(id) DO UPDATE SET asset_id = excluded.asset_id, recognized_text = excluded.recognized_text, "
+    "is_visible = excluded.is_visible"
+)
 
 # The column order used for every insert. `id` first because the companion is
 # `copyWith(id: ...)`-ed onto the insert only; the DO UPDATE set is the companion without
@@ -191,6 +220,21 @@ def delete_line(asset_id: str = ORIGINAL_ID) -> bytes:
     return json.dumps(record).encode() + b"\n"
 
 
+def ocr_line(asset_id: str = REPLACEMENT_ID, box_id: str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee") -> bytes:
+    """One ``SyncAssetOcrV1``: a recognised text box, which is all a mirror row needs to be."""
+    data = {
+        "id": box_id,
+        "assetId": asset_id,
+        **{f"{axis}{corner}": 0.5 for axis in "xy" for corner in range(1, 5)},
+        "boxScore": 0.56,
+        "textScore": 0.99,
+        "text": "+",
+        "isVisible": True,
+    }
+    record = {"type": "AssetOcrV1", "data": data, "ack": f"AssetOcrV1|0198-{box_id[:8]}"}
+    return json.dumps(record).encode() + b"\n"
+
+
 def ledger(*, freed: bool, new_checksum: str | None = REPLACEMENT_HASH) -> LedgerEntry:
     return LedgerEntry(
         source_asset_id=ORIGINAL_ID,
@@ -213,6 +257,7 @@ class Mirror:
     def __init__(self) -> None:
         self.db = sqlite3.connect(":memory:")
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(MIRROR_DDL)
 
     def _to_row(self, data: dict[str, Any]) -> list[Any]:
@@ -254,8 +299,28 @@ class Mirror:
                 data = record["data"]
                 if record["type"] == "AssetDeleteV1":
                     self.db.execute("DELETE FROM remote_asset_entity WHERE id = ?", (data["assetId"],))
+                elif record["type"] == "AssetOcrV1":
+                    corners = [data[f"{axis}{corner}"] for corner in range(1, 5) for axis in "xy"]
+                    self.db.execute(
+                        _OCR_UPSERT_SQL,
+                        [
+                            data["id"],
+                            data["assetId"],
+                            *corners,
+                            data["boxScore"],
+                            data["textScore"],
+                            data["text"],
+                            int(data["isVisible"]),
+                        ],
+                    )
                 else:
                     self.db.execute(_UPSERT_SQL, self._to_row(data))
+
+    def ocr_boxes_of(self, asset_id: str) -> int:
+        row = self.db.execute(
+            "SELECT count(*) FROM asset_ocr_entity WHERE asset_id = ?", (asset_id,)
+        ).fetchone()
+        return int(row[0])
 
     def checksum_of(self, asset_id: str) -> str | None:
         row = self.db.execute("SELECT checksum FROM remote_asset_entity WHERE id = ?", (asset_id,)).fetchone()
@@ -566,6 +631,36 @@ def test_deleting_the_copy_re_arms_the_translation() -> None:
 
     assert m.holders_of(ORIGINAL_HASH) == [REPLACEMENT_ID]
     assert m.is_backup_candidate(ORIGINAL_HASH) is False
+
+
+def test_the_lost_replacement_wedges_the_ocr_sync_until_it_is_re_offered(settled: Mirror) -> None:
+    """The reported failure on Immich v3.3.1, and the re-offer that clears it.
+
+    ``Error: updateAssetOcrV1 … FOREIGN KEY constraint failed (code 787)``. The copy's line
+    took the replacement's row and its OCR boxes with it, quietly. Nothing breaks until a
+    line names the replacement again — and v3.3.x resets every client's OCR checkpoint, so
+    the backfill does exactly that, and the client's sync stops on it.
+    """
+    settled.apply(ocr_line())
+    assert settled.ocr_boxes_of(REPLACEMENT_ID) == 1
+
+    settled.apply(asset_line(COPY_ID, ORIGINAL_HASH))
+    assert settled.checksum_of(REPLACEMENT_ID) is None, "the copy's line destroyed the replacement"
+    assert settled.ocr_boxes_of(REPLACEMENT_ID) == 0, "and the cascade its boxes"
+
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+        settled.apply(ocr_line())
+
+    # The touch puts the replacement back on the stream, and maps that know the copy send it
+    # as itself.
+    re_offered = translate(asset_line(), [ledger(freed=True)], [came_back()])
+    assert re_offered == asset_line(), "untranslated, byte for byte"
+    settled.apply(re_offered)
+    assert settled.holders_of(ORIGINAL_HASH) == [COPY_ID]
+    assert settled.checksum_of(REPLACEMENT_ID) == REPLACEMENT_HASH
+
+    settled.apply(ocr_line())
+    assert settled.ocr_boxes_of(REPLACEMENT_ID) == 1
 
 
 # --------------------------------------------------------------------------------------
