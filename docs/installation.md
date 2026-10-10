@@ -6,7 +6,9 @@ when your setup does not match its assumptions.
 ## Requirements
 
 - **Immich v3.0.0 or newer.** Workflows were introduced there. Developed and verified
-  against v3.1.0; there is no support for Immich 2.x and there will not be.
+  against v3.1.0, and re-verified against v3.3.1 on 2026-10-10 —
+  [immich-api-notes.md](immich-api-notes.md#re-checked-on-v331) says what that covered.
+  There is no support for Immich 2.x and there will not be.
 - **Docker**, on the host that runs Immich, or on one that shares a network with it.
 - **Network reachability in both directions**: Immich must reach the service's `/webhook`,
   and the service must reach Immich's API.

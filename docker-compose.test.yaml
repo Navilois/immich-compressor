@@ -2,9 +2,12 @@
 # Derived from the official docker-compose.yml of the v3.1.0 release.
 #
 # The tag follows IMMICH_VERSION from testinstance/.env, and example.env sets the floating
-# `v3` — so this tracks whatever Immich 3.x is current, not the v3.1.0 that the fixtures in
-# tests/fixtures/ and docs/immich-api-notes.md were captured against. Set
-# IMMICH_VERSION=v3.1.0 there to reproduce those exactly.
+# `v3` — so this tracks whatever Immich 3.x was current when the image was last pulled.
+# Compose never re-pulls a tag it already has, so run `pull` (same flags as below) after an
+# Immich release, or a stale `v3` keeps starting the old server under the new name. The
+# fixtures in tests/fixtures/ come from v3.1.0 and v3.3.1, and docs/immich-api-notes.md names
+# the version each item was measured on; set IMMICH_VERSION to one of them to reproduce it
+# exactly.
 #
 # NOT for production. It exists so the `live`-marked suite has something to drive.
 #

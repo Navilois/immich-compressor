@@ -6,11 +6,19 @@ from typing import Any
 
 import pytest
 
+from conftest import load_fixture
 from immich_compressor.models import AssetDetail, UpdateAssetFields, WebhookPayload
 
+# The same two assets — name, size, camera, GPS, description, rating and tags — captured
+# from a live v3.1.0 and again from a live v3.3.1. Every assertion has to hold for both:
+# a capture that stops parsing is an Immich release the webhook can no longer ingest.
+VIDEO_CAPTURES = ["webhook_video.json", "webhook_video_v3.3.1.json"]
+IMAGE_CAPTURES = ["webhook_image.json", "webhook_image_v3.3.1.json"]
 
-def test_video_capture_parses(video_payload_raw: dict[str, Any]) -> None:
-    payload = WebhookPayload.model_validate(video_payload_raw)
+
+@pytest.mark.parametrize("capture", VIDEO_CAPTURES)
+def test_video_capture_parses(capture: str) -> None:
+    payload = WebhookPayload.model_validate(load_fixture(capture))
     asset = payload.data.asset
 
     assert payload.type == "AssetV1"
@@ -26,18 +34,21 @@ def test_video_capture_parses(video_payload_raw: dict[str, Any]) -> None:
     assert asset.exif_info.file_size_in_byte is not None
 
 
-def test_image_capture_parses(image_payload_raw: dict[str, Any]) -> None:
-    asset = WebhookPayload.model_validate(image_payload_raw).data.asset
+@pytest.mark.parametrize("capture", IMAGE_CAPTURES)
+def test_image_capture_parses(capture: str) -> None:
+    asset = WebhookPayload.model_validate(load_fixture(capture)).data.asset
     assert asset.type == "IMAGE"
     assert asset.duration is None
     assert asset.exif_info.exif_image_width == 3000
     assert asset.exif_info.description == "Compressor test photo Vienna"
 
 
-def test_buffer_checksum_is_tolerated(video_payload_raw: dict[str, Any]) -> None:
+@pytest.mark.parametrize("capture", VIDEO_CAPTURES)
+def test_buffer_checksum_is_tolerated(capture: str) -> None:
     """`checksum` arrives as {"type":"Buffer","data":[...]}. We must not choke on it."""
-    assert video_payload_raw["data"]["asset"]["checksum"]["type"] == "Buffer"
-    WebhookPayload.model_validate(video_payload_raw)  # must not raise
+    raw = load_fixture(capture)
+    assert raw["data"]["asset"]["checksum"]["type"] == "Buffer"
+    WebhookPayload.model_validate(raw)  # must not raise
 
 
 def test_unknown_fields_are_ignored(video_payload_raw: dict[str, Any]) -> None:

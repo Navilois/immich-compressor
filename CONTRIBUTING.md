@@ -60,13 +60,28 @@ project `immich-test`. Machine learning sits behind the `ml` profile because it 
 2 GB of RAM.
 
 That stack follows the floating `v3` tag, inherited from `testinstance/example.env`, so the
-live suite runs against whatever Immich 3.x is current on the day — **not** against v3.1.0,
-which is what `tests/fixtures/` and [docs/immich-api-notes.md](docs/immich-api-notes.md)
-were captured from. Pin it in `testinstance/.env` when you need a documented behaviour
+live suite runs against whatever Immich 3.x was current **when that image was last pulled**.
+Compose does not re-pull a tag it already has: on 2026-10-10 a development machine's local
+`v3` was still the v3.1.0 image — same image id — while v3.3.1 was current. Pull before a
+run that is meant to check the current release:
+
+```bash
+docker compose --env-file testinstance/.env -f docker-compose.test.yaml pull
+```
+
+`tests/fixtures/` holds captures from v3.1.0 and v3.3.1, and
+[docs/immich-api-notes.md](docs/immich-api-notes.md) says which version each item was
+measured on. Pin the version in `testinstance/.env` when you need a documented behaviour
 reproduced exactly:
 
 ```bash
 IMMICH_VERSION=v3.1.0
+```
+
+For a single run, the shell environment wins over that file:
+
+```bash
+IMMICH_VERSION=v3.3.1 docker compose --env-file testinstance/.env -f docker-compose.test.yaml up -d
 ```
 
 A live failure that appears right after an upstream Immich release is therefore worth
