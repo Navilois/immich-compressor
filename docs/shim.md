@@ -126,6 +126,12 @@ holds. Because a restart forgets which replacements were already re-offered, the
 request after a start re-offers every one that is held back — which is also what repairs a
 device that lost the row before the service could do this.
 
+The re-offer is made **before the request is forwarded** to Immich, not after the response.
+A device stuck on that foreign key never reads its sync response to the end: the batch
+fails, the app drops the connection, and whatever the shim would have done after the last
+line never happens. Made first, the touch also lands inside the response Immich is about to
+build, so the replacement arrives in the same sync, ahead of the OCR boxes that need it.
+
 When the copy is deleted in turn, its delete goes past on the same sync stream. The shim
 records it against that copy's own job row, makes the same no-op update on the replacement,
 and the translation is armed again — otherwise removing the duplicate would simply start

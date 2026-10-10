@@ -659,8 +659,8 @@ async def _reoffer_held_back(ready: _Ready) -> None:
     receives a row it already holds, with the checksum it already has.
     """
     deps = ready.deps
-    # A rebuild, if anything this response did invalidated the maps, so that a claim seen on
-    # this very stream is re-offered now rather than on the next request.
+    # A rebuild, if the maps are due or something invalidated them, so that a claim the store
+    # or the stream just reported is re-offered now rather than on the next request.
     await ready.ledger.maps()
     for new_asset_id in ready.ledger.take_reoffers():
         if deps.log_only:
@@ -699,8 +699,12 @@ async def _stream_sync(ready: _Ready, upstream: httpx.Response) -> AsyncIterator
     every request after this one. A claim that arrives *behind* the line it should have
     stopped therefore still lands on a translated row. An app from before Immich PR #28445
     fails the batch, does not ack, and Immich re-sends it from maps that already know; a
-    current one applies it, deleting the replacement's row, and acks. The re-offer at the
-    end of this function is what brings that row back.
+    current one applies it, deleting the replacement's row, and acks. The re-offer is what
+    brings that row back.
+
+    Everything after the loop runs only if the client read the response to its end. One
+    that drops the connection part-way cancels this generator at its next ``yield``, which
+    is why the re-offer also runs in the route, before the upstream request is made.
     """
     deps = ready.deps
     translate = deps.rewrite_sync_stream and not deps.log_only
@@ -772,6 +776,11 @@ def build_router(deps: ShimDeps) -> APIRouter:
         ready = deps.ready()
         await ready.store.bump_counter(SHIM_REQUESTS)
         body = await request.body()
+        # Here, and not only at the end of the stream. A client whose sync fails part-way
+        # drops the connection, and the end of `_stream_sync` then never runs — which is
+        # exactly the client that lost a row. Before the upstream request, the touch also
+        # lands inside this response's window, so the row comes back in this very sync.
+        await _reoffer_held_back(ready)
         upstream_request = ready.client.build_request(
             "POST",
             f"{deps.upstream_url}{request.url.path}",

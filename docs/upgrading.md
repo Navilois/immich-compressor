@@ -11,6 +11,20 @@ and minor releases arrive that way and a breaking change never does. The
 
 Job state lives in a volume and survives. Schema changes are applied automatically on open.
 
+## Unreleased
+
+### If 1.4.2 did not clear the FOREIGN KEY error, this release does
+
+1.4.2 re-offered a displaced replacement only once a sync response had been read to its
+end — and the device that needs it is the one that cannot get that far: its OCR batch
+fails, the app drops the connection, and the shim's work after the last line never runs.
+If that device was the only one syncing through the shim, 1.4.2 never made the touch, and
+no `shim: re-offering … untranslated` line appears in the log.
+
+The re-offer now happens before each sync request is forwarded, so the device's own next
+sync makes it, and the replacement comes back in that same sync. Nothing to configure; the
+diagnosis in the section below still applies.
+
 ## 1.4.1 → 1.4.2
 
 ### Webhooks for a type that is not enabled are refused, not queued
@@ -60,10 +74,11 @@ for r in c.execute("""SELECT rep.new_asset_id, cp.source_asset_id AS copy_id FRO
 EOF
 ```
 
-If the failing id is one of the `new_asset_id`s, the upgrade itself is the repair. The
-first sync request after the container starts re-offers every replacement in that list with
-a no-op update, logged as `shim: re-offering … untranslated`, and the device puts each one
-back on its next sync. Nothing is deleted, and the copies stay where they are.
+If the failing id is one of the `new_asset_id`s, the upgrade itself is meant to be the
+repair. The first sync request after the container starts re-offers every replacement in
+that list with a no-op update, logged as `shim: re-offering … untranslated`, and the device
+puts each one back on its next sync. Nothing is deleted, and the copies stay where they are.
+In 1.4.2 that only happened for a sync that was read to its end; see the section above.
 
 Unverified: this was reproduced against the app's own schema in the test suite, not yet on
 a device. If the error persists after a restart and a sync, the `re-offering` lines say

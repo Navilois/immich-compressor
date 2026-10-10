@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The re-offer of a displaced replacement now reaches the device that needs it.** 1.4.2
+  made the touch only after a sync response had been read to its end, and the device stuck
+  on `updateAssetOcrV1 … FOREIGN KEY constraint failed` never gets there: its batch fails,
+  it drops the connection, and Starlette cancels the rest of the response, including
+  everything the shim does after the last line. Reproduced against a real uvicorn with a
+  client that hangs up after the first line: no touch on 1.4.2, the touch with this change.
+  The re-offer now runs before each sync request is forwarded, which also puts the
+  replacement inside the window of that same response, so the device gets it back in one
+  sync instead of two. Not yet verified on a device.
+
 ## [1.4.2] - 2026-10-10
 
 ### Fixed
