@@ -11,6 +11,27 @@ and minor releases arrive that way and a breaking change never does. The
 
 Job state lives in a volume and survives. Schema changes are applied automatically on open.
 
+## Unreleased
+
+### Webhooks for a type that is not enabled are refused, not queued
+
+If the workflow's type filter lets through a type that `behavior.enabled_types` does not
+contain — the default `enabled_types: [VIDEO]` with a workflow that also allows `IMAGE` is
+the usual case — those webhooks are now refused at ingest as `wrong_type` and leave no job
+behind. Before, they were accepted and queued, and no worker lane ever claimed them.
+
+Nothing to configure. Two things are worth checking once:
+
+- **Make the filter and `enabled_types` agree**, as
+  [workflow-setup.md](workflow-setup.md#video-only) describes. A steady stream of
+  `refused … (wrong_type)` WARNING lines means they still disagree.
+- **Jobs an earlier version stranded stay `queued`.** The upgrade does not touch them. Find
+  them with `immich-compressor jobs --status queued --json`: a job whose `asset_type` is not
+  in `enabled_types` is one of them. They are harmless while the type stays disabled, apart
+  from the `queued` count in `report` and `/stats`. Enabling the type later makes its lane
+  work through them, and the freshness gate does not run again for a job that already
+  exists — so an old stranded row is processed whatever its age.
+
 ## 1.4.0 → 1.4.1
 
 ### If a device's sync stopped advancing, this is the upgrade that fixes it

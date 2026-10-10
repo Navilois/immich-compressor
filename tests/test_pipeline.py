@@ -1097,6 +1097,37 @@ async def test_a_refused_webhook_leaves_the_asset_reachable_by_backfill(
         assert await store.enqueue(asset_id, {**old, "trigger": "Backfill"}, delay_seconds=0) is True
 
 
+async def test_a_webhook_for_a_disabled_type_is_refused_and_leaves_nothing_behind(
+    settings: Settings, image_payload_raw: dict[str, Any]
+) -> None:
+    """Reproduced against Immich v3.3.1 with `enabled_types: [VIDEO]` and a workflow that
+    let stills through: the IMAGE webhook was answered `accepted: true`, queued, and then
+    sat in `queued` with `attempts: 0` for good, because no lane exists to claim it.
+
+    Refused instead of skipped: a `skipped` row would make the asset unreachable by
+    `backfill` once the operator does enable the type.
+    """
+    headers = {"X-Compressor-Token": "test-token"}
+    settings.behavior.surge_threshold = 1
+    with _test_client(settings) as client:
+        for index in range(3):
+            response = client.post(
+                "/webhook", json=_fresh(image_payload_raw, f"still-{index}"), headers=headers
+            )
+            assert response.status_code == 202
+            body = response.json()
+            assert body["accepted"] is False
+            assert body["reason"] == "wrong_type"
+
+        # No row, so nothing in `/stats` or `report`, and nothing towards the breaker.
+        assert client.get("/jobs").json()["count"] == 0
+        assert client.get("/stats").json()["paused"] is None
+
+    async with JobStore(settings.database_path) as store:
+        backfilled = {**_fresh(image_payload_raw, "still-0"), "trigger": "Backfill"}
+        assert await store.enqueue("still-0", backfilled, delay_seconds=0) is True
+
+
 def _fresh(raw: dict[str, Any], asset_id: str) -> dict[str, Any]:
     """A brand-new upload with its own asset id, so each one is a distinct insert."""
     payload = aged(raw, hours=0)

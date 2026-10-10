@@ -274,6 +274,9 @@ class RejectReason(StrEnum):
     NO_CREATED_AT = "no_created_at"
     # The surge breaker has latched. Nothing is queued or processed until it is cleared.
     PAUSED = "paused"
+    # The asset type is not in `behavior.enabled_types`, so no worker lane exists to claim
+    # the job: queued, it would sit in `queued` until a restart that enables the type.
+    WRONG_TYPE = "wrong_type"
 
 
 class BackfillVerdict(StrEnum):
