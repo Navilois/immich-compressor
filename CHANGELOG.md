@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-10-10
+
 ### Fixed
 
 - **The re-offer of a displaced replacement now reaches the device that needs it.** 1.4.2
@@ -1110,7 +1112,8 @@ First working release, developed and verified against a live Immich v3.1.0 insta
 - Test suite: unit tests with mocked HTTP plus a `live`-marked end-to-end suite against a
   full Immich v3.1.0 stack (`docker-compose.test.yaml`).
 
-[Unreleased]: https://github.com/Navilois/immich-compressor/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/Navilois/immich-compressor/compare/v1.4.3...HEAD
+[1.4.3]: https://github.com/Navilois/immich-compressor/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/Navilois/immich-compressor/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/Navilois/immich-compressor/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/Navilois/immich-compressor/compare/v1.3.1...v1.4.0
