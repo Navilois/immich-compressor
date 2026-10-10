@@ -33,8 +33,13 @@ sudo apt-get install -y -qq ffmpeg curl
 
 if ! magick -version 2>/dev/null | grep -q 'ImageMagick 7'; then
   echo "==> ImageMagick 7 (AppImage -> /opt/imagemagick7)"
-  IM_TAG="$(curl -fsSL https://api.github.com/repos/ImageMagick/ImageMagick/releases/latest \
-    | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+  # The JSON goes to a file before grep sees it. `curl | grep -m1` is a race: grep exits
+  # at the first match and closes the pipe while curl is still writing the ~129 KB
+  # response, curl dies with exit 23 ("Failure writing output to destination"), and
+  # pipefail turns that into a failed script. Reproduced 3/3 on 2026-10-10.
+  curl -fsSL -o "$TMP/im-release.json" \
+    https://api.github.com/repos/ImageMagick/ImageMagick/releases/latest
+  IM_TAG="$(grep -m1 '"tag_name"' "$TMP/im-release.json" | cut -d'"' -f4)"
   curl -fsSL -o "$TMP/im.AppImage" \
     "https://github.com/ImageMagick/ImageMagick/releases/download/${IM_TAG}/ImageMagick-${IM_TAG}-gcc-x86_64.AppImage"
   chmod +x "$TMP/im.AppImage"
@@ -55,7 +60,9 @@ fi
 
 if ! exiftool -ver 2>/dev/null | grep -q '^13\.'; then
   echo "==> exiftool 13.x (-> /opt/exiftool)"
-  ET_TAG="$(curl -fsSL https://api.github.com/repos/exiftool/exiftool/tags | grep -m1 '"name"' | cut -d'"' -f4)"
+  # Same race as the IM7 lookup above: download first, then grep the file.
+  curl -fsSL -o "$TMP/exiftool-tags.json" https://api.github.com/repos/exiftool/exiftool/tags
+  ET_TAG="$(grep -m1 '"name"' "$TMP/exiftool-tags.json" | cut -d'"' -f4)"
   curl -fsSL -o "$TMP/exiftool.tar.gz" \
     "https://github.com/exiftool/exiftool/archive/refs/tags/${ET_TAG}.tar.gz"
   sudo rm -rf /opt/exiftool
